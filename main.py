@@ -22,6 +22,7 @@ APP_DIR = Path.home() / "CoCFarmBot"
 CONFIG_PATH = APP_DIR / "config-v2.json"
 LOG_PATH = APP_DIR / "bot.log"
 CAPTURE_PATH = APP_DIR / "last_capture.png"
+ACCOUNT_SNAPSHOT_PATH = APP_DIR / "account_snapshot.json"
 USER32 = ctypes.WinDLL("user32", use_last_error=True)
 GDI32 = ctypes.WinDLL("gdi32", use_last_error=True)
 PW_RENDERFULLCONTENT, WM_LBUTTONDOWN, WM_LBUTTONUP, MK_LBUTTON = 2, 0x0201, 0x0202, 1
@@ -72,6 +73,30 @@ class Settings:
     delay_between_dragons_ms: int = 180
     poll_interval_seconds: int = 3
     dry_run: bool = True
+
+
+@dataclass(frozen=True)
+class AccountSnapshot:
+    account_name: str | None
+    level: int | None
+    gold: int | None
+    elixir: int | None
+    dark_elixir: int | None
+    gems: int | None
+    laboratory_builders: str | None
+    builders: str | None
+    captured_at: float
+    raw: dict[str, str]
+
+
+# Zones relatives de l'interface du village Google Play Jeux PC. Elles sont
+# calculées depuis la capture de la fenêtre, donc restent valides au redimensionnement.
+PROFILE_ROIS = {
+    "account_name": Roi(5.47, 0.93, 19.01, 7.41), "level": Roi(1.0, 0.7, 6.0, 9.5),
+    "laboratory_builders": Roi(33.333333333, 0, 45.3125, 9.259259259), "builders": Roi(44.0, 0, 58.0, 10.0),
+    "gold": Roi(82.03125, 1.851851852, 95.572916667, 6.944444444), "elixir": Roi(82.03125, 10.185185185, 95.833333333, 15.277777778),
+    "dark_elixir": Roi(85.9375, 17.592592593, 96.09375, 23.148148148), "gems": Roi(86.71875, 25, 95.833333333, 30.555555556),
+}
 
 
 def load_settings() -> Settings:
@@ -162,6 +187,50 @@ def read_number(image: Image.Image) -> int | None:
     finally: path.unlink(missing_ok=True)
 
 
+def read_text(image: Image.Image, scale: int = 5) -> str:
+    """OCR a local UI crop while keeping the raw reading for diagnostics."""
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as file: path = Path(file.name)
+    try:
+        image.resize((image.width * scale, image.height * scale)).save(path)
+        return asyncio.run(_ocr_file(str(path))).strip()
+    finally: path.unlink(missing_ok=True)
+
+
+def parse_clash_number(text: str) -> int | None:
+    # Windows OCR occasionally reads the stylised level digits as letters.
+    digits = re.sub(r"[^0-9]", "", text.translate(str.maketrans({"O": "0", "o": "0", "I": "1", "l": "1", "i": "1", "Z": "7", "z": "7", "S": "5", "s": "5", "B": "8", "E": "3"})))
+    return int(digits) if digits else None
+
+
+def parse_worker_ratio(text: str) -> str | None:
+    normal = text.translate(str.maketrans({"S": "5", "s": "5", "O": "0", "o": "0", "I": "1", "l": "1", "i": "1", "Z": "7", "z": "7", "T": "/", "t": "/"}))
+    parts = re.findall(r"\d+", normal)
+    if "/" in normal and len(parts) >= 2:
+        return f"{parts[0][0]}/{parts[-1][-1]}"
+    digits = "".join(parts)
+    # The slash is sometimes recognised as a second copy of the left digit:
+    # e.g. the visible 1/2 becomes the OCR string 112.
+    if len(digits) == 3 and (digits[0] == digits[1] or digits[0] == digits[2]): return f"{digits[0]}/{digits[2]}"
+    return None
+
+
+def read_account_snapshot(image: Image.Image) -> AccountSnapshot:
+    raw = {key: read_text(crop_percent(image, roi)) for key, roi in PROFILE_ROIS.items()}
+    # On the white worker counter, Windows OCR needs the surrounding top bar.
+    # Its usual `Sts` output maps to 5/5 through parse_worker_ratio().
+    if not raw["builders"]:
+        whole_top = read_text(image, scale=1)
+        match = re.search(r"\b[5Ss][Tt/][5Ss]\b", whole_top)
+        raw["builders"] = match.group(0) if match else ""
+    return AccountSnapshot(
+        account_name=raw["account_name"] or None, level=parse_clash_number(raw["level"]),
+        gold=parse_clash_number(raw["gold"]), elixir=parse_clash_number(raw["elixir"]),
+        dark_elixir=parse_clash_number(raw["dark_elixir"]), gems=parse_clash_number(raw["gems"]),
+        laboratory_builders=parse_worker_ratio(raw["laboratory_builders"]), builders=parse_worker_ratio(raw["builders"]),
+        captured_at=time.time(), raw=raw,
+    )
+
+
 class BotApp:
     def __init__(self):
         APP_DIR.mkdir(parents=True, exist_ok=True); logging.basicConfig(filename=LOG_PATH, level=logging.INFO, format="%(asctime)s %(message)s", encoding="utf-8")
@@ -185,7 +254,7 @@ class BotApp:
         ttk.Label(limits,text="Seuil or").pack(side="left"); ttk.Entry(limits,textvariable=self.min_gold,width=12).pack(side="left",padx=4); ttk.Label(limits,text="Seuil élixir").pack(side="left",padx=(12,0)); ttk.Entry(limits,textvariable=self.min_elixir,width=12).pack(side="left",padx=4); ttk.Checkbutton(limits,text="Or ET élixir",variable=self.and_rule).pack(side="left",padx=12); ttk.Checkbutton(limits,text="Simulation",variable=self.dry_run).pack(side="left")
         self.canvas=__import__("tkinter").Canvas(root,background="#1d1d1d",highlightthickness=0); self.canvas.grid(row=8,column=0,columnspan=3,sticky="nsew"); self.canvas.bind("<ButtonPress-1>",self.press); self.canvas.bind("<B1-Motion>",self.drag); self.canvas.bind("<ButtonRelease-1>",self.release)
         actions=ttk.Frame(root); actions.grid(row=9,column=0,columnspan=3,pady=8)
-        for text,command in (("Tester l'OCR",self.test_ocr),("Enregistrer",self.persist),("Démarrer",self.start),("Arrêter",self.stop)): ttk.Button(actions,text=text,command=command).pack(side="left",padx=3)
+        for text,command in (("Relever le profil",self.scan_profile),("Tester l'OCR",self.test_ocr),("Enregistrer",self.persist),("Démarrer",self.start),("Arrêter",self.stop)): ttk.Button(actions,text=text,command=command).pack(side="left",padx=3)
         ttk.Label(root,textvariable=self.status).grid(row=10,column=0,columnspan=3,sticky="w"); self.log=__import__("tkinter").Text(root,height=7,state="disabled"); self.log.grid(row=11,column=0,columnspan=3,sticky="nsew",pady=(6,0)); self.refresh()
 
     def refresh(self):
@@ -239,6 +308,24 @@ class BotApp:
     def clear_dragons(self): self.settings.dragon_points=[];self.points_text.set(self._points_text());self.draw()
     def _select_text(self): return f"{self.settings.dragon_select_point[0]:.1f} %, {self.settings.dragon_select_point[1]:.1f} %" if self.settings.dragon_select_point else "À sélectionner"
     def _points_text(self): return f"{len(self.settings.dragon_points)} point(s)" if self.settings.dragon_points else "À placer"
+
+    def scan_profile(self):
+        window = WindowDriver.resolve(self.window_title.get())
+        if not window: self.write("Fenêtre Clash introuvable."); return
+        try:
+            image = WindowDriver.capture(window); self.image = image; self.window_title.set(window.title); self.draw()
+            snapshot = read_account_snapshot(image); APP_DIR.mkdir(parents=True, exist_ok=True)
+            ACCOUNT_SNAPSHOT_PATH.write_text(json.dumps(asdict(snapshot), indent=2, ensure_ascii=False), encoding="utf-8")
+            values = [
+                f"Pseudo : {snapshot.account_name or '?'}", f"Niveau : {snapshot.level or '?'}",
+                f"Or : {snapshot.gold:,}" if snapshot.gold is not None else "Or : ?",
+                f"Élixir : {snapshot.elixir:,}" if snapshot.elixir is not None else "Élixir : ?",
+                f"Élixir noir : {snapshot.dark_elixir:,}" if snapshot.dark_elixir is not None else "Élixir noir : ?",
+                f"Gemmes : {snapshot.gems:,}" if snapshot.gems is not None else "Gemmes : ?",
+                f"Ouvriers laboratoire : {snapshot.laboratory_builders or '?'}", f"Ouvriers : {snapshot.builders or '?'}",
+            ]
+            self.write(" | ".join(values)); self.write(f"Relevé enregistré : {ACCOUNT_SNAPSHOT_PATH}")
+        except Exception as exc: self.write(f"Relevé du profil impossible : {exc}")
 
     def persist(self):
         try:
@@ -296,6 +383,7 @@ class BotApp:
 
 def self_test():
     assert Roi(1,2,3,4).valid() and not Roi(3,2,1,4).valid()
+    assert parse_clash_number("loz") == 107 and parse_worker_ratio("112") == "1/2" and parse_worker_ratio("SIS") == "5/5"
     image=Image.new("RGB",(600,150),"white");ImageDraw.Draw(image).text((12,12),"123456",fill="black",font=ImageFont.truetype("C:/Windows/Fonts/arial.ttf",90));assert read_number(image)==123456;print("Self-test passed")
 
 if __name__ == "__main__":
