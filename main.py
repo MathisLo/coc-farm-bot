@@ -67,6 +67,7 @@ class Settings:
     min_gold: int = 500000
     min_elixir: int = 500000
     use_and_rule: bool = True
+    dragon_select_point: list[float] | None = None
     dragon_points: list[list[float]] = field(default_factory=list)
     delay_between_dragons_ms: int = 180
     poll_interval_seconds: int = 3
@@ -167,24 +168,25 @@ class BotApp:
         self.settings = load_settings(); self.root = Tk(); self.root.title("CoC Farm Bot — V1 calibrable"); self.root.geometry("1040x810")
         self.events = queue.Queue(); self.stop_event = threading.Event(); self.worker = None; self.image = None; self.photo = None; self.origin = (0, 0); self.preview_size = (1, 1); self.drag_start = None
         self.mode = StringVar(value="Or"); self.window_title = StringVar(value=self.settings.window_title); self.min_gold = StringVar(value=str(self.settings.min_gold)); self.min_elixir = StringVar(value=str(self.settings.min_elixir)); self.and_rule = BooleanVar(value=self.settings.use_and_rule); self.dry_run = BooleanVar(value=self.settings.dry_run)
-        self.gold_text = StringVar(value=self.settings.gold_roi.text() if self.settings.gold_roi.valid() else "À sélectionner"); self.elixir_text = StringVar(value=self.settings.elixir_roi.text() if self.settings.elixir_roi.valid() else "À sélectionner"); self.points_text = StringVar(value=self._points_text()); self.status = StringVar(value="Capture la fenêtre Clash puis calibre les zones.")
+        self.gold_text = StringVar(value=self.settings.gold_roi.text() if self.settings.gold_roi.valid() else "À sélectionner"); self.elixir_text = StringVar(value=self.settings.elixir_roi.text() if self.settings.elixir_roi.valid() else "À sélectionner"); self.select_text = StringVar(value=self._select_text()); self.points_text = StringVar(value=self._points_text()); self.status = StringVar(value="Capture la fenêtre Clash puis calibre les zones.")
         self._build(); self._pump()
 
     def _build(self):
-        root = ttk.Frame(self.root, padding=12); root.pack(fill="both", expand=True); root.columnconfigure(1, weight=1); root.rowconfigure(7, weight=1)
+        root = ttk.Frame(self.root, padding=12); root.pack(fill="both", expand=True); root.columnconfigure(1, weight=1); root.rowconfigure(8, weight=1)
         ttk.Label(root, text="Fenêtre Clash").grid(row=0,column=0,sticky="w"); self.windows = ttk.Combobox(root,textvariable=self.window_title,width=70); self.windows.grid(row=0,column=1,sticky="ew",padx=6); ttk.Button(root,text="Détecter",command=self.refresh).grid(row=0,column=2); ttk.Button(root,text="Capturer",command=self.capture).grid(row=1,column=1,sticky="w",pady=8)
         box = ttk.LabelFrame(root,text="Calibration sur l'aperçu",padding=8); box.grid(row=2,column=0,columnspan=3,sticky="ew")
-        for text,value in (("Tracer zone Or","Or"),("Tracer zone Élixir","Élixir"),("Ajouter un point dragon","Dragon")): ttk.Radiobutton(box,text=text,variable=self.mode,value=value).pack(side="left",padx=6)
+        for text,value in (("Tracer zone Or","Or"),("Tracer zone Élixir","Élixir"),("Choisir le bouton dragons","Sélection"),("Ajouter un point dragon","Dragon")): ttk.Radiobutton(box,text=text,variable=self.mode,value=value).pack(side="left",padx=6)
         ttk.Button(box,text="Effacer dragons",command=self.clear_dragons).pack(side="right")
         ttk.Label(root,text="Zone Or").grid(row=3,column=0,sticky="w"); ttk.Label(root,textvariable=self.gold_text).grid(row=3,column=1,sticky="w")
         ttk.Label(root,text="Zone Élixir").grid(row=4,column=0,sticky="w"); ttk.Label(root,textvariable=self.elixir_text).grid(row=4,column=1,sticky="w")
-        ttk.Label(root,text="Points dragons").grid(row=5,column=0,sticky="w"); ttk.Label(root,textvariable=self.points_text).grid(row=5,column=1,sticky="w")
-        limits=ttk.Frame(root); limits.grid(row=6,column=0,columnspan=3,sticky="ew",pady=8)
+        ttk.Label(root,text="Bouton dragons").grid(row=5,column=0,sticky="w"); ttk.Label(root,textvariable=self.select_text).grid(row=5,column=1,sticky="w")
+        ttk.Label(root,text="Points dragons").grid(row=6,column=0,sticky="w"); ttk.Label(root,textvariable=self.points_text).grid(row=6,column=1,sticky="w")
+        limits=ttk.Frame(root); limits.grid(row=7,column=0,columnspan=3,sticky="ew",pady=8)
         ttk.Label(limits,text="Seuil or").pack(side="left"); ttk.Entry(limits,textvariable=self.min_gold,width=12).pack(side="left",padx=4); ttk.Label(limits,text="Seuil élixir").pack(side="left",padx=(12,0)); ttk.Entry(limits,textvariable=self.min_elixir,width=12).pack(side="left",padx=4); ttk.Checkbutton(limits,text="Or ET élixir",variable=self.and_rule).pack(side="left",padx=12); ttk.Checkbutton(limits,text="Simulation",variable=self.dry_run).pack(side="left")
-        self.canvas=__import__("tkinter").Canvas(root,background="#1d1d1d",highlightthickness=0); self.canvas.grid(row=7,column=0,columnspan=3,sticky="nsew"); self.canvas.bind("<ButtonPress-1>",self.press); self.canvas.bind("<B1-Motion>",self.drag); self.canvas.bind("<ButtonRelease-1>",self.release)
-        actions=ttk.Frame(root); actions.grid(row=8,column=0,columnspan=3,pady=8)
+        self.canvas=__import__("tkinter").Canvas(root,background="#1d1d1d",highlightthickness=0); self.canvas.grid(row=8,column=0,columnspan=3,sticky="nsew"); self.canvas.bind("<ButtonPress-1>",self.press); self.canvas.bind("<B1-Motion>",self.drag); self.canvas.bind("<ButtonRelease-1>",self.release)
+        actions=ttk.Frame(root); actions.grid(row=9,column=0,columnspan=3,pady=8)
         for text,command in (("Tester l'OCR",self.test_ocr),("Enregistrer",self.persist),("Démarrer",self.start),("Arrêter",self.stop)): ttk.Button(actions,text=text,command=command).pack(side="left",padx=3)
-        ttk.Label(root,textvariable=self.status).grid(row=9,column=0,columnspan=3,sticky="w"); self.log=__import__("tkinter").Text(root,height=7,state="disabled"); self.log.grid(row=10,column=0,columnspan=3,sticky="nsew",pady=(6,0)); self.refresh()
+        ttk.Label(root,textvariable=self.status).grid(row=10,column=0,columnspan=3,sticky="w"); self.log=__import__("tkinter").Text(root,height=7,state="disabled"); self.log.grid(row=11,column=0,columnspan=3,sticky="nsew",pady=(6,0)); self.refresh()
 
     def refresh(self):
         windows=WindowDriver.list_windows(); self.windows["values"]=[w.title for w in windows]
@@ -205,6 +207,8 @@ class BotApp:
         self.draw_roi(self.settings.gold_roi,"#e6b800","Or"); self.draw_roi(self.settings.elixir_roi,"#bb50ff","Élixir")
         for i,(x,y) in enumerate(self.settings.dragon_points,1):
             px,py=self.to_canvas(x,y); self.canvas.create_oval(px-6,py-6,px+6,py+6,outline="#4cd3ff",width=2); self.canvas.create_text(px+10,py,text=str(i),fill="#4cd3ff",anchor="w")
+        if self.settings.dragon_select_point:
+            px,py=self.to_canvas(*self.settings.dragon_select_point); self.canvas.create_rectangle(px-7,py-7,px+7,py+7,outline="#ff8c42",width=2); self.canvas.create_text(px+10,py,text="D",fill="#ff8c42",anchor="w")
 
     def draw_roi(self,roi,color,label):
         if roi.valid():
@@ -218,7 +222,8 @@ class BotApp:
     def press(self,event):
         point=self.to_percent(event.x,event.y)
         if point is None or self.image is None:return
-        if self.mode.get()=="Dragon": self.settings.dragon_points.append([round(point[0],2),round(point[1],2)]); self.points_text.set(self._points_text()); self.draw()
+        if self.mode.get()=="Sélection": self.settings.dragon_select_point=[round(point[0],2),round(point[1],2)]; self.select_text.set(self._select_text()); self.draw()
+        elif self.mode.get()=="Dragon": self.settings.dragon_points.append([round(point[0],2),round(point[1],2)]); self.points_text.set(self._points_text()); self.draw()
         else:self.drag_start=(event.x,event.y)
     def drag(self,event):
         if self.drag_start: self.draw(); self.canvas.create_rectangle(*self.drag_start,event.x,event.y,outline="#fff",dash=(4,3),width=2)
@@ -232,6 +237,7 @@ class BotApp:
         else:self.settings.elixir_roi=roi;self.elixir_text.set(roi.text())
         self.draw()
     def clear_dragons(self): self.settings.dragon_points=[];self.points_text.set(self._points_text());self.draw()
+    def _select_text(self): return f"{self.settings.dragon_select_point[0]:.1f} %, {self.settings.dragon_select_point[1]:.1f} %" if self.settings.dragon_select_point else "À sélectionner"
     def _points_text(self): return f"{len(self.settings.dragon_points)} point(s)" if self.settings.dragon_points else "À placer"
 
     def persist(self):
@@ -240,6 +246,7 @@ class BotApp:
         except ValueError: messagebox.showerror("Seuil invalide","Les seuils doivent être des nombres entiers.");return False
     def valid_run(self):
         if not (self.settings.gold_roi.valid() and self.settings.elixir_roi.valid()):self.write("Calibre Or et Élixir.");return False
+        if not self.settings.dragon_select_point:self.write("Sélectionne le bouton des électro-dragons.");return False
         if not self.settings.dragon_points:self.write("Place au moins un point dragon.");return False
         return True
     def test_ocr(self):
@@ -262,6 +269,11 @@ class BotApp:
                 else:
                     accepted=(gold>=self.settings.min_gold and elixir>=self.settings.min_elixir) if self.settings.use_and_rule else (gold>=self.settings.min_gold or elixir>=self.settings.min_elixir);self.events.put(f"Butin : or {gold:,}, élixir {elixir:,} → {'attaque' if accepted else 'attente'}.")
                     if accepted:
+                        sx,sy=self.settings.dragon_select_point
+                        if self.settings.dry_run:self.events.put(f"Simulation : sélection dragons {sx:.1f} %, {sy:.1f} %")
+                        elif not WindowDriver.click_percent(window,sx,sy):raise RuntimeError("Clic de sélection dragons refusé.")
+                        else:self.events.put("Électro-dragons sélectionnés.")
+                        time.sleep(self.settings.delay_between_dragons_ms/1000)
                         for x,y in self.settings.dragon_points:
                             if self.stop_event.is_set():break
                             if self.settings.dry_run:self.events.put(f"Simulation : dragon {x:.1f} %, {y:.1f} %")

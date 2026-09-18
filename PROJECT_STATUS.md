@@ -2,7 +2,7 @@
 
 ## Version actuelle
 
-La V1 est une application Windows locale inspirée de la structure de `nullmacro_src`. Elle détecte Clash of Clans automatiquement, capture la fenêtre entière, permet de calibrer les zones de butin et les points de déploiement directement sur l'aperçu, puis lit les deux ressources avec l'OCR de Windows. La simulation est activée par défaut.
+La V1 est une application Windows locale inspirée de la structure de `nullmacro_src`. Elle détecte Clash of Clans automatiquement, capture la fenêtre entière, permet de calibrer les zones de butin, l'icône des électro-dragons et les points de déploiement directement sur l'aperçu, puis lit les deux ressources avec l'OCR de Windows. La simulation est activée par défaut.
 
 ## Vérifié le 18 septembre 2026
 
