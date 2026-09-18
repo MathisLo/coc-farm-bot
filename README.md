@@ -12,6 +12,10 @@ Choisis la fenêtre Clash of Clans, clique sur **Capturer**, puis calibre l'appl
 
 Le mode **Simulation** est actif par défaut et ne clique jamais. Utilise **Tester l'OCR** : les deux valeurs doivent être correctes avant de le désactiver. L'application ne déplace jamais le curseur Windows : les clics sont envoyés à la fenêtre Clash. Le bouton Arrêter interrompt la boucle immédiatement.
 
+## Recherche et attaque électro-dragons
+
+Le bouton **Lancer farm** ouvre le parcours multijoueur, lit l'or et l'élixir disponibles sur chaque base adverse, puis passe à la suivante tant que les seuils configurés ne sont pas atteints. Une base acceptée sélectionne la case des électro-dragons et les répartit sur huit points de pose. Garde **Simulation** active pour vérifier les décisions dans le journal avant d’autoriser les clics.
+
 ## Relever le compte
 
 Depuis l'écran de village, clique sur **Relever le profil**. L'application lit le pseudo, le niveau, l'or, l'élixir, l'élixir noir, les gemmes, les ouvriers de laboratoire et les ouvriers. Le dernier relevé est enregistré dans `%USERPROFILE%\CoCFarmBot\account_snapshot.json` avec les lectures OCR brutes pour diagnostic.
