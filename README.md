@@ -18,6 +18,10 @@ Le bouton **Lancer farm** ouvre le parcours multijoueur, lit l'or et l'élixir d
 
 La **Marge %** réduit les deux seuils de ce pourcentage. Par exemple, avec 500 000 et 5 %, une base est acceptée à partir de 475 000 or et 475 000 élixir. Le mode réel est désormais le réglage initial. Coche **Mode simulation (sans pose)** seulement pour vérifier le filtre sans envoyer les électro-dragons.
 
+## Composition et cycle
+
+Règle le nombre d’**Électro-dragons** et de **Dragons** dans l’application. Le bot limite chaque catégorie au nombre indiqué, puis pose les trois héros cochés dans la barre. Avec **1 rempart entre les attaques**, il ouvre les cinq ouvriers, cherche un rempart et ne confirme qu’une seule amélioration disponible. Avec **Enchaîner les attaques**, il attend l’écran de résultat, revient au village et reprend ce cycle.
+
 ## Relever le compte
 
 Depuis l'écran de village, clique sur **Relever le profil**. L'application lit le pseudo, le niveau, l'or, l'élixir, l'élixir noir, les gemmes, les ouvriers de laboratoire et les ouvriers. Le dernier relevé est enregistré dans `%USERPROFILE%\CoCFarmBot\account_snapshot.json` avec les lectures OCR brutes pour diagnostic.
@@ -28,7 +32,7 @@ Depuis l'écran de village, clique sur **Relever le profil**. L'application lit 
 .\BUILD.ps1
 ```
 
-Le fichier exécutable est créé dans `dist\CoCFarmBot-V1_7.exe`.
+Le fichier exécutable est créé dans `dist\CoCFarmBot-V1_8.exe`.
 
 ## Limites de cette V1
 

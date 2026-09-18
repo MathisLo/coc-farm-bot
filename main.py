@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from tkinter import BooleanVar, StringVar, Tk, ttk, messagebox
@@ -62,7 +63,7 @@ class Roi:
 
 @dataclass
 class Settings:
-    version: int = 3
+    version: int = 4
     window_title: str = ""
     gold_roi: Roi = field(default_factory=Roi)
     elixir_roi: Roi = field(default_factory=Roi)
@@ -70,6 +71,11 @@ class Settings:
     min_elixir: int = 500000
     loot_margin_percent: float = 5.0
     use_and_rule: bool = True
+    electrodragon_count: int = 8
+    dragon_count: int = 1
+    deploy_heroes: bool = True
+    upgrade_wall_between_attacks: bool = True
+    chain_attacks: bool = True
     dragon_select_point: list[float] | None = None
     dragon_points: list[list[float]] = field(default_factory=list)
     delay_between_dragons_ms: int = 180
@@ -115,6 +121,13 @@ FIND_MATCH_BUTTON = (14.2, 70.4)
 START_SEARCH_BUTTON = (84.0, 85.2)
 NEXT_BASE_BUTTON = (91.9, 75.8)
 ELECTRODRAGON_SLOT = (23.2, 92.5)
+DRAGON_SLOT = (17.0, 92.5)
+HERO_SLOTS = ((36.7, 92.5), (42.5, 92.5), (48.0, 92.5))
+HERO_DROP_POINTS = ((15.0, 40.0), (85.0, 40.0), (15.0, 49.0))
+BUILDERS_BUTTON = (49.0, 4.5)
+WALL_LIST_ITEM = (47.5, 54.0)
+WALL_GOLD_UPGRADE_BUTTON = (58.3, 76.5)
+WALL_CONFIRM_BUTTON = (70.0, 87.0)
 # Positions extérieures, réparties de chaque côté du terrain. Elles évitent
 # le carré central de la base : Clash n'autorise la pose des troupes que sur
 # le pourtour jouable. Les points personnalisés ne sont employés que s'ils
@@ -137,6 +150,10 @@ def load_settings() -> Settings:
         # requested for V1.7 while retaining the explicit checkbox.
         if data.get("version", 0) < 3:
             data["version"] = 3; data["dry_run"] = False; data.setdefault("loot_margin_percent", 5.0)
+        if data.get("version", 0) < 4:
+            data["version"] = 4
+            for key, value in (("electrodragon_count", 8), ("dragon_count", 1), ("deploy_heroes", True), ("upgrade_wall_between_attacks", True), ("chain_attacks", True)):
+                data.setdefault(key, value)
         data["gold_roi"] = Roi(**data.get("gold_roi", {})); data["elixir_roi"] = Roi(**data.get("elixir_roi", {}))
         return Settings(**data)
     except (OSError, TypeError, ValueError): return Settings()
@@ -171,6 +188,26 @@ def loot_is_accepted(gold: int, elixir: int, settings: Settings) -> tuple[bool, 
     elixir_minimum = effective_minimum(settings.min_elixir, settings.loot_margin_percent)
     accepted = (gold >= gold_minimum and elixir >= elixir_minimum) if settings.use_and_rule else (gold >= gold_minimum or elixir >= elixir_minimum)
     return accepted, gold_minimum, elixir_minimum
+
+
+def repeated_points(points: tuple[tuple[float, float], ...] | list[tuple[float, float]], count: int) -> list[tuple[float, float]]:
+    """Spread a configured troop count over the known valid perimeter points."""
+    return [points[index % len(points)] for index in range(max(0, count))] if points else []
+
+
+def normalized_screen_text(image: Image.Image) -> str:
+    raw = read_text(image, scale=1).casefold().translate(str.maketrans({"0": "o", "1": "i", "3": "e", "4": "a", "5": "s"}))
+    return re.sub(r"[^a-z0-9]", "", unicodedata.normalize("NFKD", raw).encode("ascii", "ignore").decode("ascii"))
+
+
+def has_screen_text(image: Image.Image, *needles: str) -> bool:
+    text = normalized_screen_text(image)
+    return any((token := re.sub(r"[^a-z0-9]", "", unicodedata.normalize("NFKD", needle.casefold()).encode("ascii", "ignore").decode("ascii"))) in text or token[:max(4, len(token)-3)] in text for needle in needles)
+
+
+def has_all_screen_text(image: Image.Image, *needles: str) -> bool:
+    text = normalized_screen_text(image)
+    return all((token := re.sub(r"[^a-z0-9]", "", unicodedata.normalize("NFKD", needle.casefold()).encode("ascii", "ignore").decode("ascii"))) in text or token[:max(4, len(token)-3)] in text for needle in needles)
 
 
 @dataclass(frozen=True)
@@ -316,14 +353,14 @@ def enemy_loot_screen_ready(image: Image.Image) -> bool:
 class BotApp:
     def __init__(self):
         APP_DIR.mkdir(parents=True, exist_ok=True); logging.basicConfig(filename=LOG_PATH, level=logging.INFO, format="%(asctime)s %(message)s", encoding="utf-8")
-        self.settings = load_settings(); self.root = Tk(); self.root.title("CoC Farm Bot — V1 calibrable"); self.root.geometry("1040x810")
+        self.settings = load_settings(); self.root = Tk(); self.root.title("CoC Farm Bot — V1 calibrable"); self.root.geometry("1040x860")
         self.events = queue.Queue(); self.stop_event = threading.Event(); self.worker = None; self.image = None; self.photo = None; self.origin = (0, 0); self.preview_size = (1, 1); self.drag_start = None
-        self.mode = StringVar(value="Or"); self.window_title = StringVar(value=self.settings.window_title); self.min_gold = StringVar(value=str(self.settings.min_gold)); self.min_elixir = StringVar(value=str(self.settings.min_elixir)); self.loot_margin = StringVar(value=str(self.settings.loot_margin_percent)); self.and_rule = BooleanVar(value=self.settings.use_and_rule); self.dry_run = BooleanVar(value=self.settings.dry_run)
+        self.mode = StringVar(value="Or"); self.window_title = StringVar(value=self.settings.window_title); self.min_gold = StringVar(value=str(self.settings.min_gold)); self.min_elixir = StringVar(value=str(self.settings.min_elixir)); self.loot_margin = StringVar(value=str(self.settings.loot_margin_percent)); self.electrodragon_count = StringVar(value=str(self.settings.electrodragon_count)); self.dragon_count = StringVar(value=str(self.settings.dragon_count)); self.and_rule = BooleanVar(value=self.settings.use_and_rule); self.dry_run = BooleanVar(value=self.settings.dry_run); self.deploy_heroes = BooleanVar(value=self.settings.deploy_heroes); self.upgrade_wall = BooleanVar(value=self.settings.upgrade_wall_between_attacks); self.chain_attacks = BooleanVar(value=self.settings.chain_attacks)
         self.gold_text = StringVar(value=self.settings.gold_roi.text() if self.settings.gold_roi.valid() else "À sélectionner"); self.elixir_text = StringVar(value=self.settings.elixir_roi.text() if self.settings.elixir_roi.valid() else "À sélectionner"); self.select_text = StringVar(value=self._select_text()); self.points_text = StringVar(value=self._points_text()); self.status = StringVar(value="Capture la fenêtre Clash puis calibre les zones.")
         self._build(); self._pump()
 
     def _build(self):
-        root = ttk.Frame(self.root, padding=12); root.pack(fill="both", expand=True); root.columnconfigure(1, weight=1); root.rowconfigure(8, weight=1)
+        root = ttk.Frame(self.root, padding=12); root.pack(fill="both", expand=True); root.columnconfigure(1, weight=1); root.rowconfigure(9, weight=1)
         ttk.Label(root, text="Fenêtre Clash").grid(row=0,column=0,sticky="w"); self.windows = ttk.Combobox(root,textvariable=self.window_title,width=70); self.windows.grid(row=0,column=1,sticky="ew",padx=6); ttk.Button(root,text="Détecter",command=self.refresh).grid(row=0,column=2); ttk.Button(root,text="Capturer",command=self.capture).grid(row=1,column=1,sticky="w",pady=8)
         box = ttk.LabelFrame(root,text="Calibration sur l'aperçu",padding=8); box.grid(row=2,column=0,columnspan=3,sticky="ew")
         for text,value in (("Tracer zone Or","Or"),("Tracer zone Élixir","Élixir"),("Choisir le bouton dragons","Sélection"),("Ajouter un point dragon","Dragon")): ttk.Radiobutton(box,text=text,variable=self.mode,value=value).pack(side="left",padx=6)
@@ -334,10 +371,12 @@ class BotApp:
         ttk.Label(root,text="Points dragons").grid(row=6,column=0,sticky="w"); ttk.Label(root,textvariable=self.points_text).grid(row=6,column=1,sticky="w")
         limits=ttk.Frame(root); limits.grid(row=7,column=0,columnspan=3,sticky="ew",pady=8)
         ttk.Label(limits,text="Seuil or").pack(side="left"); ttk.Entry(limits,textvariable=self.min_gold,width=10).pack(side="left",padx=4); ttk.Label(limits,text="Seuil élixir").pack(side="left",padx=(8,0)); ttk.Entry(limits,textvariable=self.min_elixir,width=10).pack(side="left",padx=4); ttk.Label(limits,text="Marge %").pack(side="left",padx=(8,0)); ttk.Entry(limits,textvariable=self.loot_margin,width=5).pack(side="left",padx=4); ttk.Checkbutton(limits,text="Or ET élixir",variable=self.and_rule).pack(side="left",padx=8); ttk.Checkbutton(limits,text="Mode simulation (sans pose)",variable=self.dry_run).pack(side="left",padx=8)
-        self.canvas=__import__("tkinter").Canvas(root,background="#1d1d1d",highlightthickness=0); self.canvas.grid(row=8,column=0,columnspan=3,sticky="nsew"); self.canvas.bind("<ButtonPress-1>",self.press); self.canvas.bind("<B1-Motion>",self.drag); self.canvas.bind("<ButtonRelease-1>",self.release)
-        actions=ttk.Frame(root); actions.grid(row=9,column=0,columnspan=3,pady=8)
+        composition=ttk.Frame(root); composition.grid(row=8,column=0,columnspan=3,sticky="ew",pady=(0,8))
+        ttk.Label(composition,text="Électro-dragons").pack(side="left"); ttk.Entry(composition,textvariable=self.electrodragon_count,width=4).pack(side="left",padx=4); ttk.Label(composition,text="Dragons").pack(side="left",padx=(10,0)); ttk.Entry(composition,textvariable=self.dragon_count,width=4).pack(side="left",padx=4); ttk.Checkbutton(composition,text="Poser les 3 héros",variable=self.deploy_heroes).pack(side="left",padx=10); ttk.Checkbutton(composition,text="1 rempart entre les attaques",variable=self.upgrade_wall).pack(side="left",padx=8); ttk.Checkbutton(composition,text="Enchaîner les attaques",variable=self.chain_attacks).pack(side="left",padx=8)
+        self.canvas=__import__("tkinter").Canvas(root,background="#1d1d1d",highlightthickness=0); self.canvas.grid(row=9,column=0,columnspan=3,sticky="nsew"); self.canvas.bind("<ButtonPress-1>",self.press); self.canvas.bind("<B1-Motion>",self.drag); self.canvas.bind("<ButtonRelease-1>",self.release)
+        actions=ttk.Frame(root); actions.grid(row=10,column=0,columnspan=3,pady=8)
         for text,command in (("Relever le profil",self.scan_profile),("Tester l'OCR",self.test_ocr),("Enregistrer",self.persist),("Tester calibration",self.start),("Lancer farm",self.start_farm),("Arrêter",self.stop)): ttk.Button(actions,text=text,command=command).pack(side="left",padx=3)
-        ttk.Label(root,textvariable=self.status).grid(row=10,column=0,columnspan=3,sticky="w"); self.log=__import__("tkinter").Text(root,height=7,state="disabled"); self.log.grid(row=11,column=0,columnspan=3,sticky="nsew",pady=(6,0)); self.refresh()
+        ttk.Label(root,textvariable=self.status).grid(row=11,column=0,columnspan=3,sticky="w"); self.log=__import__("tkinter").Text(root,height=7,state="disabled"); self.log.grid(row=12,column=0,columnspan=3,sticky="nsew",pady=(6,0)); self.refresh()
 
     def refresh(self):
         windows=WindowDriver.list_windows(); self.windows["values"]=[w.title for w in windows]
@@ -411,10 +450,10 @@ class BotApp:
 
     def persist(self):
         try:
-            self.settings.window_title=self.window_title.get();self.settings.min_gold=int(self.min_gold.get().replace(" ",""));self.settings.min_elixir=int(self.min_elixir.get().replace(" ",""));self.settings.loot_margin=float(self.loot_margin.get().replace(",","."));self.settings.use_and_rule=self.and_rule.get();self.settings.dry_run=self.dry_run.get()
-            if not 0 <= self.settings.loot_margin_percent <= 25: raise ValueError
+            self.settings.window_title=self.window_title.get();self.settings.min_gold=int(self.min_gold.get().replace(" ",""));self.settings.min_elixir=int(self.min_elixir.get().replace(" ",""));self.settings.loot_margin=float(self.loot_margin.get().replace(",","."));self.settings.electrodragon_count=int(self.electrodragon_count.get());self.settings.dragon_count=int(self.dragon_count.get());self.settings.use_and_rule=self.and_rule.get();self.settings.dry_run=self.dry_run.get();self.settings.deploy_heroes=self.deploy_heroes.get();self.settings.upgrade_wall_between_attacks=self.upgrade_wall.get();self.settings.chain_attacks=self.chain_attacks.get()
+            if not 0 <= self.settings.loot_margin_percent <= 25 or not 0 <= self.settings.electrodragon_count <= 50 or not 0 <= self.settings.dragon_count <= 50: raise ValueError
             save_settings(self.settings);self.write(f"Configuration enregistrée : attaque dès {effective_minimum(self.settings.min_gold, self.settings.loot_margin_percent):,} or / {effective_minimum(self.settings.min_elixir, self.settings.loot_margin_percent):,} élixir.");return True
-        except ValueError: messagebox.showerror("Valeur invalide","Les seuils doivent être entiers et la marge comprise entre 0 et 25 %.");return False
+        except ValueError: messagebox.showerror("Valeur invalide","Les seuils et troupes doivent être entiers ; la marge est comprise entre 0 et 25 %.");return False
     def valid_run(self):
         if not (self.settings.gold_roi.valid() and self.settings.elixir_roi.valid()):self.write("Calibre Or et Élixir.");return False
         if not self.settings.dragon_select_point:self.write("Sélectionne le bouton des électro-dragons.");return False
@@ -433,7 +472,7 @@ class BotApp:
         if self.worker and self.worker.is_alive(): return
         if not self.persist(): return
         if self.settings.dry_run: self.write("Simulation active : recherche et lecture uniquement, aucune pose ne sera envoyée.")
-        else: self.write("Mode réel actif : les 8 électro-dragons seront posés sur les flancs d'une base retenue.")
+        else: self.write(f"Mode réel actif : {self.settings.electrodragon_count} électro-dragons, {self.settings.dragon_count} dragons et {'3 héros' if self.settings.deploy_heroes else 'aucun héros'} sur une base retenue.")
         self.stop_event.clear(); self.worker=threading.Thread(target=self.farm_loop,daemon=True); self.worker.start(); self.write("Recherche automatique démarrée.")
     def stop(self):self.stop_event.set();self.write("Arrêt demandé.")
     def run_loop(self):
@@ -461,37 +500,83 @@ class BotApp:
             except Exception as exc:self.events.put(f"Boucle arrêtée : {exc}");self.stop_event.set()
             self.stop_event.wait(self.settings.poll_interval_seconds)
         self.events.put("Bot arrêté.")
+    def upgrade_wall_once(self, window):
+        """Use the five-builder list and confirm at most one available wall upgrade."""
+        if not self.settings.upgrade_wall_between_attacks or self.settings.dry_run: return False
+        if not WindowDriver.click_percent(window,*BUILDERS_BUTTON): raise RuntimeError("Clic ouvriers refusé.")
+        self.stop_event.wait(.7)
+        if self.stop_event.is_set() or not has_screen_text(WindowDriver.capture(window),"rempart"): return False
+        if not WindowDriver.click_percent(window,*WALL_LIST_ITEM): raise RuntimeError("Clic rempart refusé.")
+        self.stop_event.wait(.7)
+        if self.stop_event.is_set() or not has_screen_text(WindowDriver.capture(window),"rempart"): return False
+        if not WindowDriver.click_percent(window,*WALL_GOLD_UPGRADE_BUTTON): raise RuntimeError("Clic amélioration rempart refusé.")
+        self.stop_event.wait(.7)
+        if self.stop_event.is_set() or not has_all_screen_text(WindowDriver.capture(window),"confirmer","rempart"): return False
+        if not WindowDriver.click_percent(window,*WALL_CONFIRM_BUTTON): raise RuntimeError("Confirmation rempart refusée.")
+        self.stop_event.wait(.8); self.events.put("Un rempart a été amélioré entre les attaques."); return True
+
+    def deploy_unit(self, window, label, slot, points):
+        if not points: return
+        if not WindowDriver.click_percent(window,*slot): raise RuntimeError(f"Sélection {label} refusée.")
+        self.stop_event.wait(self.settings.delay_between_dragons_ms/1000)
+        for x,y in points:
+            if self.stop_event.is_set(): return
+            if not WindowDriver.click_percent(window,x,y): raise RuntimeError(f"Pose {label} refusée.")
+            self.events.put(f"{label} posé : {x:.1f} %, {y:.1f} %")
+            self.stop_event.wait(self.settings.delay_between_dragons_ms/1000)
+
+    def deploy_attack_composition(self, window):
+        perimeter=electrodragon_drop_points(self.settings)
+        self.deploy_unit(window,"Électro-dragon",ELECTRODRAGON_SLOT,repeated_points(perimeter,self.settings.electrodragon_count))
+        self.deploy_unit(window,"Dragon",DRAGON_SLOT,repeated_points(perimeter,self.settings.dragon_count))
+        if self.settings.deploy_heroes:
+            for number,(slot,point) in enumerate(zip(HERO_SLOTS,HERO_DROP_POINTS),1): self.deploy_unit(window,f"Héros {number}",slot,[point])
+        self.events.put("Composition d'attaque entièrement déployée.")
+
+    def wait_for_battle_return(self, window):
+        """Wait for Clash's result screen, return home, then allow the next cycle."""
+        deadline=time.monotonic()+240
+        self.events.put("Attente de la fin de bataille avant le prochain cycle.")
+        while not self.stop_event.is_set() and time.monotonic()<deadline:
+            image=WindowDriver.capture(window)
+            if has_all_screen_text(image,"attaquer","magasin"): return True
+            if has_screen_text(image,"retour au village","victoire","défaite"):
+                WindowDriver.click_percent(window,50.0,86.0); self.stop_event.wait(4)
+            else: self.stop_event.wait(3)
+        self.events.put("Fin de bataille non confirmée : cycle arrêté sans cliquer Terminer la bataille."); return False
+
+    def open_search(self, window):
+        for point,delay,label in ((ATTACK_HOME_BUTTON,1.0,"Ouverture du menu Attaquer"),(FIND_MATCH_BUTTON,1.0,"Ouverture de la sélection d'armée"),(START_SEARCH_BUTTON,6.0,"Recherche d'une base adverse")):
+            if not WindowDriver.click_percent(window,*point): raise RuntimeError(f"Clic refusé : {label}.")
+            self.events.put(label); self.stop_event.wait(delay)
+            if self.stop_event.is_set(): return False
+        return True
+
     def farm_loop(self):
-        """Open multiplayer, reject low loot, then select and deploy electro-dragons."""
+        """Prepare, find a valid base, deploy the configured army, then repeat."""
         try:
-            window=WindowDriver.resolve(self.settings.window_title)
-            if not window: raise RuntimeError("Fenêtre Clash introuvable.")
-            for point,delay,label in ((ATTACK_HOME_BUTTON,1.0,"Ouverture du menu Attaquer"),(FIND_MATCH_BUTTON,1.0,"Ouverture de la sélection d'armée"),(START_SEARCH_BUTTON,6.0,"Recherche d'une base adverse")):
-                if not WindowDriver.click_percent(window,*point): raise RuntimeError(f"Clic refusé : {label}.")
-                self.events.put(label); self.stop_event.wait(delay)
-                if self.stop_event.is_set(): return
             while not self.stop_event.is_set():
-                image=WindowDriver.capture(window); loot=read_enemy_loot(image)
-                if not enemy_loot_screen_ready(image):
-                    self.events.put("Attente de l'affichage complet de la base adverse."); self.stop_event.wait(.5); continue
-                if loot.gold is None or loot.elixir is None:
-                    self.events.put("Butin adverse illisible : aucune action envoyée."); self.stop_event.wait(1); continue
-                accepted,gold_minimum,elixir_minimum=loot_is_accepted(loot.gold,loot.elixir,self.settings)
-                self.events.put(f"Base adverse : or {loot.gold:,}, élixir {loot.elixir:,} | seuils avec marge : {gold_minimum:,}/{elixir_minimum:,} → {'attaque' if accepted else 'suivant'}.")
-                if not accepted:
+                window=WindowDriver.resolve(self.settings.window_title)
+                if not window: raise RuntimeError("Fenêtre Clash introuvable.")
+                self.upgrade_wall_once(window)
+                if self.stop_event.is_set() or not self.open_search(window): return
+                accepted=False
+                while not self.stop_event.is_set():
+                    image=WindowDriver.capture(window); loot=read_enemy_loot(image)
+                    if not enemy_loot_screen_ready(image):
+                        self.events.put("Attente de l'affichage complet de la base adverse."); self.stop_event.wait(.5); continue
+                    if loot.gold is None or loot.elixir is None:
+                        self.events.put("Butin adverse illisible : aucune action envoyée."); self.stop_event.wait(1); continue
+                    accepted,gold_minimum,elixir_minimum=loot_is_accepted(loot.gold,loot.elixir,self.settings)
+                    self.events.put(f"Base adverse : or {loot.gold:,}, élixir {loot.elixir:,} | seuils avec marge : {gold_minimum:,}/{elixir_minimum:,} → {'attaque' if accepted else 'suivant'}.")
+                    if accepted: break
                     if not WindowDriver.click_percent(window,*NEXT_BASE_BUTTON): raise RuntimeError("Clic Suivant refusé.")
-                    self.stop_event.wait(3); continue
-                drop_points=electrodragon_drop_points(self.settings)
+                    self.stop_event.wait(3)
+                if not accepted or self.stop_event.is_set(): return
                 if self.settings.dry_run:
-                    self.events.put("Simulation : base retenue ; les 8 électro-dragons ne sont pas envoyés."); return
-                if not WindowDriver.click_percent(window,*ELECTRODRAGON_SLOT): raise RuntimeError("Sélection électro-dragons refusée.")
-                self.stop_event.wait(self.settings.delay_between_dragons_ms/1000)
-                for x,y in drop_points:
-                    if self.stop_event.is_set(): return
-                    if not WindowDriver.click_percent(window,x,y): raise RuntimeError("Pose électro-dragon refusée.")
-                    self.events.put(f"Électro-dragon posé : {x:.1f} %, {y:.1f} %")
-                    self.stop_event.wait(self.settings.delay_between_dragons_ms/1000)
-                self.events.put("Déploiement des 8 électro-dragons sur le pourtour terminé."); return
+                    self.events.put("Simulation : base retenue ; aucune troupe ni amélioration n'est envoyée."); return
+                self.deploy_attack_composition(window)
+                if not self.settings.chain_attacks or not self.wait_for_battle_return(window): return
         except Exception as exc: self.events.put(f"Recherche arrêtée : {exc}")
         finally:
             self.stop_event.set(); self.events.put("Bot arrêté.")
