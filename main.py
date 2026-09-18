@@ -386,5 +386,14 @@ def self_test():
     assert parse_clash_number("loz") == 107 and parse_worker_ratio("112") == "1/2" and parse_worker_ratio("SIS") == "5/5"
     image=Image.new("RGB",(600,150),"white");ImageDraw.Draw(image).text((12,12),"123456",fill="black",font=ImageFont.truetype("C:/Windows/Fonts/arial.ttf",90));assert read_number(image)==123456;print("Self-test passed")
 
+
+def profile_test():
+    window = WindowDriver.resolve("")
+    if not window: raise RuntimeError("Fenêtre Clash introuvable pour le test de profil.")
+    snapshot = read_account_snapshot(WindowDriver.capture(window))
+    required = (snapshot.account_name, snapshot.level, snapshot.gold, snapshot.elixir, snapshot.dark_elixir, snapshot.gems, snapshot.laboratory_builders, snapshot.builders)
+    if any(value is None for value in required): raise RuntimeError(f"Relevé incomplet : {asdict(snapshot)}")
+    print(json.dumps(asdict(snapshot), ensure_ascii=False))
+
 if __name__ == "__main__":
-    self_test() if "--self-test" in sys.argv else BotApp().run()
+    profile_test() if "--profile-test" in sys.argv else (self_test() if "--self-test" in sys.argv else BotApp().run())
