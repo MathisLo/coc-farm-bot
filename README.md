@@ -14,7 +14,9 @@ Le mode **Simulation** est actif par défaut et ne clique jamais. Utilise **Test
 
 ## Recherche et attaque électro-dragons
 
-Le bouton **Lancer farm** ouvre le parcours multijoueur, lit l'or et l'élixir disponibles sur chaque base adverse, puis passe à la suivante tant que les seuils configurés ne sont pas atteints. Une base acceptée sélectionne la case des électro-dragons et les répartit sur huit points extérieurs : quatre à gauche et quatre à droite du terrain. Ces coordonnées restent sur le pourtour autorisé, hors de la zone rouge de la base. Garde **Simulation** active pour vérifier les décisions dans le journal avant d’autoriser les clics.
+Le bouton **Lancer farm** ouvre le parcours multijoueur, lit l'or et l'élixir disponibles sur chaque base adverse, puis passe à la suivante tant que les seuils configurés ne sont pas atteints. Une base acceptée sélectionne la case des électro-dragons et les pose huit fois sur le pourtour latéral : quatre poses à gauche et quatre à droite. Les deux premières poses de chaque flanc partagent volontairement une position déjà validée afin de rester hors de la zone rouge, quelle que soit la forme de la base.
+
+La **Marge %** réduit les deux seuils de ce pourcentage. Par exemple, avec 500 000 et 5 %, une base est acceptée à partir de 475 000 or et 475 000 élixir. Le mode réel est désormais le réglage initial. Coche **Mode simulation (sans pose)** seulement pour vérifier le filtre sans envoyer les électro-dragons.
 
 ## Relever le compte
 
@@ -26,7 +28,7 @@ Depuis l'écran de village, clique sur **Relever le profil**. L'application lit 
 .\BUILD.ps1
 ```
 
-Le fichier exécutable est créé dans `dist\CoCFarmBot-V1_6.exe`.
+Le fichier exécutable est créé dans `dist\CoCFarmBot-V1_7.exe`.
 
 ## Limites de cette V1
 

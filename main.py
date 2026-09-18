@@ -6,6 +6,7 @@ import ctypes
 from ctypes import wintypes
 import json
 import logging
+import math
 import queue
 import re
 import sys
@@ -61,18 +62,19 @@ class Roi:
 
 @dataclass
 class Settings:
-    version: int = 2
+    version: int = 3
     window_title: str = ""
     gold_roi: Roi = field(default_factory=Roi)
     elixir_roi: Roi = field(default_factory=Roi)
     min_gold: int = 500000
     min_elixir: int = 500000
+    loot_margin_percent: float = 5.0
     use_and_rule: bool = True
     dragon_select_point: list[float] | None = None
     dragon_points: list[list[float]] = field(default_factory=list)
     delay_between_dragons_ms: int = 180
     poll_interval_seconds: int = 3
-    dry_run: bool = True
+    dry_run: bool = False
 
 
 @dataclass(frozen=True)
@@ -118,8 +120,8 @@ ELECTRODRAGON_SLOT = (23.2, 92.5)
 # le pourtour jouable. Les points personnalisés ne sont employés que s'ils
 # respectent eux aussi cette couronne extérieure.
 ELECTRODRAGON_PERIMETER_POINTS = [
-    (15.0, 31.0), (15.0, 40.0), (15.0, 49.0), (15.0, 58.0),
-    (85.0, 31.0), (85.0, 40.0), (85.0, 49.0), (85.0, 58.0),
+    (15.0, 31.0), (15.0, 31.0), (15.0, 40.0), (15.0, 49.0),
+    (85.0, 31.0), (85.0, 31.0), (85.0, 40.0), (85.0, 49.0),
 ]
 ENEMY_LOOT_ROIS = {
     "gold": Roi(3.8, 10.2, 15.0, 15.5), "elixir": Roi(3.90625, 15.277777778, 13.020833333, 19.907407407), "dark_elixir": Roi(3.8, 19.0, 15.0, 25.0),
@@ -130,6 +132,11 @@ ENEMY_LOOT_LABEL_ROI = Roi(3.5, 7.5, 17.0, 11.5)
 def load_settings() -> Settings:
     try:
         data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        # The previous version saved Simulation=true by default. That made a
+        # launched farm stop before deployment; migrate it to the real mode
+        # requested for V1.7 while retaining the explicit checkbox.
+        if data.get("version", 0) < 3:
+            data["version"] = 3; data["dry_run"] = False; data.setdefault("loot_margin_percent", 5.0)
         data["gold_roi"] = Roi(**data.get("gold_roi", {})); data["elixir_roi"] = Roi(**data.get("elixir_roi", {}))
         return Settings(**data)
     except (OSError, TypeError, ValueError): return Settings()
@@ -151,6 +158,19 @@ def electrodragon_drop_points(settings: Settings) -> list[tuple[float, float]]:
     if len(configured) >= 8 and all(is_perimeter_point(point) for point in configured[:8]):
         return configured[:8]
     return ELECTRODRAGON_PERIMETER_POINTS
+
+
+def effective_minimum(minimum: int, margin_percent: float) -> int:
+    """Lower a configured loot threshold by a bounded tolerance percentage."""
+    margin = max(0.0, min(25.0, margin_percent))
+    return math.ceil(minimum * (1.0 - margin / 100.0))
+
+
+def loot_is_accepted(gold: int, elixir: int, settings: Settings) -> tuple[bool, int, int]:
+    gold_minimum = effective_minimum(settings.min_gold, settings.loot_margin_percent)
+    elixir_minimum = effective_minimum(settings.min_elixir, settings.loot_margin_percent)
+    accepted = (gold >= gold_minimum and elixir >= elixir_minimum) if settings.use_and_rule else (gold >= gold_minimum or elixir >= elixir_minimum)
+    return accepted, gold_minimum, elixir_minimum
 
 
 @dataclass(frozen=True)
@@ -298,7 +318,7 @@ class BotApp:
         APP_DIR.mkdir(parents=True, exist_ok=True); logging.basicConfig(filename=LOG_PATH, level=logging.INFO, format="%(asctime)s %(message)s", encoding="utf-8")
         self.settings = load_settings(); self.root = Tk(); self.root.title("CoC Farm Bot — V1 calibrable"); self.root.geometry("1040x810")
         self.events = queue.Queue(); self.stop_event = threading.Event(); self.worker = None; self.image = None; self.photo = None; self.origin = (0, 0); self.preview_size = (1, 1); self.drag_start = None
-        self.mode = StringVar(value="Or"); self.window_title = StringVar(value=self.settings.window_title); self.min_gold = StringVar(value=str(self.settings.min_gold)); self.min_elixir = StringVar(value=str(self.settings.min_elixir)); self.and_rule = BooleanVar(value=self.settings.use_and_rule); self.dry_run = BooleanVar(value=self.settings.dry_run)
+        self.mode = StringVar(value="Or"); self.window_title = StringVar(value=self.settings.window_title); self.min_gold = StringVar(value=str(self.settings.min_gold)); self.min_elixir = StringVar(value=str(self.settings.min_elixir)); self.loot_margin = StringVar(value=str(self.settings.loot_margin_percent)); self.and_rule = BooleanVar(value=self.settings.use_and_rule); self.dry_run = BooleanVar(value=self.settings.dry_run)
         self.gold_text = StringVar(value=self.settings.gold_roi.text() if self.settings.gold_roi.valid() else "À sélectionner"); self.elixir_text = StringVar(value=self.settings.elixir_roi.text() if self.settings.elixir_roi.valid() else "À sélectionner"); self.select_text = StringVar(value=self._select_text()); self.points_text = StringVar(value=self._points_text()); self.status = StringVar(value="Capture la fenêtre Clash puis calibre les zones.")
         self._build(); self._pump()
 
@@ -313,10 +333,10 @@ class BotApp:
         ttk.Label(root,text="Bouton dragons").grid(row=5,column=0,sticky="w"); ttk.Label(root,textvariable=self.select_text).grid(row=5,column=1,sticky="w")
         ttk.Label(root,text="Points dragons").grid(row=6,column=0,sticky="w"); ttk.Label(root,textvariable=self.points_text).grid(row=6,column=1,sticky="w")
         limits=ttk.Frame(root); limits.grid(row=7,column=0,columnspan=3,sticky="ew",pady=8)
-        ttk.Label(limits,text="Seuil or").pack(side="left"); ttk.Entry(limits,textvariable=self.min_gold,width=12).pack(side="left",padx=4); ttk.Label(limits,text="Seuil élixir").pack(side="left",padx=(12,0)); ttk.Entry(limits,textvariable=self.min_elixir,width=12).pack(side="left",padx=4); ttk.Checkbutton(limits,text="Or ET élixir",variable=self.and_rule).pack(side="left",padx=12); ttk.Checkbutton(limits,text="Simulation",variable=self.dry_run).pack(side="left")
+        ttk.Label(limits,text="Seuil or").pack(side="left"); ttk.Entry(limits,textvariable=self.min_gold,width=10).pack(side="left",padx=4); ttk.Label(limits,text="Seuil élixir").pack(side="left",padx=(8,0)); ttk.Entry(limits,textvariable=self.min_elixir,width=10).pack(side="left",padx=4); ttk.Label(limits,text="Marge %").pack(side="left",padx=(8,0)); ttk.Entry(limits,textvariable=self.loot_margin,width=5).pack(side="left",padx=4); ttk.Checkbutton(limits,text="Or ET élixir",variable=self.and_rule).pack(side="left",padx=8); ttk.Checkbutton(limits,text="Mode simulation (sans pose)",variable=self.dry_run).pack(side="left",padx=8)
         self.canvas=__import__("tkinter").Canvas(root,background="#1d1d1d",highlightthickness=0); self.canvas.grid(row=8,column=0,columnspan=3,sticky="nsew"); self.canvas.bind("<ButtonPress-1>",self.press); self.canvas.bind("<B1-Motion>",self.drag); self.canvas.bind("<ButtonRelease-1>",self.release)
         actions=ttk.Frame(root); actions.grid(row=9,column=0,columnspan=3,pady=8)
-        for text,command in (("Relever le profil",self.scan_profile),("Tester l'OCR",self.test_ocr),("Enregistrer",self.persist),("Démarrer (calibré)",self.start),("Lancer farm",self.start_farm),("Arrêter",self.stop)): ttk.Button(actions,text=text,command=command).pack(side="left",padx=3)
+        for text,command in (("Relever le profil",self.scan_profile),("Tester l'OCR",self.test_ocr),("Enregistrer",self.persist),("Tester calibration",self.start),("Lancer farm",self.start_farm),("Arrêter",self.stop)): ttk.Button(actions,text=text,command=command).pack(side="left",padx=3)
         ttk.Label(root,textvariable=self.status).grid(row=10,column=0,columnspan=3,sticky="w"); self.log=__import__("tkinter").Text(root,height=7,state="disabled"); self.log.grid(row=11,column=0,columnspan=3,sticky="nsew",pady=(6,0)); self.refresh()
 
     def refresh(self):
@@ -391,8 +411,10 @@ class BotApp:
 
     def persist(self):
         try:
-            self.settings.window_title=self.window_title.get();self.settings.min_gold=int(self.min_gold.get().replace(" ",""));self.settings.min_elixir=int(self.min_elixir.get().replace(" ",""));self.settings.use_and_rule=self.and_rule.get();self.settings.dry_run=self.dry_run.get();save_settings(self.settings);self.write("Configuration enregistrée.");return True
-        except ValueError: messagebox.showerror("Seuil invalide","Les seuils doivent être des nombres entiers.");return False
+            self.settings.window_title=self.window_title.get();self.settings.min_gold=int(self.min_gold.get().replace(" ",""));self.settings.min_elixir=int(self.min_elixir.get().replace(" ",""));self.settings.loot_margin=float(self.loot_margin.get().replace(",","."));self.settings.use_and_rule=self.and_rule.get();self.settings.dry_run=self.dry_run.get()
+            if not 0 <= self.settings.loot_margin_percent <= 25: raise ValueError
+            save_settings(self.settings);self.write(f"Configuration enregistrée : attaque dès {effective_minimum(self.settings.min_gold, self.settings.loot_margin_percent):,} or / {effective_minimum(self.settings.min_elixir, self.settings.loot_margin_percent):,} élixir.");return True
+        except ValueError: messagebox.showerror("Valeur invalide","Les seuils doivent être entiers et la marge comprise entre 0 et 25 %.");return False
     def valid_run(self):
         if not (self.settings.gold_roi.valid() and self.settings.elixir_roi.valid()):self.write("Calibre Or et Élixir.");return False
         if not self.settings.dragon_select_point:self.write("Sélectionne le bouton des électro-dragons.");return False
@@ -410,6 +432,8 @@ class BotApp:
     def start_farm(self):
         if self.worker and self.worker.is_alive(): return
         if not self.persist(): return
+        if self.settings.dry_run: self.write("Simulation active : recherche et lecture uniquement, aucune pose ne sera envoyée.")
+        else: self.write("Mode réel actif : les 8 électro-dragons seront posés sur les flancs d'une base retenue.")
         self.stop_event.clear(); self.worker=threading.Thread(target=self.farm_loop,daemon=True); self.worker.start(); self.write("Recherche automatique démarrée.")
     def stop(self):self.stop_event.set();self.write("Arrêt demandé.")
     def run_loop(self):
@@ -420,7 +444,7 @@ class BotApp:
                 image=WindowDriver.capture(window);gold=read_number(crop_percent(image,self.settings.gold_roi));elixir=read_number(crop_percent(image,self.settings.elixir_roi))
                 if gold is None or elixir is None:self.events.put("OCR non lisible : aucune action envoyée.")
                 else:
-                    accepted=(gold>=self.settings.min_gold and elixir>=self.settings.min_elixir) if self.settings.use_and_rule else (gold>=self.settings.min_gold or elixir>=self.settings.min_elixir);self.events.put(f"Butin : or {gold:,}, élixir {elixir:,} → {'attaque' if accepted else 'attente'}.")
+                    accepted,gold_minimum,elixir_minimum=loot_is_accepted(gold,elixir,self.settings);self.events.put(f"Butin : or {gold:,}, élixir {elixir:,} | seuils avec marge : {gold_minimum:,}/{elixir_minimum:,} → {'attaque' if accepted else 'attente'}.")
                     if accepted:
                         sx,sy=self.settings.dragon_select_point
                         if self.settings.dry_run:self.events.put(f"Simulation : sélection dragons {sx:.1f} %, {sy:.1f} %")
@@ -452,14 +476,14 @@ class BotApp:
                     self.events.put("Attente de l'affichage complet de la base adverse."); self.stop_event.wait(.5); continue
                 if loot.gold is None or loot.elixir is None:
                     self.events.put("Butin adverse illisible : aucune action envoyée."); self.stop_event.wait(1); continue
-                accepted=(loot.gold>=self.settings.min_gold and loot.elixir>=self.settings.min_elixir) if self.settings.use_and_rule else (loot.gold>=self.settings.min_gold or loot.elixir>=self.settings.min_elixir)
-                self.events.put(f"Base adverse : or {loot.gold:,}, élixir {loot.elixir:,} → {'attaque' if accepted else 'suivant'}.")
+                accepted,gold_minimum,elixir_minimum=loot_is_accepted(loot.gold,loot.elixir,self.settings)
+                self.events.put(f"Base adverse : or {loot.gold:,}, élixir {loot.elixir:,} | seuils avec marge : {gold_minimum:,}/{elixir_minimum:,} → {'attaque' if accepted else 'suivant'}.")
                 if not accepted:
                     if not WindowDriver.click_percent(window,*NEXT_BASE_BUTTON): raise RuntimeError("Clic Suivant refusé.")
                     self.stop_event.wait(3); continue
                 drop_points=electrodragon_drop_points(self.settings)
                 if self.settings.dry_run:
-                    self.events.put("Simulation : sélection et pose des 8 électro-dragons sur le pourtour."); return
+                    self.events.put("Simulation : base retenue ; les 8 électro-dragons ne sont pas envoyés."); return
                 if not WindowDriver.click_percent(window,*ELECTRODRAGON_SLOT): raise RuntimeError("Sélection électro-dragons refusée.")
                 self.stop_event.wait(self.settings.delay_between_dragons_ms/1000)
                 for x,y in drop_points:

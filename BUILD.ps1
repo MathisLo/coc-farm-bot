@@ -6,4 +6,4 @@ if (-not (Test-Path $projectPython)) {
 }
 
 & $projectPython -m pip install -r (Join-Path $PSScriptRoot 'requirements.txt')
-& $projectPython -m PyInstaller --noconfirm --clean --onefile --windowed --name CoCFarmBot-V1_6 --collect-all winrt (Join-Path $PSScriptRoot 'main.py')
+& $projectPython -m PyInstaller --noconfirm --clean --onefile --windowed --name CoCFarmBot-V1_7 --collect-all winrt (Join-Path $PSScriptRoot 'main.py')
