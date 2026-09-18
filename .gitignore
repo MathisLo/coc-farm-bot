@@ -6,3 +6,4 @@ dist/
 CoCFarmBot/
 *.log
 config.json
+diagnostics/

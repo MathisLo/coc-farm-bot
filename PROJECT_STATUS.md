@@ -11,6 +11,7 @@ La V1 est une application Windows locale inspirée de la structure de `nullmacro
 - La V1 calibrable remplace les coordonnées fixes qui rendaient la lecture réelle impossible.
 - L'OCR intégré lit `123456` dans un test local intégré à l'exécutable.
 - L'exécutable démarre sans erreur en arrière-plan.
+- La capture réelle de `Clash of Clans - TCDVeNom` fonctionne en arrière-plan en 1920×1080, sans utiliser la souris.
 
 ## À vérifier avec Google Play Jeux PC
 
