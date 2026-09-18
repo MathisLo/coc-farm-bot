@@ -14,7 +14,7 @@ La V1 est une application Windows locale inspirée de la structure de `nullmacro
 - La capture réelle de `Clash of Clans - TCDVeNom` fonctionne en arrière-plan en 1920×1080, sans utiliser la souris.
 - L'OCR Windows reçoit également cette capture. La calibration du butin doit être faite sur l'écran d'une base adverse, car l'écran de village ne présente pas les deux valeurs de butin recherchées.
 - Le relevé du profil de village est validé en capture réelle et dans l'exécutable `CoCFarmBot-V1_3.exe` : pseudo, niveau, or, élixir, élixir noir, gemmes, ouvriers de laboratoire et ouvriers.
-- Le parcours d'attaque est testé sur Google Play Jeux PC : ouverture du menu, recherche multijoueur, lecture de 69 169 or et 362 602 élixir sur une base adverse, sélection d'un électro-dragon et pose validée (compteur 8 vers 7). Le bouton **Lancer farm** intègre ce parcours avec le filtre 500 000 or / 500 000 élixir et le déploiement de huit électro-dragons.
+- Le parcours d'attaque est testé sur Google Play Jeux PC : ouverture du menu, recherche multijoueur, lecture de trois bases adverses, sélection d'un électro-dragon et pose validée (compteur 8 vers 7). Le bouton **Lancer farm** intègre ce parcours avec le filtre 500 000 or / 500 000 élixir et le déploiement de huit électro-dragons. La V1.5 attend aussi la mention « Butin disponible » avant toute décision et lit les chiffres avec un second passage OCR binarisé.
 
 ## À vérifier avec Google Play Jeux PC
 

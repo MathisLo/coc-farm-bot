@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from tkinter import BooleanVar, StringVar, Tk, ttk, messagebox
 
-from PIL import Image, ImageDraw, ImageFont, ImageTk
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageTk
 
 APP_DIR = Path.home() / "CoCFarmBot"
 CONFIG_PATH = APP_DIR / "config-v2.json"
@@ -115,8 +115,9 @@ NEXT_BASE_BUTTON = (91.9, 75.8)
 ELECTRODRAGON_SLOT = (23.2, 92.5)
 ELECTRODRAGON_DROP_POINTS = [(20.0, 35.0), (20.0, 39.0), (20.0, 43.0), (20.0, 47.0), (23.0, 35.0), (23.0, 39.0), (23.0, 43.0), (23.0, 47.0)]
 ENEMY_LOOT_ROIS = {
-    "gold": Roi(3.8, 10.2, 15.0, 15.5), "elixir": Roi(3.8, 15.0, 15.0, 20.5), "dark_elixir": Roi(3.8, 19.0, 15.0, 25.0),
+    "gold": Roi(3.8, 10.2, 15.0, 15.5), "elixir": Roi(3.90625, 15.277777778, 13.020833333, 19.907407407), "dark_elixir": Roi(3.8, 19.0, 15.0, 25.0),
 }
+ENEMY_LOOT_LABEL_ROI = Roi(3.5, 7.5, 17.0, 11.5)
 
 
 def load_settings() -> Settings:
@@ -222,6 +223,16 @@ def parse_clash_number(text: str) -> int | None:
     return int(digits) if digits else None
 
 
+def read_resource_number(image: Image.Image) -> tuple[int | None, str]:
+    """Try normal and high-contrast OCR; keep the most complete valid amount."""
+    normal = read_text(image)
+    binary = read_text(ImageOps.grayscale(image).point(lambda pixel: 255 if pixel > 150 else 0))
+    binary_value = parse_clash_number(binary)
+    if binary_value is not None and binary_value <= 2_500_000: return binary_value, binary
+    normal_value = parse_clash_number(normal)
+    return (normal_value, normal) if normal_value is not None and normal_value <= 2_500_000 else (None, normal)
+
+
 def parse_worker_ratio(text: str) -> str | None:
     normal = text.translate(str.maketrans({"S": "5", "s": "5", "O": "0", "o": "0", "I": "1", "l": "1", "i": "1", "Z": "7", "z": "7", "T": "/", "t": "/"}))
     parts = re.findall(r"\d+", normal)
@@ -252,8 +263,13 @@ def read_account_snapshot(image: Image.Image) -> AccountSnapshot:
 
 
 def read_enemy_loot(image: Image.Image) -> EnemyLoot:
-    raw = {key: read_text(crop_percent(image, roi)) for key, roi in ENEMY_LOOT_ROIS.items()}
-    return EnemyLoot(gold=parse_clash_number(raw["gold"]), elixir=parse_clash_number(raw["elixir"]), dark_elixir=parse_clash_number(raw["dark_elixir"]), raw=raw)
+    readings = {key: read_resource_number(crop_percent(image, roi)) for key, roi in ENEMY_LOOT_ROIS.items()}
+    return EnemyLoot(gold=readings["gold"][0], elixir=readings["elixir"][0], dark_elixir=readings["dark_elixir"][0], raw={key: text for key, (_, text) in readings.items()})
+
+
+def enemy_loot_screen_ready(image: Image.Image) -> bool:
+    label = read_text(crop_percent(image, ENEMY_LOOT_LABEL_ROI)).casefold()
+    return "butin" in label or "loot" in label
 
 
 class BotApp:
@@ -411,6 +427,8 @@ class BotApp:
                 if self.stop_event.is_set(): return
             while not self.stop_event.is_set():
                 image=WindowDriver.capture(window); loot=read_enemy_loot(image)
+                if not enemy_loot_screen_ready(image):
+                    self.events.put("Attente de l'affichage complet de la base adverse."); self.stop_event.wait(.5); continue
                 if loot.gold is None or loot.elixir is None:
                     self.events.put("Butin adverse illisible : aucune action envoyée."); self.stop_event.wait(1); continue
                 accepted=(loot.gold>=self.settings.min_gold and loot.elixir>=self.settings.min_elixir) if self.settings.use_and_rule else (loot.gold>=self.settings.min_gold or loot.elixir>=self.settings.min_elixir)
