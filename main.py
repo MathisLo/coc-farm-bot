@@ -63,7 +63,7 @@ class Roi:
 
 @dataclass
 class Settings:
-    version: int = 4
+    version: int = 5
     window_title: str = ""
     gold_roi: Roi = field(default_factory=Roi)
     elixir_roi: Roi = field(default_factory=Roi)
@@ -127,7 +127,11 @@ HERO_DROP_POINTS = ((15.0, 40.0), (85.0, 40.0), (15.0, 49.0))
 BUILDERS_BUTTON = (49.0, 4.5)
 WALL_LIST_ITEM = (47.5, 54.0)
 WALL_GOLD_UPGRADE_BUTTON = (58.3, 76.5)
+WALL_ELIXIR_UPGRADE_BUTTON = (67.5, 76.5)
 WALL_CONFIRM_BUTTON = (70.0, 87.0)
+WALL_GOLD_COST_ROI = Roi(50.0, 72.0, 60.2, 79.4)
+WALL_ELIXIR_COST_ROI = Roi(59.0, 71.0, 69.0, 80.0)
+WALL_RESERVE = 1_000_000
 # Positions extérieures, réparties de chaque côté du terrain. Elles évitent
 # le carré central de la base : Clash n'autorise la pose des troupes que sur
 # le pourtour jouable. Les points personnalisés ne sont employés que s'ils
@@ -154,6 +158,8 @@ def load_settings() -> Settings:
             data["version"] = 4
             for key, value in (("electrodragon_count", 8), ("dragon_count", 1), ("deploy_heroes", True), ("upgrade_wall_between_attacks", True), ("chain_attacks", True)):
                 data.setdefault(key, value)
+        if data.get("version", 0) < 5:
+            data["version"] = 5
         data["gold_roi"] = Roi(**data.get("gold_roi", {})); data["elixir_roi"] = Roi(**data.get("elixir_roi", {}))
         return Settings(**data)
     except (OSError, TypeError, ValueError): return Settings()
@@ -188,6 +194,36 @@ def loot_is_accepted(gold: int, elixir: int, settings: Settings) -> tuple[bool, 
     elixir_minimum = effective_minimum(settings.min_elixir, settings.loot_margin_percent)
     accepted = (gold >= gold_minimum and elixir >= elixir_minimum) if settings.use_and_rule else (gold >= gold_minimum or elixir >= elixir_minimum)
     return accepted, gold_minimum, elixir_minimum
+
+
+def read_safe_reserve(image: Image.Image, resource: str) -> int | None:
+    """Read a home-village reserve conservatively; invalid OCR stops upgrades."""
+    crop = crop_percent(image, PROFILE_ROIS[resource])
+    candidates = (parse_clash_number(read_text(crop)), read_number(crop))
+    valid = [value for value in candidates if value is not None and 0 <= value <= 20_000_000]
+    return min(valid) if valid else None
+
+
+def read_wall_cost(image: Image.Image, resource: str) -> int | None:
+    """Read the amount printed on a wall upgrade button from two OCR passes."""
+    roi = WALL_GOLD_COST_ROI if resource == "or" else WALL_ELIXIR_COST_ROI
+    crop = crop_percent(image, roi)
+    candidates = (parse_clash_number(read_text(crop)), read_number(crop))
+    valid = [value for value in candidates if value is not None and 100_000 <= value <= 10_000_000]
+    return min(valid) if valid else None
+
+
+def choose_wall_payment(gold: int, elixir: int, gold_cost: int | None, elixir_cost: int | None) -> tuple[str, int] | None:
+    """Choose a displayed wall price without reducing either reserve below 1 M."""
+    choices = []
+    if gold_cost is not None and gold - gold_cost >= WALL_RESERVE:
+        choices.append((gold - WALL_RESERVE, "or", gold_cost))
+    if elixir_cost is not None and elixir - elixir_cost >= WALL_RESERVE:
+        choices.append((elixir - WALL_RESERVE, "élixir", elixir_cost))
+    if not choices:
+        return None
+    _, resource, cost = max(choices, key=lambda choice: choice[0])
+    return resource, cost
 
 
 def repeated_points(points: tuple[tuple[float, float], ...] | list[tuple[float, float]], count: int) -> list[tuple[float, float]]:
@@ -372,7 +408,7 @@ class BotApp:
         limits=ttk.Frame(root); limits.grid(row=7,column=0,columnspan=3,sticky="ew",pady=8)
         ttk.Label(limits,text="Seuil or").pack(side="left"); ttk.Entry(limits,textvariable=self.min_gold,width=10).pack(side="left",padx=4); ttk.Label(limits,text="Seuil élixir").pack(side="left",padx=(8,0)); ttk.Entry(limits,textvariable=self.min_elixir,width=10).pack(side="left",padx=4); ttk.Label(limits,text="Marge %").pack(side="left",padx=(8,0)); ttk.Entry(limits,textvariable=self.loot_margin,width=5).pack(side="left",padx=4); ttk.Checkbutton(limits,text="Or ET élixir",variable=self.and_rule).pack(side="left",padx=8); ttk.Checkbutton(limits,text="Mode simulation (sans pose)",variable=self.dry_run).pack(side="left",padx=8)
         composition=ttk.Frame(root); composition.grid(row=8,column=0,columnspan=3,sticky="ew",pady=(0,8))
-        ttk.Label(composition,text="Électro-dragons").pack(side="left"); ttk.Entry(composition,textvariable=self.electrodragon_count,width=4).pack(side="left",padx=4); ttk.Label(composition,text="Dragons").pack(side="left",padx=(10,0)); ttk.Entry(composition,textvariable=self.dragon_count,width=4).pack(side="left",padx=4); ttk.Checkbutton(composition,text="Poser les 3 héros",variable=self.deploy_heroes).pack(side="left",padx=10); ttk.Checkbutton(composition,text="1 rempart entre les attaques",variable=self.upgrade_wall).pack(side="left",padx=8); ttk.Checkbutton(composition,text="Enchaîner les attaques",variable=self.chain_attacks).pack(side="left",padx=8)
+        ttk.Label(composition,text="Électro-dragons").pack(side="left"); ttk.Entry(composition,textvariable=self.electrodragon_count,width=4).pack(side="left",padx=4); ttk.Label(composition,text="Dragons").pack(side="left",padx=(10,0)); ttk.Entry(composition,textvariable=self.dragon_count,width=4).pack(side="left",padx=4); ttk.Checkbutton(composition,text="Poser les 3 héros",variable=self.deploy_heroes).pack(side="left",padx=10); ttk.Checkbutton(composition,text="Remparts jusqu’à 1 M restants",variable=self.upgrade_wall).pack(side="left",padx=8); ttk.Checkbutton(composition,text="Enchaîner les attaques",variable=self.chain_attacks).pack(side="left",padx=8)
         self.canvas=__import__("tkinter").Canvas(root,background="#1d1d1d",highlightthickness=0); self.canvas.grid(row=9,column=0,columnspan=3,sticky="nsew"); self.canvas.bind("<ButtonPress-1>",self.press); self.canvas.bind("<B1-Motion>",self.drag); self.canvas.bind("<ButtonRelease-1>",self.release)
         actions=ttk.Frame(root); actions.grid(row=10,column=0,columnspan=3,pady=8)
         for text,command in (("Relever le profil",self.scan_profile),("Tester l'OCR",self.test_ocr),("Enregistrer",self.persist),("Tester calibration",self.start),("Lancer farm",self.start_farm),("Arrêter",self.stop)): ttk.Button(actions,text=text,command=command).pack(side="left",padx=3)
@@ -500,20 +536,52 @@ class BotApp:
             except Exception as exc:self.events.put(f"Boucle arrêtée : {exc}");self.stop_event.set()
             self.stop_event.wait(self.settings.poll_interval_seconds)
         self.events.put("Bot arrêté.")
-    def upgrade_wall_once(self, window):
-        """Use the five-builder list and confirm at most one available wall upgrade."""
-        if not self.settings.upgrade_wall_between_attacks or self.settings.dry_run: return False
-        if not WindowDriver.click_percent(window,*BUILDERS_BUTTON): raise RuntimeError("Clic ouvriers refusé.")
-        self.stop_event.wait(.7)
-        if self.stop_event.is_set() or not has_screen_text(WindowDriver.capture(window),"rempart"): return False
-        if not WindowDriver.click_percent(window,*WALL_LIST_ITEM): raise RuntimeError("Clic rempart refusé.")
-        self.stop_event.wait(.7)
-        if self.stop_event.is_set() or not has_screen_text(WindowDriver.capture(window),"rempart"): return False
-        if not WindowDriver.click_percent(window,*WALL_GOLD_UPGRADE_BUTTON): raise RuntimeError("Clic amélioration rempart refusé.")
-        self.stop_event.wait(.7)
-        if self.stop_event.is_set() or not has_all_screen_text(WindowDriver.capture(window),"confirmer","rempart"): return False
-        if not WindowDriver.click_percent(window,*WALL_CONFIRM_BUTTON): raise RuntimeError("Confirmation rempart refusée.")
-        self.stop_event.wait(.8); self.events.put("Un rempart a été amélioré entre les attaques."); return True
+    def upgrade_walls_to_reserve(self, window):
+        """Upgrade available walls while keeping both village reserves at or above 1 M."""
+        if not self.settings.upgrade_wall_between_attacks or self.settings.dry_run:
+            return 0
+        upgraded = 0
+        while not self.stop_event.is_set():
+            reserves_image = WindowDriver.capture(window)
+            gold = read_safe_reserve(reserves_image, "gold")
+            elixir = read_safe_reserve(reserves_image, "elixir")
+            if gold is None or elixir is None:
+                self.events.put("Réserves illisibles : aucun rempart n’est confirmé.")
+                return upgraded
+            if gold <= WALL_RESERVE and elixir <= WALL_RESERVE:
+                self.events.put(f"Réserves préservées : or {gold:,}, élixir {elixir:,}.")
+                return upgraded
+            if not WindowDriver.click_percent(window, *BUILDERS_BUTTON):
+                raise RuntimeError("Clic ouvriers refusé.")
+            self.stop_event.wait(.7)
+            if self.stop_event.is_set() or not has_screen_text(WindowDriver.capture(window), "rempart"):
+                self.events.put("Aucun rempart disponible à améliorer.")
+                return upgraded
+            if not WindowDriver.click_percent(window, *WALL_LIST_ITEM):
+                raise RuntimeError("Clic rempart refusé.")
+            self.stop_event.wait(.7)
+            wall_image = WindowDriver.capture(window)
+            if self.stop_event.is_set() or not has_screen_text(wall_image, "rempart"):
+                self.events.put("Sélection de rempart non confirmée.")
+                return upgraded
+            choice = choose_wall_payment(gold, elixir, read_wall_cost(wall_image, "or"), read_wall_cost(wall_image, "élixir"))
+            if choice is None:
+                self.events.put(f"Plancher de 1 M conservé : or {gold:,}, élixir {elixir:,}.")
+                return upgraded
+            resource, cost = choice
+            button = WALL_GOLD_UPGRADE_BUTTON if resource == "or" else WALL_ELIXIR_UPGRADE_BUTTON
+            if not WindowDriver.click_percent(window, *button):
+                raise RuntimeError(f"Clic amélioration rempart {resource} refusé.")
+            self.stop_event.wait(.7)
+            if self.stop_event.is_set() or not has_all_screen_text(WindowDriver.capture(window), "confirmer", "rempart"):
+                self.events.put("Confirmation du rempart absente : aucun autre clic envoyé.")
+                return upgraded
+            if not WindowDriver.click_percent(window, *WALL_CONFIRM_BUTTON):
+                raise RuntimeError("Confirmation rempart refusée.")
+            upgraded += 1
+            self.events.put(f"Rempart amélioré avec {cost:,} {resource} ({upgraded} au total).")
+            self.stop_event.wait(1)
+        return upgraded
 
     def deploy_unit(self, window, label, slot, points):
         if not points: return
@@ -558,7 +626,7 @@ class BotApp:
             while not self.stop_event.is_set():
                 window=WindowDriver.resolve(self.settings.window_title)
                 if not window: raise RuntimeError("Fenêtre Clash introuvable.")
-                self.upgrade_wall_once(window)
+                self.upgrade_walls_to_reserve(window)
                 if self.stop_event.is_set() or not self.open_search(window): return
                 accepted=False
                 while not self.stop_event.is_set():
@@ -593,7 +661,11 @@ class BotApp:
 def self_test():
     assert Roi(1,2,3,4).valid() and not Roi(3,2,1,4).valid()
     assert parse_clash_number("loz") == 107 and parse_worker_ratio("112") == "1/2" and parse_worker_ratio("SIS") == "5/5"
-    image=Image.new("RGB",(600,150),"white");ImageDraw.Draw(image).text((12,12),"123456",fill="black",font=ImageFont.truetype("C:/Windows/Fonts/arial.ttf",90));assert read_number(image)==123456;print("Self-test passed")
+    image=Image.new("RGB",(600,150),"white");ImageDraw.Draw(image).text((12,12),"123456",fill="black",font=ImageFont.truetype("C:/Windows/Fonts/arial.ttf",90));assert read_number(image)==123456
+    assert choose_wall_payment(1_500_000, 1_400_000, 500_000, 500_000) == ("or", 500_000)
+    assert choose_wall_payment(1_499_999, 1_500_000, 500_000, 500_000) == ("élixir", 500_000)
+    assert choose_wall_payment(1_400_000, 1_400_000, 500_000, 500_000) is None
+    print("Self-test passed")
 
 
 def profile_test():

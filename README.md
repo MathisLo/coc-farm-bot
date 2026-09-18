@@ -20,7 +20,7 @@ La **Marge %** réduit les deux seuils de ce pourcentage. Par exemple, avec 500 
 
 ## Composition et cycle
 
-Règle le nombre d’**Électro-dragons** et de **Dragons** dans l’application. Le bot limite chaque catégorie au nombre indiqué, puis pose les trois héros cochés dans la barre. Avec **1 rempart entre les attaques**, il ouvre les cinq ouvriers, cherche un rempart et ne confirme qu’une seule amélioration disponible. Avec **Enchaîner les attaques**, il attend l’écran de résultat, revient au village et reprend ce cycle.
+Règle le nombre d’**Électro-dragons** et de **Dragons** dans l’application. Le bot limite chaque catégorie au nombre indiqué, puis pose les trois héros cochés dans la barre. Avec **Remparts jusqu’à 1 M restants**, il ouvre les cinq ouvriers, cherche un rempart, lit les deux coûts affichés et améliore autant de remparts que possible sans faire passer l’or ou l’élixir sous 1 000 000. Toute lecture ou confirmation absente stoppe cette étape. Avec **Enchaîner les attaques**, il attend l’écran de résultat, revient au village et reprend ce cycle.
 
 ## Relever le compte
 
@@ -32,7 +32,7 @@ Depuis l'écran de village, clique sur **Relever le profil**. L'application lit 
 .\BUILD.ps1
 ```
 
-Le fichier exécutable est créé dans `dist\CoCFarmBot-V1_8.exe`.
+Le fichier exécutable est créé dans `dist\CoCFarmBot-V1_9.exe`.
 
 ## Limites de cette V1
 
