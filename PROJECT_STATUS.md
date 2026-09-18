@@ -12,6 +12,7 @@ La V1 est une application Windows locale inspirée de la structure de `nullmacro
 - L'OCR intégré lit `123456` dans un test local intégré à l'exécutable.
 - L'exécutable démarre sans erreur en arrière-plan.
 - La capture réelle de `Clash of Clans - TCDVeNom` fonctionne en arrière-plan en 1920×1080, sans utiliser la souris.
+- L'OCR Windows reçoit également cette capture. La calibration du butin doit être faite sur l'écran d'une base adverse, car l'écran de village ne présente pas les deux valeurs de butin recherchées.
 
 ## À vérifier avec Google Play Jeux PC
 
