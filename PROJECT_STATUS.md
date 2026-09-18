@@ -2,13 +2,15 @@
 
 ## Version actuelle
 
-La V1 est une application Windows locale. Elle sélectionne une fenêtre, capture son contenu via l'API Windows, lit deux zones de ressources grâce à l'OCR de Windows et, si les seuils sont atteints, envoie les points de déploiement à la fenêtre ciblée. La simulation est activée par défaut.
+La V1 est une application Windows locale inspirée de la structure de `nullmacro_src`. Elle détecte Clash of Clans automatiquement, capture la fenêtre entière, permet de calibrer les zones de butin et les points de déploiement directement sur l'aperçu, puis lit les deux ressources avec l'OCR de Windows. La simulation est activée par défaut.
 
 ## Vérifié le 18 septembre 2026
 
 - Le code Python se compile.
 - L'OCR intégré lit correctement `123456` sur une image générée localement.
-- L'exécutable démarre et le même auto-test OCR fonctionne dans l'exécutable.
+- La V1 calibrable remplace les coordonnées fixes qui rendaient la lecture réelle impossible.
+- L'OCR intégré lit `123456` dans un test local intégré à l'exécutable.
+- L'exécutable démarre sans erreur en arrière-plan.
 
 ## À vérifier avec Google Play Jeux PC
 

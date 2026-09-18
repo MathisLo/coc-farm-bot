@@ -1,4 +1,4 @@
-# CoC Farm Bot — prototype local
+# CoC Farm Bot — V1 locale
 
 Application Windows autonome pour lire le butin affiché dans une fenêtre Google Play Jeux PC et déployer une série d'électro-dragons selon une configuration enregistrée localement.
 
@@ -8,9 +8,9 @@ Application Windows autonome pour lire le butin affiché dans une fenêtre Googl
 .\.venv\Scripts\python.exe main.py
 ```
 
-Choisis la fenêtre Google Play Jeux dans la liste, puis utilise **Capturer et lire**. La reconnaissance utilise l'OCR intégré à Windows. Renseigne ensuite les deux zones de butin, les seuils et les coordonnées des dragons (relatives à la fenêtre du jeu). Le mode **Simulation** est actif par défaut et ne clique jamais.
+Choisis la fenêtre Clash of Clans, clique sur **Capturer**, puis calibre l'application directement sur son aperçu : trace la zone de l'or, trace la zone de l'élixir et ajoute les points où déposer les électro-dragons. Les coordonnées sont enregistrées en pourcentage et restent valides si la fenêtre change de taille.
 
-Une fois les valeurs vérifiées, décoche Simulation et lance le bot. Il ne déplace jamais le curseur Windows : les clics sont envoyés à la fenêtre sélectionnée. Le bouton Arrêter interrompt la boucle immédiatement.
+Le mode **Simulation** est actif par défaut et ne clique jamais. Utilise **Tester l'OCR** : les deux valeurs doivent être correctes avant de le désactiver. L'application ne déplace jamais le curseur Windows : les clics sont envoyés à la fenêtre Clash. Le bouton Arrêter interrompt la boucle immédiatement.
 
 ## Construire l'exécutable
 
@@ -22,4 +22,4 @@ Le fichier exécutable est créé dans `dist\CoCFarmBot.exe`.
 
 ## Limites de cette V1
 
-Google Play Jeux PC n'expose pas ADB sur cette installation. La V1 utilise donc le pilote de fenêtre Windows. Si le jeu ignore les clics envoyés en arrière-plan, le journal de l'application le signalera : il faudra alors un canal de contrôle fourni par le client, sans modifier le comportement du bot.
+Google Play Jeux PC n'expose pas ADB sur cette installation. La V1 utilise donc le pilote de fenêtre Windows, inspiré de `nullmacro_src`. Si le jeu refuse une capture ou des clics envoyés en arrière-plan, le journal de l'application le signalera explicitement.
