@@ -14,7 +14,8 @@ La V1 est une application Windows locale inspirée de la structure de `nullmacro
 - La capture réelle de `Clash of Clans - TCDVeNom` fonctionne en arrière-plan en 1920×1080, sans utiliser la souris.
 - L'OCR Windows reçoit également cette capture. La calibration du butin doit être faite sur l'écran d'une base adverse, car l'écran de village ne présente pas les deux valeurs de butin recherchées.
 - Le relevé du profil de village est validé en capture réelle et dans l'exécutable `CoCFarmBot-V1_3.exe` : pseudo, niveau, or, élixir, élixir noir, gemmes, ouvriers de laboratoire et ouvriers.
-- Le parcours d'attaque est testé sur Google Play Jeux PC : ouverture du menu, recherche multijoueur, lecture de trois bases adverses, sélection d'un électro-dragon et pose validée (compteur 8 vers 7). Le bouton **Lancer farm** intègre ce parcours avec le filtre 500 000 or / 500 000 élixir et le déploiement de huit électro-dragons. La V1.5 attend aussi la mention « Butin disponible » avant toute décision et lit les chiffres avec un second passage OCR binarisé.
+- Le parcours d'attaque est testé sur Google Play Jeux PC : ouverture du menu, recherche multijoueur, lecture de trois bases adverses, sélection d'un électro-dragon et pose validée (compteur 8 vers 7). Le bouton **Lancer farm** intègre ce parcours avec le filtre 500 000 or / 500 000 élixir. La V1.5 attend aussi la mention « Butin disponible » avant toute décision et lit les chiffres avec un second passage OCR binarisé.
+- V1.6 : le déploiement par défaut est limité au pourtour latéral autorisé, avec quatre points à gauche et quatre à droite. Une recherche réelle a trouvé une base à 784 163 or et 701 043 élixir ; les six poses latérales initiales ont été acceptées. Deux points trop bas ont été rejetés par la zone rouge, donc ils ont été retirés. Les deux essais vers le haut ont ouvert une interface du jeu au lieu de poser des troupes ; ils ont eux aussi été retirés. La version finale garde exclusivement les flancs et ajoute deux positions intermédiaires pour compléter les huit poses.
 
 ## À vérifier avec Google Play Jeux PC
 
@@ -25,4 +26,4 @@ La V1 est une application Windows locale inspirée de la structure de `nullmacro
 
 ## Dépôt distant
 
-Le dépôt Git local est prêt. La publication GitHub attend un accès GitHub sur cette machine, car `gh` n'est pas installé et aucun accès distant n'est configuré.
+Le projet est publié sur https://github.com/MathisLo/coc-farm-bot.

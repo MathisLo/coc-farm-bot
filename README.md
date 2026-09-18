@@ -14,7 +14,7 @@ Le mode **Simulation** est actif par défaut et ne clique jamais. Utilise **Test
 
 ## Recherche et attaque électro-dragons
 
-Le bouton **Lancer farm** ouvre le parcours multijoueur, lit l'or et l'élixir disponibles sur chaque base adverse, puis passe à la suivante tant que les seuils configurés ne sont pas atteints. Une base acceptée sélectionne la case des électro-dragons et les répartit sur huit points de pose. Garde **Simulation** active pour vérifier les décisions dans le journal avant d’autoriser les clics.
+Le bouton **Lancer farm** ouvre le parcours multijoueur, lit l'or et l'élixir disponibles sur chaque base adverse, puis passe à la suivante tant que les seuils configurés ne sont pas atteints. Une base acceptée sélectionne la case des électro-dragons et les répartit sur huit points extérieurs : quatre à gauche et quatre à droite du terrain. Ces coordonnées restent sur le pourtour autorisé, hors de la zone rouge de la base. Garde **Simulation** active pour vérifier les décisions dans le journal avant d’autoriser les clics.
 
 ## Relever le compte
 
@@ -23,10 +23,10 @@ Depuis l'écran de village, clique sur **Relever le profil**. L'application lit 
 ## Construire l'exécutable
 
 ```powershell
-.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --onefile --windowed --name CoCFarmBot main.py
+.\BUILD.ps1
 ```
 
-Le fichier exécutable est créé dans `dist\CoCFarmBot.exe`.
+Le fichier exécutable est créé dans `dist\CoCFarmBot-V1_6.exe`.
 
 ## Limites de cette V1
 

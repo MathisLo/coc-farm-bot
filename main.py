@@ -113,7 +113,14 @@ FIND_MATCH_BUTTON = (14.2, 70.4)
 START_SEARCH_BUTTON = (84.0, 85.2)
 NEXT_BASE_BUTTON = (91.9, 75.8)
 ELECTRODRAGON_SLOT = (23.2, 92.5)
-ELECTRODRAGON_DROP_POINTS = [(20.0, 35.0), (20.0, 39.0), (20.0, 43.0), (20.0, 47.0), (23.0, 35.0), (23.0, 39.0), (23.0, 43.0), (23.0, 47.0)]
+# Positions extérieures, réparties de chaque côté du terrain. Elles évitent
+# le carré central de la base : Clash n'autorise la pose des troupes que sur
+# le pourtour jouable. Les points personnalisés ne sont employés que s'ils
+# respectent eux aussi cette couronne extérieure.
+ELECTRODRAGON_PERIMETER_POINTS = [
+    (15.0, 31.0), (15.0, 40.0), (15.0, 49.0), (15.0, 58.0),
+    (85.0, 31.0), (85.0, 40.0), (85.0, 49.0), (85.0, 58.0),
+]
 ENEMY_LOOT_ROIS = {
     "gold": Roi(3.8, 10.2, 15.0, 15.5), "elixir": Roi(3.90625, 15.277777778, 13.020833333, 19.907407407), "dark_elixir": Roi(3.8, 19.0, 15.0, 25.0),
 }
@@ -130,6 +137,20 @@ def load_settings() -> Settings:
 
 def save_settings(settings: Settings):
     APP_DIR.mkdir(parents=True, exist_ok=True); CONFIG_PATH.write_text(json.dumps(asdict(settings), indent=2), encoding="utf-8")
+
+
+def is_perimeter_point(point: list[float] | tuple[float, float]) -> bool:
+    """Return whether a relative point is outside the central base area."""
+    x, y = point
+    return 8.0 <= x <= 92.0 and 14.0 <= y <= 76.0 and (x <= 27.0 or x >= 73.0 or y <= 25.0 or y >= 75.0)
+
+
+def electrodragon_drop_points(settings: Settings) -> list[tuple[float, float]]:
+    """Use an eight-point perimeter configuration, else the verified default ring."""
+    configured = [tuple(point) for point in settings.dragon_points]
+    if len(configured) >= 8 and all(is_perimeter_point(point) for point in configured[:8]):
+        return configured[:8]
+    return ELECTRODRAGON_PERIMETER_POINTS
 
 
 @dataclass(frozen=True)
@@ -436,16 +457,17 @@ class BotApp:
                 if not accepted:
                     if not WindowDriver.click_percent(window,*NEXT_BASE_BUTTON): raise RuntimeError("Clic Suivant refusé.")
                     self.stop_event.wait(3); continue
+                drop_points=electrodragon_drop_points(self.settings)
                 if self.settings.dry_run:
-                    self.events.put("Simulation : sélection et pose des 8 électro-dragons."); return
+                    self.events.put("Simulation : sélection et pose des 8 électro-dragons sur le pourtour."); return
                 if not WindowDriver.click_percent(window,*ELECTRODRAGON_SLOT): raise RuntimeError("Sélection électro-dragons refusée.")
                 self.stop_event.wait(self.settings.delay_between_dragons_ms/1000)
-                for x,y in ELECTRODRAGON_DROP_POINTS:
+                for x,y in drop_points:
                     if self.stop_event.is_set(): return
                     if not WindowDriver.click_percent(window,x,y): raise RuntimeError("Pose électro-dragon refusée.")
                     self.events.put(f"Électro-dragon posé : {x:.1f} %, {y:.1f} %")
                     self.stop_event.wait(self.settings.delay_between_dragons_ms/1000)
-                self.events.put("Déploiement des 8 électro-dragons terminé."); return
+                self.events.put("Déploiement des 8 électro-dragons sur le pourtour terminé."); return
         except Exception as exc: self.events.put(f"Recherche arrêtée : {exc}")
         finally:
             self.stop_event.set(); self.events.put("Bot arrêté.")
