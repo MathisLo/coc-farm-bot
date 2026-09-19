@@ -11,6 +11,11 @@ import main
 
 
 class WindowsIntegrationTests(unittest.TestCase):
+    def test_enemy_resource_crops_exclude_labels_and_icons(self):
+        with Image.open(Path(__file__).parent/'testdata/enemy_clear.png') as im:
+            loot=main.read_enemy_loot(im)
+            self.assertEqual((loot.gold,loot.elixir,loot.dark_elixir),(855156,941101,9297))
+
     def test_grass_above_unplaced_queen_is_not_a_health_bar(self):
         before = self.fixture("hero_unplaced.png", (0, 880))
         self.assertEqual([main.hero_health_visible(before, i, -6.25) for i in range(3)], [False]*3)

@@ -15,6 +15,14 @@ class FarmLogicTests(unittest.TestCase):
         with patch.object(main, "read_text", side_effect=["1 256 104", "256 104"]):
             self.assertEqual(main.read_resource_number(Image.new("RGB", (100, 40)))[0], 1256104)
 
+    def test_enemy_loot_above_old_ceiling_is_read(self):
+        with patch.object(main, "read_text", side_effect=["3 120 500", "3 120 500"]):
+            self.assertEqual(main.read_resource_number(Image.new("RGB", (100,40)))[0],3120500)
+
+    def test_enemy_loot_retries_other_scales_when_initial_ocr_is_empty(self):
+        with patch.object(main, "read_text", side_effect=["", "", "941 101", "941 101"]):
+            self.assertEqual(main.read_resource_number(Image.new("RGB", (100,40)))[0],941101)
+
     def test_wall_batch_keeps_both_reserves(self):
         self.assertEqual(main.wall_batch_size(9_499_000, 500_000, 184), 16)
         self.assertEqual(main.wall_batch_size(10_000_000, 500_000, 184), 18)

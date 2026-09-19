@@ -334,6 +334,27 @@ class DeploymentRegressions(unittest.TestCase):
 
 
 class DeadlineRegressions(unittest.TestCase):
+    def test_one_readable_resource_can_satisfy_or_rule(self):
+        for gold,elixir in ((900000,None),(None,900000)):
+            app=app_without_gui(); app.settings.use_and_rule=False
+            app._capture=Mock(return_value=Image.new("RGB",(1920,1080)))
+            app._click=Mock()
+            with patch.object(main,'enemy_loot_screen_ready',return_value=True), patch.object(main,'read_enemy_loot',return_value=main.EnemyLoot(gold,elixir,None,{})):
+                self.assertTrue(app.find_suitable_base('window'))
+            app._click.assert_not_called()
+
+    def test_unreadable_base_with_next_button_is_skipped_then_attack_resumes(self):
+        app=app_without_gui(); app.settings.use_and_rule=True
+        clock=[0.]
+        app._wait=lambda seconds:clock.__setitem__(0,clock[0]+seconds)
+        frame=Image.new("RGB",(1920,1080))
+        app._capture=Mock(return_value=frame);app._click=Mock(return_value=True)
+        readings=[main.EnemyLoot(None,900000,None,{})]*35+[main.EnemyLoot(900000,900000,0,{})]
+        with tempfile.TemporaryDirectory() as directory, patch.object(main,'APP_DIR',Path(directory)), patch.object(main.time,'monotonic',side_effect=lambda:clock[0]), patch.object(main,'enemy_loot_screen_ready',return_value=True), patch.object(main,'has_screen_text',return_value=True), patch.object(main,'read_enemy_loot',side_effect=readings):
+            self.assertTrue(app.find_suitable_base('window'))
+            self.assertEqual(len(list((Path(directory)/'unread-enemies').glob('*.png'))),1)
+        app._click.assert_called_once_with('window',*main.NEXT_BASE_BUTTON)
+
     def test_visible_but_unreadable_loot_expires_without_clicks(self):
         app = app_without_gui()
         clock = [0.0]

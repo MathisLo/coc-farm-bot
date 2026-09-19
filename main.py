@@ -239,7 +239,7 @@ TROOP_COUNTER_INK_ROIS = {
 HERO_HEALTH_ROIS = (Roi(34.6, 82.6, 39.5, 84.9), Roi(40.9, 82.6, 45.8, 84.9), Roi(47.2, 82.6, 52.1, 84.9))
 HERO_ICON_ROIS = (Roi(34.4, 85.7, 40.4, 98.1), Roi(40.6, 85.7, 46.6, 98.1), Roi(46.9, 85.7, 52.6, 98.1))
 ENEMY_LOOT_ROIS = {
-    "gold": Roi(3.8, 10.2, 15.0, 15.5), "elixir": Roi(3.90625, 15.277777778, 13.020833333, 19.907407407), "dark_elixir": Roi(3.8, 19.0, 15.0, 25.0),
+    "gold": Roi(4.1, 11.1, 16.0, 14.4), "elixir": Roi(4.1, 15.8, 16.0, 18.8), "dark_elixir": Roi(4.1, 20.0, 16.0, 23.4),
 }
 ENEMY_LOOT_LABEL_ROI = Roi(3.5, 7.5, 17.0, 11.5)
 SCREEN_ROIS = {
@@ -928,10 +928,24 @@ def read_resource_number(image: Image.Image) -> tuple[int | None, str]:
     normal = read_text(image)
     binary = read_text(white_text_mask(image), scale=3)
     candidates = [(parse_clash_number(raw), raw) for raw in (binary, normal)]
-    valid = [(value, raw) for value, raw in candidates if value is not None and value <= 2_500_000]
+    valid = [(value, raw) for value, raw in candidates if value is not None and value <= 20_000_000]
     # The mask can lose a thin leading 1. Do not replace a complete reading
     # with its truncated suffix merely because it came from the mask.
-    return max(valid, key=lambda reading: reading[0]) if valid else (None, normal)
+    if valid:
+        return max(valid, key=lambda reading: reading[0])
+    # Different font sizes/backgrounds can defeat both original OCR passes.
+    values = []
+    for variant in (image, white_text_mask(image)):
+        for scale in (1,2,4):
+            raw = read_text(variant, scale=scale)
+            cleaned = raw.strip().translate(str.maketrans({"o":"0", "O":"0", "l":"1", "I":"1"}))
+            if re.fullmatch(r"[0-9\s]+", cleaned):
+                value = int(re.sub(r"\s", "", cleaned))
+                if value <= 20_000_000:
+                    values.append(value)
+                    if values.count(value) >= 2:
+                        return value, raw
+    return None, normal
 
 
 def parse_worker_ratio(text: str) -> str | None:
@@ -1818,25 +1832,47 @@ class BotApp:
         deadline = time.monotonic() + BASE_READ_TIMEOUT
         while not self.stop_event.is_set():
             if time.monotonic() >= deadline:
-                raise TimeoutError("Écran ou butin illisible après 35 secondes sur cette base.")
-            with ocr_deadline(deadline):
-                image = self._capture(window)
-                if not enemy_loot_screen_ready(image):
-                    if daily_reward_open(image):
-                        raise RuntimeError("Récompense quotidienne affichée pendant le choix de base.")
-                    self.events.put("Attente de l'affichage complet de la base adverse.")
-                    self._wait(.5)
+                # Never confuse a running fight or a dialog with matchmaking.
+                fresh = self._capture(window)
+                if enemy_loot_screen_ready(fresh) and has_screen_text(crop_percent(fresh, Roi(85,69,100,83)), "suivant"):
+                    archive = APP_DIR / "unread-enemies"
+                    archive.mkdir(parents=True, exist_ok=True)
+                    fresh.save(archive / f"{time.time_ns()}.png")
+                    if not self._click(window, *layout_values("NEXT_BASE_BUTTON")):
+                        raise RuntimeError("Clic Suivant refusé après butin illisible.")
+                    self.events.put("Butin illisible : capture conservée, passage à la base suivante et poursuite de la recherche.")
+                    deadline = time.monotonic() + BASE_READ_TIMEOUT
+                    self._wait(3)
                     continue
-                loot = read_enemy_loot(image)
+                raise TimeoutError("Écran ou butin illisible : bouton Suivant non confirmé, aucun clic envoyé.")
+            try:
+                with ocr_deadline(deadline):
+                    image = self._capture(window)
+                    if not enemy_loot_screen_ready(image):
+                        if daily_reward_open(image):
+                            raise RuntimeError("Récompense quotidienne affichée pendant le choix de base.")
+                        self.events.put("Attente de l'affichage complet de la base adverse.")
+                        self._wait(.5)
+                        continue
+                    loot = read_enemy_loot(image)
+            except TimeoutError:
+                self._check_stopped()
+                self._wait(.1)
+                continue
             self._check_stopped()
             if time.monotonic() >= deadline:
-                raise TimeoutError("Délai de lecture du butin dépassé sur cette base.")
-            if loot.gold is None or loot.elixir is None:
-                self.events.put("Butin adverse illisible : nouvelle lecture, sans clic.")
+                continue  # The next iteration checks whether Suivant is safe.
+            accepted, gold_minimum, elixir_minimum = loot_is_accepted(loot.gold or 0, loot.elixir or 0, self.settings)
+            known_enough = (loot.gold is not None and loot.elixir is not None) or (not self.settings.use_and_rule and (
+                (loot.gold is not None and loot.gold >= gold_minimum) or
+                (loot.elixir is not None and loot.elixir >= elixir_minimum)))
+            if not known_enough:
+                self.events.put(f"Butin adverse illisible (or={loot.gold}, élixir={loot.elixir}) : nouvelle lecture, sans clic.")
                 self._wait(1)
                 continue
-            accepted, gold_minimum, elixir_minimum = loot_is_accepted(loot.gold, loot.elixir, self.settings)
-            self.events.put(f"Base adverse : or {loot.gold:,}, élixir {loot.elixir:,} | seuils avec marge : {gold_minimum:,}/{elixir_minimum:,} → {'attaque' if accepted else 'suivant'}.")
+            gold_text = f"{loot.gold:,}" if loot.gold is not None else "illisible"
+            elixir_text = f"{loot.elixir:,}" if loot.elixir is not None else "illisible"
+            self.events.put(f"Base adverse : or {gold_text}, élixir {elixir_text} | seuils avec marge : {gold_minimum:,}/{elixir_minimum:,} → {'attaque' if accepted else 'suivant'}.")
             if accepted:
                 return True
             if not self._click(window, *layout_values("NEXT_BASE_BUTTON")):
