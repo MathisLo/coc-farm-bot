@@ -977,7 +977,11 @@ def daily_reward_open(image: Image.Image) -> bool:
 
 
 def battle_reward_open(image: Image.Image) -> bool:
-    return has_screen_text(crop_percent(image, layout_roi("SCREEN_ROIS", "battle_reward")), "choisissez")
+    for roi in (layout_roi("SCREEN_ROIS", "battle_reward"), Roi(30, 24, 70, 31)):
+        heading = read_text(crop_percent(image, roi), scale=2).casefold().replace("0", "o")
+        if "choisissez" in heading:
+            return True
+    return False
 
 
 def connection_retry_point(image):
@@ -1069,20 +1073,31 @@ def battle_reward_choice(image: Image.Image):
     This function is called only inside the recognised event.
     """
     centers = (30., 50., 70.)
-    for x in centers:
-        edge = crop_percent(image, Roi(x-6, 30.5, x+6, 31))
-        pixels = list(edge.convert("RGB").get_flattened_data())
-        if sum(min(p) > 120 and p[2] > p[0]*1.04 for p in pixels) < len(pixels)*.45:
-            return None
+    # Final victory cards sit lower than the choices shown during combat.
+    layout = None
+    for edge_y, label_top, label_bottom, click_y in ((30.5, 52, 66, 53.), (33.4, 63, 74, 60.)):
+        ready = True
+        for x in centers:
+            edge = crop_percent(image, Roi(x-6, edge_y, x+6, edge_y+.5))
+            pixels = list(edge.convert("RGB").get_flattened_data())
+            if sum(min(p) > 120 and p[2] > p[0]*1.04 for p in pixels) < len(pixels)*.45:
+                ready = False
+                break
+        if ready:
+            layout = (label_top, label_bottom, click_y)
+            break
+    if layout is None:
+        return None
+    label_top, label_bottom, click_y = layout
     tickets = None
     for x in centers:
-        readings = [read_text(crop_percent(image, Roi(x-7, 52, x+7, 66)), scale=scale) for scale in (2,1)]
+        readings = [read_text(crop_percent(image, Roi(x-7, label_top, x+7, label_bottom)), scale=scale) for scale in (2,1)]
         for raw in readings:
             text = "".join(c for c in unicodedata.normalize("NFD", raw.casefold()) if unicodedata.category(c) != "Mn")
             if re.search(r"\b[o0]r\b|\belixir\b", text):
-                return (x, 53.), raw
+                return (x, click_y), raw
             if re.search(r"\btickets?\b", text):
-                tickets = ((x, 53.), raw)
+                tickets = ((x, click_y), raw)
     return tickets  # An unreadable card or a troop never authorises a click.
 
 
@@ -1594,7 +1609,7 @@ class BotApp:
             self._wait(.15)
             image = self._capture(window)
         if chosen_label is not None:
-            self.events.put(f"Récompense de l’événement sélectionnée : {chosen_label} ; retour au combat confirmé.")
+            self.events.put(f"Récompense de l’événement sélectionnée : {chosen_label} ; fermeture du choix confirmée.")
         return image
 
     def deploy_attack_composition(self, window):
@@ -1675,7 +1690,7 @@ class BotApp:
         self._wait(1.5)  # Let the result counters finish their animation.
         previous = None
         for _ in range(5):
-            result_image = self._capture(window)
+            result_image = self._battle_capture(window)
             amounts = read_battle_earnings(result_image)
             if amounts is not None and amounts == previous:
                 if stats.finish(amounts):

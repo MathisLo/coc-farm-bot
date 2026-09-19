@@ -260,7 +260,7 @@ class DeploymentRegressions(unittest.TestCase):
             app._battle_capture(object())
         self.assertEqual(app._click.call_count, 1)
         self.assertEqual(choose.call_count, 1)
-        self.assertTrue(any("retour au combat confirmé" in m for m in app.events.queue))
+        self.assertTrue(any("fermeture du choix confirmée" in m for m in app.events.queue))
 
     def test_reward_checked_while_waiting_after_deployment(self):
         app = app_without_gui()

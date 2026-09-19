@@ -10,6 +10,24 @@ from test_regressions import app_without_gui
 
 
 class StatisticsTests(unittest.TestCase):
+    def test_final_reward_is_selected_before_counting_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = app_without_gui()
+            app.farm_stats = FarmStats(Path(directory)/'stats.json')
+            app.farm_stats.begin('account')
+            app._wait = Mock()
+            app._click = Mock(return_value=True)
+            with Image.open(Path(__file__).parent/'testdata/event_final.png') as choice, Image.open(Path(__file__).parent/'testdata/result_bonus.png') as result:
+                self.assertTrue(main.battle_reward_open(choice))
+                self.assertEqual(main.battle_reward_choice(choice)[0], (30., 60.))
+                self.assertFalse(main.battle_reward_open(result))
+                app._capture = Mock(side_effect=[choice, result, result])
+                app.record_battle_earnings('window')
+            app._click.assert_called_once_with('window', 30., 60.)
+            self.assertEqual(app.farm_stats.data['battles'], 1)
+            self.assertEqual(app.farm_stats.data['gold'], 393408)
+            self.assertFalse((Path(directory)/'unread-results').exists())
+
     def test_unreadable_result_still_returns_home(self):
         with tempfile.TemporaryDirectory() as directory:
             app=app_without_gui()
