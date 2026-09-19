@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import argparse
 import ctypes
 from ctypes import wintypes
 import json
@@ -14,21 +15,91 @@ import tempfile
 import threading
 import time
 import unicodedata
-from dataclasses import asdict, dataclass, fields
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from tkinter import BooleanVar, StringVar, Tk, ttk, messagebox
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageStat, ImageTk
+from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps, ImageStat, ImageTk
+from calibration import CalibrationDialog, validate_overrides
+from farm_stats import FarmStats
 
 APP_DIR = Path.home() / "CoCFarmBot"
 CONFIG_PATH = APP_DIR / "config-v2.json"
 LOG_PATH = APP_DIR / "bot.log"
 ACCOUNT_SNAPSHOT_PATH = APP_DIR / "account_snapshot.json"
+STATS_PATH = APP_DIR / "farm-stats.json"
+OCR_TIMEOUT = 8.0
+BASE_READ_TIMEOUT = 35.0
+_operation = threading.local()
+
+
+class OperationCancelled(RuntimeError):
+    """An explicit stop, not an automation failure."""
+
+
+class ReconnectRequired(Exception):
+    """Unwind the interrupted action before reconnecting and re-reading state."""
+
+
+def check_cancelled():
+    event = getattr(_operation, "stop_event", None)
+    if event is not None and event.is_set():
+        raise OperationCancelled("Arrêt demandé.")
+
+
+@contextmanager
+def operation_context(stop_event, settings):
+    previous = vars(_operation).copy()
+    _operation.stop_event = stop_event
+    _operation.settings = settings
+    try:
+        check_cancelled()
+        yield
+    finally:
+        vars(_operation).clear()
+        vars(_operation).update(previous)
+
+
+@contextmanager
+def ocr_deadline(deadline):
+    previous = getattr(_operation, "deadline", None)
+    _operation.deadline = min(previous, deadline) if previous is not None else deadline
+    try:
+        yield
+    finally:
+        _operation.deadline = previous
+
+
+async def bounded_ocr(awaitable):
+    """Cancel even an outstanding Windows OCR call when Stop is requested."""
+    task = asyncio.ensure_future(awaitable)
+    deadline = min(time.monotonic() + OCR_TIMEOUT,
+                   getattr(_operation, "deadline", None) or float("inf"))
+    try:
+        while True:
+            check_cancelled()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Délai de lecture OCR dépassé.")
+            done, _ = await asyncio.wait({task}, timeout=min(.05, remaining))
+            if done:
+                check_cancelled()
+                return task.result()
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 USER32 = ctypes.WinDLL("user32", use_last_error=True)
 GDI32 = ctypes.WinDLL("gdi32", use_last_error=True)
 PW_RENDERFULLCONTENT, WM_LBUTTONDOWN, WM_LBUTTONUP, MK_LBUTTON = 2, 0x0201, 0x0202, 1
 
 USER32.GetWindowRect.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.RECT)); USER32.GetWindowRect.restype = wintypes.BOOL
+USER32.GetClientRect.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.RECT)); USER32.GetClientRect.restype = wintypes.BOOL
+USER32.ClientToScreen.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.POINT)); USER32.ClientToScreen.restype = wintypes.BOOL
+USER32.IsIconic.argtypes = (wintypes.HWND,); USER32.IsIconic.restype = wintypes.BOOL
 USER32.GetWindowDC.argtypes = (wintypes.HWND,); USER32.GetWindowDC.restype = wintypes.HDC
 USER32.ReleaseDC.argtypes = (wintypes.HWND, wintypes.HDC); USER32.ReleaseDC.restype = ctypes.c_int
 USER32.PrintWindow.argtypes = (wintypes.HWND, wintypes.HDC, wintypes.UINT); USER32.PrintWindow.restype = wintypes.BOOL
@@ -61,7 +132,7 @@ class Roi:
 
 @dataclass
 class Settings:
-    version: int = 6
+    version: int = 7
     window_title: str = ""
     min_gold: int = 500000
     min_elixir: int = 500000
@@ -71,9 +142,12 @@ class Settings:
     dragon_count: int = 1
     deploy_heroes: bool = True
     upgrade_wall_between_attacks: bool = True
+    upgrade_recommended: bool = True
     chain_attacks: bool = True
     delay_between_dragons_ms: int = 180
     dry_run: bool = False
+    layout_overrides: dict = field(default_factory=dict)
+    layout_aspect_ratio: float = 16 / 9
 
 
 @dataclass(frozen=True)
@@ -96,6 +170,18 @@ class EnemyLoot:
     elixir: int | None
     dark_elixir: int | None
     raw: dict[str, str]
+
+
+@dataclass(frozen=True)
+class PreviewEvent:
+    image: Image.Image
+    title: str
+    calibrate: bool = False
+
+
+@dataclass(frozen=True)
+class StatsEvent:
+    totals: dict
 
 
 # Zones relatives de l'interface du village Google Play Jeux PC. Elles sont
@@ -124,20 +210,24 @@ WALL_ELIXIR_UPGRADE_BUTTON = (67.5, 76.5)
 WALL_CONFIRM_BUTTON = (70.0, 87.0)
 WALL_GOLD_COST_ROI = Roi(50.0, 72.0, 60.2, 79.4)
 WALL_ELIXIR_COST_ROI = Roi(59.0, 71.0, 69.0, 80.0)
+WALL_GOLD_TIGHT_COST_ROI = Roi(54.8, 74.3, 60.9, 77.3)
+WALL_ELIXIR_TIGHT_COST_ROI = Roi(62.8, 74.3, 68.9, 77.3)
 WALL_RESERVE = 1_000_000
 WALL_MORE_BUTTON = (50.0, 80.0)
 WALL_ADD_TEN_BUTTON = (42.0, 80.0)
 WALL_ADD_ONE_BUTTON = (50.0, 80.0)
 WALL_MULTI_GOLD_BUTTON = (58.3, 80.0)
 WALL_MULTI_ELIXIR_BUTTON = (66.5, 80.0)
+WALL_MULTI_CONFIRM_BUTTON = (59.0, 62.0)
 # Positions extérieures, réparties de chaque côté du terrain. Elles évitent
 # le carré central de la base : Clash n'autorise la pose des troupes que sur
 # le pourtour jouable. Les points personnalisés ne sont employés que s'ils
 # respectent eux aussi cette couronne extérieure.
 ELECTRODRAGON_PERIMETER_POINTS = [
-    (24.0, 35.0), (35.0, 20.0), (50.0, 13.0), (65.0, 20.0),
-    (76.0, 35.0), (80.0, 48.0), (68.0, 67.0), (50.0, 74.0),
-    (32.0, 67.0), (20.0, 48.0),
+    (24.0, 35.0), (35.0, 20.0), (65.0, 20.0), (76.0, 35.0),
+    (80.0, 48.0), (68.0, 67.0), (32.0, 67.0), (20.0, 48.0),
+    (18.0, 32.0), (32.0, 16.0), (68.0, 16.0), (82.0, 32.0),
+    (87.0, 46.0), (78.0, 62.0), (22.0, 62.0), (13.0, 46.0),
 ]
 TROOP_COUNT_ROIS = {
     "Électro-dragon": Roi(23.7, 85.19, 26.3, 89.35),
@@ -147,12 +237,105 @@ TROOP_ICON_ROIS = {
     "Électro-dragon": Roi(20.8, 89.8, 26.3, 97.2),
     "Dragon": Roi(14.6, 89.8, 20.1, 97.2),
 }
+TROOP_COUNTER_INK_ROIS = {
+    "Électro-dragon": Roi(24.22, 85.09, 26.56, 88.24),
+    "Dragon": Roi(18.02, 85.09, 20.36, 88.24),
+}
 HERO_HEALTH_ROIS = (Roi(34.6, 82.6, 39.5, 84.9), Roi(40.9, 82.6, 45.8, 84.9), Roi(47.2, 82.6, 52.1, 84.9))
 HERO_ICON_ROIS = (Roi(34.4, 85.7, 40.4, 98.1), Roi(40.6, 85.7, 46.6, 98.1), Roi(46.9, 85.7, 52.6, 98.1))
 ENEMY_LOOT_ROIS = {
     "gold": Roi(3.8, 10.2, 15.0, 15.5), "elixir": Roi(3.90625, 15.277777778, 13.020833333, 19.907407407), "dark_elixir": Roi(3.8, 19.0, 15.0, 25.0),
 }
 ENEMY_LOOT_LABEL_ROI = Roi(3.5, 7.5, 17.0, 11.5)
+SCREEN_ROIS = {
+    "builders_menu": Roi(38, 10, 63, 25), "wall_actions": Roi(29, 68, 71, 88),
+    "wall_confirmation": Roi(31, 41, 69, 51), "wall_confirmation_ok": Roi(49, 55, 67, 69),
+    "daily_reward": Roi(35, 9, 65, 23), "battle_reward": Roi(25, 12, 75, 22),
+    "hero_compact": Roi(28.4, 87.5, 32.55, 94.0), "hero_expanded": Roi(34.63, 87.5, 38.8, 94.0),
+    "wall_menu": Roi(35, 10, 55, 64),
+}
+RETURN_HOME_BUTTON = (50.0, 86.0)
+DAILY_REWARD_CLOSE_BUTTON = (84.0, 14.0)
+
+
+def layout_defaults():
+    """Every active named point/region can be adjusted without editing Python."""
+    defaults = {}
+    for name in ("ATTACK_HOME_BUTTON", "FIND_MATCH_BUTTON", "START_SEARCH_BUTTON", "NEXT_BASE_BUTTON",
+                 "ELECTRODRAGON_SLOT", "DRAGON_SLOT", "HERO_SLOTS", "BUILDERS_BUTTON", "WALL_MORE_BUTTON",
+                 "WALL_ADD_TEN_BUTTON", "WALL_ADD_ONE_BUTTON", "WALL_MULTI_GOLD_BUTTON", "WALL_MULTI_ELIXIR_BUTTON",
+                 "WALL_MULTI_CONFIRM_BUTTON", "RETURN_HOME_BUTTON", "DAILY_REWARD_CLOSE_BUTTON",
+                 "ELECTRODRAGON_PERIMETER_POINTS", "PROFILE_ROIS", "ENEMY_LOOT_ROIS", "ENEMY_LOOT_LABEL_ROI",
+                 "TROOP_COUNT_ROIS", "TROOP_ICON_ROIS", "TROOP_COUNTER_INK_ROIS", "HERO_HEALTH_ROIS", "HERO_ICON_ROIS",
+                 "WALL_GOLD_COST_ROI", "WALL_ELIXIR_COST_ROI", "WALL_GOLD_TIGHT_COST_ROI", "WALL_ELIXIR_TIGHT_COST_ROI",
+                 "SCREEN_ROIS"):
+        value = globals()[name]
+        if isinstance(value, dict):
+            children = value.items()
+        elif isinstance(value, (list, tuple)) and not isinstance(value[0], (int, float)):
+            children = enumerate(value)
+        else:
+            children = [(None, value)]
+        for child, item in children:
+            key = name if child is None else f"{name}.{child}"
+            defaults[key] = list(asdict(item).values()) if isinstance(item, Roi) else list(item)
+    return defaults
+
+
+LAYOUT_DEFAULTS = layout_defaults()
+
+
+def layout_labels():
+    groups = {
+        "ATTACK_HOME_BUTTON": "Village · Attaquer", "FIND_MATCH_BUTTON": "Recherche · Multijoueur",
+        "START_SEARCH_BUTTON": "Recherche · Lancer", "NEXT_BASE_BUTTON": "Recherche · Suivant",
+        "ELECTRODRAGON_SLOT": "Armée · Sélection électro-dragon", "DRAGON_SLOT": "Armée · Sélection dragon",
+        "HERO_SLOTS": "Armée · Sélection héros", "BUILDERS_BUTTON": "Village · Ouvriers",
+        "WALL_MORE_BUTTON": "Remparts · Améliorer plus", "WALL_ADD_TEN_BUTTON": "Remparts · Ajouter 10",
+        "WALL_ADD_ONE_BUTTON": "Remparts · Ajouter 1", "WALL_MULTI_GOLD_BUTTON": "Remparts · Payer en or",
+        "WALL_MULTI_ELIXIR_BUTTON": "Remparts · Payer en élixir", "WALL_MULTI_CONFIRM_BUTTON": "Remparts · Confirmer",
+        "RETURN_HOME_BUTTON": "Bataille · Retour au village", "DAILY_REWARD_CLOSE_BUTTON": "Récompense quotidienne · Fermer",
+        "ELECTRODRAGON_PERIMETER_POINTS": "Déploiement · Point", "PROFILE_ROIS": "Profil · Lecture",
+        "ENEMY_LOOT_ROIS": "Butin adverse · Lecture", "ENEMY_LOOT_LABEL_ROI": "Butin adverse · Libellé Butin",
+        "TROOP_COUNT_ROIS": "Armée · Compteur", "TROOP_ICON_ROIS": "Armée · Icône",
+        "TROOP_COUNTER_INK_ROIS": "Armée · Diagnostic du chiffre", "HERO_HEALTH_ROIS": "Héros · Barre de vie",
+        "HERO_ICON_ROIS": "Héros · Icône", "WALL_GOLD_COST_ROI": "Remparts · Prix or",
+        "WALL_ELIXIR_COST_ROI": "Remparts · Prix élixir", "WALL_GOLD_TIGHT_COST_ROI": "Remparts · Prix or (zone étroite)",
+        "WALL_ELIXIR_TIGHT_COST_ROI": "Remparts · Prix élixir (zone étroite)", "SCREEN_ROIS": "Écrans · Lecture",
+    }
+    children = {"gold": "Or", "elixir": "Élixir", "dark_elixir": "Élixir noir", "gems": "Gemmes",
+                "account_name": "Pseudo", "level": "Niveau", "builders": "Ouvriers", "laboratory_builders": "Laboratoire",
+                "builders_menu": "Menu ouvriers", "wall_actions": "Actions remparts", "wall_confirmation": "Confirmation remparts",
+                "wall_confirmation_ok": "Bouton OK remparts", "daily_reward": "Récompense quotidienne",
+                "battle_reward": "Récompense de bataille", "hero_compact": "Roi sans engin de siège",
+                "hero_expanded": "Roi avec engin de siège", "wall_menu": "Liste des remparts"}
+    labels = {}
+    for key in LAYOUT_DEFAULTS:
+        root, _, child = key.partition(".")
+        suffix = str(int(child) + 1) if child.isdigit() else children.get(child, child)
+        labels[key] = groups[root] + (" · " + suffix if suffix else "")
+    return labels
+
+
+def layout_values(name, child=None):
+    key = name if child is None else f"{name}.{child}"
+    settings = getattr(_operation, "settings", None)
+    return tuple(settings.layout_overrides.get(key, LAYOUT_DEFAULTS[key]) if settings else LAYOUT_DEFAULTS[key])
+
+
+def layout_roi(name, child=None):
+    return Roi(*layout_values(name, child))
+
+
+def layout_points(name):
+    return [layout_values(name, index) for index in range(len(globals()[name]))]
+
+
+def validate_layout(settings):
+    validate_overrides(LAYOUT_DEFAULTS, settings.layout_overrides)
+    ratio = settings.layout_aspect_ratio
+    if not isinstance(ratio, (int, float)) or not math.isfinite(ratio) or not .5 <= ratio <= 4:
+        raise ValueError("Format du calibrage invalide.")
 
 
 def load_settings() -> Settings:
@@ -169,6 +352,7 @@ def load_settings() -> Settings:
                 data.setdefault(key, value)
         if data.get("version", 0) < 6:
             data["version"] = 6
+        data["version"] = 7
         kept = {item.name for item in fields(Settings)}
         return Settings(**{key: value for key, value in data.items() if key in kept})
     except (OSError, TypeError, ValueError): return Settings()
@@ -191,32 +375,69 @@ def loot_is_accepted(gold: int, elixir: int, settings: Settings) -> tuple[bool, 
     return accepted, gold_minimum, elixir_minimum
 
 
+def white_text_mask(image: Image.Image) -> Image.Image:
+    """Keep white lettering, excluding bright coloured resource bars/icons."""
+    r, g, b = image.convert("RGB").split()
+    ink = ImageChops.darker(ImageChops.darker(r, g), b)
+    return ImageOps.expand(ink.point(lambda value: 0 if value > 180 else 255), border=8, fill=255)
+
+
 def read_safe_reserve(image: Image.Image, resource: str) -> int | None:
     """Read a home-village reserve conservatively; invalid OCR stops upgrades."""
-    rois = (PROFILE_ROIS[resource], Roi(86, 3, 95, 6.2) if resource == "gold" else Roi(86, 10.5, 95, 15))
-    values = []
-    for roi in rois:
-        crop = crop_percent(image, roi)
-        for variant in (crop, ImageOps.grayscale(crop)):
-            value = parse_reserve_number(read_text(variant, scale=3))
-            if value is not None and 0 <= value <= 20_000_000:
-                values.append(value)
-    if not values: return None
-    # A malformed shorter reading cannot silently turn 9.5 M into 950 k.
-    return max(values) if max(values) - min(values) <= 20_000 or len(values) == 1 else None
+    calibrated = f"PROFILE_ROIS.{resource}" in getattr(getattr(_operation, "settings", None), "layout_overrides", {})
+    fallback_rois = () if calibrated else ((Roi(86, 3, 95, 6.2), Roi(86, 2.5, 95, 6.5)) if resource == "gold" else (Roi(86, 10.5, 95, 15),))
+    for rois in ((layout_roi("PROFILE_ROIS", resource),), fallback_rois):
+        values = []
+        for roi in rois:
+            crop = crop_percent(image, roi)
+            for variant, scale in ((white_text_mask(crop), 3), (crop, 2), (crop, 3), (crop, 5)):
+                value = parse_reserve_number(read_text(variant, scale=scale))
+                if value is not None and 0 <= value <= 20_000_000:
+                    values.append(value)
+        if values:
+            agreed = [value for value in set(values) if values.count(value) >= 2]
+            if len(agreed) == 1:
+                return agreed[0]
+            # Prefer the full reserve strip. Narrower crops can duplicate the
+            # leading digit (1 832 344 -> 11 832 344) beside the icon.
+            if max(values) - min(values) <= 20_000:
+                return min(values)
+            # Conflicting wide-crop OCR must still try the tighter numeric
+            # strip. Previously a partial reading prevented that fallback.
+    if not calibrated:
+        crop = crop_percent(image,Roi(87,3.1,95.3,6.1) if resource=='gold' else Roi(86,10.5,95,15))
+        r,g,b = crop.convert('RGB').split()
+        ink = ImageChops.darker(ImageChops.darker(r,g),b)
+        votes = []
+        for threshold in (150,180,200,220):
+            mask = ImageOps.expand(ink.point(lambda v:0 if v>threshold else 255),border=12,fill=255)
+            value = parse_reserve_number(read_text(mask,scale=2))
+            if value is not None and value <= 20_000_000:
+                votes.append(value)
+        agreed = [value for value in set(votes) if votes.count(value)>=2]
+        if len(agreed)==1:
+            return agreed[0]
+    return None
 
 
 def parse_reserve_number(text: str) -> int | None:
-    corrected = text.translate(str.maketrans({"O": "0", "o": "0", "I": "1", "l": "1", "i": "1", "S": "5", "s": "5", "B": "8", "g": "9", "G": "9"}))
+    corrected = text.translate(str.maketrans({"O": "0", "o": "0", "I": "1", "l": "1", "i": "1", "S": "5", "s": "5", "B": "8", "g": "9", "G": "9", "-": " ", "*": " ", ",": " "}))
     match = re.search(r"(?<!\d)(\d{1,2})\s+(\d{3})\s+(\d{3})(?!\d)", corrected)
     if match: return int("".join(match.groups()))
     stripped = corrected.strip(" ,-.")
-    return int(stripped) if re.fullmatch(r"\d{7,8}", stripped) else None
+    digits = re.sub(r"\s+", "", stripped)
+    return int(digits) if re.fullmatch(r"\d{7,8}|\d{1,2}\s+\d{6}", stripped) else None
 
 
-def read_wall_cost(image: Image.Image, resource: str) -> int | None:
+def read_wall_cost(image: Image.Image, resource: str, shift: float = 0) -> int | None:
     """Read the amount printed on a wall upgrade button from two OCR passes."""
-    roi = WALL_GOLD_COST_ROI if resource == "or" else WALL_ELIXIR_COST_ROI
+    tight_roi = layout_roi("WALL_GOLD_TIGHT_COST_ROI") if resource == "or" else layout_roi("WALL_ELIXIR_TIGHT_COST_ROI")
+    tight_roi = shifted_roi(tight_roi, shift)
+    tight = parse_clash_number(read_text(crop_percent(image, tight_roi), scale=6))
+    if tight is not None and 100_000 <= tight <= 10_000_000:
+        return tight
+    roi = layout_roi("WALL_GOLD_COST_ROI") if resource == "or" else layout_roi("WALL_ELIXIR_COST_ROI")
+    roi = shifted_roi(roi, shift)
     crop = crop_percent(image, roi)
     candidates = (parse_clash_number(read_text(crop)), read_number(crop))
     valid = [value for value in candidates if value is not None and 100_000 <= value <= 10_000_000]
@@ -242,28 +463,159 @@ def wall_batch_size(balance: int, unit_cost: int, available: int) -> int:
 
 
 def read_troop_count(image: Image.Image, label: str) -> int | None:
-    icon = crop_percent(image, TROOP_ICON_ROIS[label]).convert("HSV").getchannel(1)
+    card = crop_percent(image, layout_roi("TROOP_ICON_ROIS", label))
+    # A blank/missing card is not proof that the army is empty.
+    if ImageStat.Stat(ImageOps.grayscale(card)).stddev[0] < 12:
+        return None
+    icon = card.convert("HSV").getchannel(1)
     if ImageStat.Stat(icon).mean[0] < 30:
         return 0
-    roi = TROOP_COUNT_ROIS[label]
-    for area in (roi, Roi(roi.x1, roi.y1 - .46, roi.x2, roi.y2)):
-        crop = crop_percent(image, area)
-        for variant in (crop, ImageOps.grayscale(crop)):
-            raw = read_text(variant, scale=5).casefold().translate(str.maketrans({"o": "0", "l": "1", "i": "1"}))
-            match = re.search(r"x\s*(\d{1,2})", raw)
-            if match:
-                return int(match.group(1))
+    roi = layout_roi("TROOP_COUNT_ROIS", label)
+    # The counter moves down when the deployment controls appear. Include
+    # that motion and remove the blue card before asking OCR to read x1/x2.
+    counter = crop_percent(image, Roi(max(0, roi.x1 - .5), max(0, roi.y1 - .6),
+                                     min(100, roi.x2 + 1.5), min(100, roi.y2 + 1)))
+    if counter_is_one(counter):
+        return 1
+    for scale in (3, 5):
+        raw = read_text(white_text_mask(counter), scale=scale).casefold().translate(str.maketrans({"o": "0", "l": "1", "i": "1"}))
+        match = re.fullmatch(r"[x×]\s*(\d{1,2})", raw.strip())
+        if match:
+            return int(match.group(1))
+    for shift in (0, .5, 1, -.5, -1):
+        for top in (roi.y1, roi.y1 - .46):
+            candidate = Roi(max(0, roi.x1 + shift), max(0, top), min(100, roi.x2 + shift), min(100, roi.y2))
+            if not candidate.valid(): continue
+            crop = crop_percent(image, candidate)
+            for variant in (crop, ImageOps.grayscale(crop)):
+                raw = read_text(variant, scale=5).casefold().translate(str.maketrans({"o": "0", "l": "1", "i": "1"}))
+                match = re.search(r"x\s*(\d{1,2})", raw)
+                if match:
+                    return int(match.group(1))
     return None
 
 
-def hero_health_visible(image: Image.Image, index: int) -> bool:
-    pixels = crop_percent(image, HERO_HEALTH_ROIS[index]).convert("RGB").getdata()
-    return sum(g > 100 and g > r * 1.3 and g > b * 1.15 for r, g, b in pixels) > 150
+def counter_is_one(counter: Image.Image) -> bool:
+    """Match both glyphs of x1; Windows OCR drops this short selected token.
+
+    Templates are white lettering from the confirmed 1920x1080 game capture,
+    normalised to 12x20. Require separate adjacent x and 1 components; a visual
+    change or an arbitrary narrow mark never counts as a remaining troop.
+    """
+    templates = (
+        "011100001110011100001111011110011110011110011110011111111110011111111100001111111100001111111100001111111000000111110000000111110000001111111000001111111100001111111100011111111100011110011110111110011110111100011110111100001110011000000000",
+        "000000000110111111111111111111111111111111111111111111111111001111111111001111111111001111111100001111111100000111111100000111111100000111111100000111111100000111111100000111111100000111111100000111111100000111111100000111111100000111111000",
+    )
+    mask = white_text_mask(counter)
+    pixels = mask.load()
+    pending = {(x, y) for y in range(mask.height) for x in range(mask.width) if pixels[x, y] == 0}
+    glyphs = []
+    while pending:
+        seed = pending.pop()
+        stack, component = [seed], [seed]
+        while stack:
+            x, y = stack.pop()
+            for neighbour in ((x-1,y),(x+1,y),(x,y-1),(x,y+1)):
+                if neighbour in pending:
+                    pending.remove(neighbour); stack.append(neighbour); component.append(neighbour)
+        xs, ys = zip(*component)
+        box = min(xs), min(ys), max(xs)+1, max(ys)+1
+        w, h = box[2]-box[0], box[3]-box[1]
+        if h < counter.height * .2 or h > counter.height * .8 or not .2 <= w/h <= 1.2:
+            continue
+        bits = tuple(v < 128 for v in mask.crop(box).resize((12,20)).get_flattened_data())
+        scores = [sum(bit != (ref == '1') for bit, ref in zip(bits, template))/240 for template in templates]
+        glyphs.append((box, scores))
+    for left, ls in glyphs:
+        for right, rs in glyphs:
+            if (ls[0] < .15 and rs[1] < .15 and
+                    0 <= right[0]-left[2] <= (left[3]-left[1])*.5 and
+                    abs(right[3]-left[3]) <= (left[3]-left[1])*.3):
+                return True
+    return False
 
 
-def hero_icon_saturation(image: Image.Image, index: int) -> float:
-    icon = crop_percent(image, HERO_ICON_ROIS[index]).convert("HSV").getchannel(1)
+def troop_counter_visually_changed(before: Image.Image, after: Image.Image, label: str) -> bool:
+    """Diagnostic only: a visual change does not prove a numeric decrement."""
+    roi = layout_roi("TROOP_COUNTER_INK_ROIS", label)
+    width, height = before.size
+    if after.size != before.size:
+        return False
+    x = round(width * roi.x1 / 100)
+    y = round(height * roi.y1 / 100)
+    w = round(width * (roi.x2 - roi.x1) / 100)
+    h = round(height * (roi.y2 - roi.y1) / 100)
+    # The army bar moves a few pixels when spell and hero controls appear.
+    # Match the same white lettering after a small translation first.
+    before_rgb, after_rgb = before.convert("RGB"), after.convert("RGB")
+    def ink(image, left, top):
+        card = image.crop((left, top, left + w, top + h))
+        return tuple(min(pixel) > 200 for pixel in card.get_flattened_data())
+    original = ink(before_rgb, x, y)
+    differences = (
+        sum(a != b for a, b in zip(original, ink(after_rgb, x + dx, y + dy)))
+        for dx in range(-max(1, round(width * .16 / 100)), max(1, round(width * .16 / 100)) + 1)
+        for dy in range(-max(1, round(height * .75 / 100)), max(1, round(height * .75 / 100)) + 1)
+    )
+    return min(differences) > round(w * h * .05)
+
+
+def shifted_roi(roi: Roi, shift: float) -> Roi:
+    return Roi(roi.x1 + shift, roi.y1, roi.x2 + shift, roi.y2)
+
+
+def hero_layout_shift(image: Image.Image) -> float:
+    """The siege slot may be absent; locate the king card before hero clicks."""
+    overrides = getattr(getattr(_operation, "settings", None), "layout_overrides", {})
+    if all(f"{group}.{index}" in overrides for group in ("HERO_SLOTS", "HERO_HEALTH_ROIS", "HERO_ICON_ROIS") for index in range(3)):
+        return 0.0  # Explicit calibrated slots/regions already include the shift.
+    def skin_pixels(roi):
+        pixels = crop_percent(image, roi).convert("RGB").get_flattened_data()
+        return sum(r > 140 and 75 < g < 210 and b < 110 and r > g * 1.12 and g > b * 1.2 for r, g, b in pixels)
+    compact = skin_pixels(layout_roi("SCREEN_ROIS", "hero_compact"))
+    expanded = skin_pixels(layout_roi("SCREEN_ROIS", "hero_expanded"))
+    area_scale = image.width * image.height / (1920 * 1080)
+    if max(compact, expanded) < 1_000 * area_scale or abs(compact - expanded) < 350 * area_scale:
+        raise RuntimeError("Position des héros incertaine dans la barre d'armée.")
+    return -6.25 if compact > expanded else 0.0
+
+
+def hero_health_visible(image: Image.Image, index: int, shift: float = 0) -> bool:
+    crop = crop_percent(image, hero_region("HERO_HEALTH_ROIS", index, shift)).convert("RGB")
+    pixels = crop.load()
+    def green(x, y):
+        r, g, b = pixels[x, y]
+        return g > 180 and g > r * 1.4 and g > b * 1.3
+    # Grass behind an unraised hero card used to count as a health bar.
+    # Require a bright horizontal fill, aligned with the card's left side,
+    # at least two rows thick and immediately underneath a dark frame.
+    for y in range(2, crop.height - 1):
+        start = None
+        for x in range(crop.width + 1):
+            if x < crop.width and green(x, y):
+                if start is None: start = x
+                continue
+            if start is not None:
+                length = x - start
+                if start <= crop.width * .25 and length >= crop.width * .35:
+                    second = sum(green(k, y+1) for k in range(start, x))
+                    border = max(sum(max(pixels[k, row]) < 100 for k in range(start, x))
+                                 for row in range(max(0, y-7), y))
+                    if second >= length * .8 and border >= length * .6:
+                        return True
+                start = None
+    return False
+
+
+def hero_icon_saturation(image: Image.Image, index: int, shift: float = 0) -> float:
+    icon = crop_percent(image, hero_region("HERO_ICON_ROIS", index, shift)).convert("HSV").getchannel(1)
     return ImageStat.Stat(icon).mean[0]
+
+
+def hero_region(group, index, shift):
+    overrides = getattr(getattr(_operation, "settings", None), "layout_overrides", {})
+    roi = layout_roi(group, index)
+    return roi if f"{group}.{index}" in overrides else shifted_roi(roi, shift)
 
 
 def repeated_points(points: tuple[tuple[float, float], ...] | list[tuple[float, float]], count: int) -> list[tuple[float, float]]:
@@ -291,6 +643,16 @@ class GameWindow:
     hwnd: int; title: str; width: int; height: int
 
 
+@dataclass(frozen=True)
+class ClientGeometry:
+    width: int
+    height: int
+    offset_x: int
+    offset_y: int
+    outer_width: int
+    outer_height: int
+
+
 class WindowDriver:
     """Approche de l'inspiration NullMacro : fenêtre entière + PostMessage."""
     @staticmethod
@@ -312,13 +674,36 @@ class WindowDriver:
     @staticmethod
     def resolve(title: str) -> GameWindow | None:
         windows = WindowDriver.list_windows()
-        return next((w for w in windows if w.title == title), next((w for w in windows if w.title.casefold().startswith("clash of clans")), None))
+        # Never silently switch accounts when the selected window disappears.
+        if title:
+            return next((w for w in windows if w.title == title), None)
+        return next((w for w in windows if w.title.casefold().startswith("clash of clans")), None)
+
+    @staticmethod
+    def client_geometry(window: GameWindow) -> ClientGeometry:
+        hwnd = wintypes.HWND(window.hwnd)
+        if not USER32.IsWindow(hwnd) or USER32.IsIconic(hwnd):
+            raise RuntimeError("Fenêtre Clash fermée ou réduite.")
+        outer, client, origin = wintypes.RECT(), wintypes.RECT(), wintypes.POINT(0, 0)
+        if not (USER32.GetWindowRect(hwnd, ctypes.byref(outer))
+                and USER32.GetClientRect(hwnd, ctypes.byref(client))
+                and USER32.ClientToScreen(hwnd, ctypes.byref(origin))):
+            raise RuntimeError("Dimensions de la fenêtre Clash indisponibles.")
+        geometry = ClientGeometry(client.right - client.left, client.bottom - client.top,
+                                  origin.x - outer.left, origin.y - outer.top,
+                                  outer.right - outer.left, outer.bottom - outer.top)
+        if (geometry.width <= 0 or geometry.height <= 0 or geometry.offset_x < 0 or geometry.offset_y < 0
+                or geometry.offset_x + geometry.width > geometry.outer_width
+                or geometry.offset_y + geometry.height > geometry.outer_height):
+            raise RuntimeError("Zone de jeu invalide.")
+        return geometry
 
     @staticmethod
     def capture(window: GameWindow) -> Image.Image:
+        check_cancelled()
         hwnd = wintypes.HWND(window.hwnd)
-        if not USER32.IsWindow(hwnd): raise RuntimeError("La fenêtre Clash a été fermée.")
-        rect = wintypes.RECT(); USER32.GetWindowRect(hwnd, ctypes.byref(rect)); width, height = rect.right - rect.left, rect.bottom - rect.top
+        geometry = WindowDriver.client_geometry(window)
+        width, height = geometry.outer_width, geometry.outer_height
         source_dc = USER32.GetWindowDC(hwnd); memory_dc = GDI32.CreateCompatibleDC(source_dc); bitmap = GDI32.CreateCompatibleBitmap(source_dc, width, height); previous = GDI32.SelectObject(memory_dc, bitmap)
         try:
             if not USER32.PrintWindow(hwnd, memory_dc, PW_RENDERFULLCONTENT): raise RuntimeError("Google Play Jeux a refusé la capture.")
@@ -326,15 +711,61 @@ class WindowDriver:
             data = ctypes.create_string_buffer(width * height * 4)
             if GDI32.GetDIBits(memory_dc, bitmap, 0, height, data, ctypes.byref(info), 0) != height: raise RuntimeError("Capture Windows incomplète.")
             image = Image.frombuffer("RGB", (width, height), data, "raw", "BGRX", 0, 1).copy()
+            image = image.crop((geometry.offset_x, geometry.offset_y,
+                                geometry.offset_x + geometry.width, geometry.offset_y + geometry.height))
             if image.convert("L").getextrema() == (0, 0): raise RuntimeError("Capture noire : Google Play Jeux n'expose pas son rendu en arrière-plan.")
+            if WindowDriver.client_geometry(window) != geometry:
+                raise RuntimeError("Fenêtre redimensionnée pendant la capture : relancer la lecture.")
+            _operation.last_capture = (window.hwnd, geometry)
+            check_cancelled()
             return image
         finally:
             GDI32.SelectObject(memory_dc, previous); GDI32.DeleteObject(bitmap); GDI32.DeleteDC(memory_dc); USER32.ReleaseDC(hwnd, source_dc)
 
     @staticmethod
+    def zoom_out_step(window: GameWindow) -> bool:
+        check_cancelled()
+        geometry = WindowDriver.client_geometry(window)
+        if getattr(_operation, "last_capture", None) != (window.hwnd, geometry):
+            raise RuntimeError("Fenêtre modifiée avant le dézoom : commande annulée.")
+        # WM_MOUSEWHEEL uses screen coordinates, unlike WM_LBUTTONDOWN.
+        point = wintypes.POINT(geometry.width // 2, geometry.height // 2)
+        if not USER32.ClientToScreen(window.hwnd, ctypes.byref(point)):
+            raise RuntimeError("Position du jeu indisponible pour le dézoom.")
+        coordinates = ((point.y & 0xFFFF) << 16) | (point.x & 0xFFFF)
+        check_cancelled()
+        return bool(USER32.PostMessageW(window.hwnd, 0x020A, ((-120 & 0xFFFF) << 16), coordinates))
+
+    @staticmethod
+    def scroll_menu(window, x=50, y=48, delta=-120):
+        check_cancelled()
+        geometry = WindowDriver.client_geometry(window)
+        if getattr(_operation, 'last_capture', None) != (window.hwnd, geometry):
+            raise RuntimeError('Fenêtre modifiée avant le défilement.')
+        point = wintypes.POINT(round(geometry.width*x/100),round(geometry.height*y/100))
+        if not USER32.ClientToScreen(window.hwnd,ctypes.byref(point)):
+            raise RuntimeError('Position de la liste indisponible.')
+        return bool(USER32.PostMessageW(window.hwnd,0x020A,((delta & 0xFFFF)<<16),
+                                       ((point.y & 0xFFFF)<<16)|(point.x & 0xFFFF)))
+
+    @staticmethod
     def click_percent(window: GameWindow, x: float, y: float) -> bool:
-        px, py = round(window.width * x / 100), round(window.height * y / 100); lp = (py << 16) | (px & 0xFFFF)
-        return bool(USER32.PostMessageW(window.hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lp) and USER32.PostMessageW(window.hwnd, WM_LBUTTONUP, 0, lp))
+        check_cancelled()
+        geometry = WindowDriver.client_geometry(window)
+        if getattr(_operation, "last_capture", None) != (window.hwnd, geometry):
+            raise RuntimeError("Fenêtre modifiée depuis la lecture : aucun clic envoyé. Relancer le bot.")
+        settings = getattr(_operation, "settings", None)
+        if settings and abs(geometry.width / geometry.height / settings.layout_aspect_ratio - 1) > .02:
+            raise RuntimeError("Format de fenêtre différent du calibrage : utiliser Calibrer avant de relancer.")
+        if not (math.isfinite(x) and math.isfinite(y) and 0 <= x <= 100 and 0 <= y <= 100):
+            raise ValueError("Coordonnées de clic invalides.")
+        px, py = min(geometry.width - 1, round(geometry.width * x / 100)), min(geometry.height - 1, round(geometry.height * y / 100))
+        lp = (py << 16) | (px & 0xFFFF)
+        check_cancelled()
+        pressed = USER32.PostMessageW(window.hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lp)
+        # Always release a pressed button, including a stop requested mid-click.
+        released = USER32.PostMessageW(window.hwnd, WM_LBUTTONUP, 0, lp)
+        return bool(pressed and released)
 
 
 def crop_percent(image: Image.Image, roi: Roi) -> Image.Image:
@@ -347,10 +778,15 @@ async def _ocr_file(path: str) -> str:
     from winrt.windows.media.ocr import OcrEngine
     from winrt.windows.storage import FileAccessMode, StorageFile
     stream = await (await StorageFile.get_file_from_path_async(path)).open_async(FileAccessMode.READ)
-    bitmap = await (await BitmapDecoder.create_async(stream)).get_software_bitmap_async()
-    engine = OcrEngine.try_create_from_user_profile_languages()
-    if engine is None: raise RuntimeError("OCR Windows indisponible.")
-    return (await engine.recognize_async(bitmap)).text
+    bitmap = None
+    try:
+        bitmap = await (await BitmapDecoder.create_async(stream)).get_software_bitmap_async()
+        engine = OcrEngine.try_create_from_user_profile_languages()
+        if engine is None: raise RuntimeError("OCR Windows indisponible.")
+        return (await engine.recognize_async(bitmap)).text
+    finally:
+        if bitmap is not None: bitmap.close()
+        stream.close()
 
 
 async def _ocr_words_file(path: str) -> list[tuple[str, float, float]]:
@@ -359,61 +795,124 @@ async def _ocr_words_file(path: str) -> list[tuple[str, float, float]]:
     from winrt.windows.storage import FileAccessMode, StorageFile
 
     stream = await (await StorageFile.get_file_from_path_async(path)).open_async(FileAccessMode.READ)
-    bitmap = await (await BitmapDecoder.create_async(stream)).get_software_bitmap_async()
-    engine = OcrEngine.try_create_from_user_profile_languages()
-    if engine is None: raise RuntimeError("OCR Windows indisponible.")
-    result = await engine.recognize_async(bitmap)
-    return [(word.text, word.bounding_rect.x + word.bounding_rect.width / 2, word.bounding_rect.y + word.bounding_rect.height / 2)
-            for line in result.lines for word in line.words]
+    bitmap = None
+    try:
+        bitmap = await (await BitmapDecoder.create_async(stream)).get_software_bitmap_async()
+        engine = OcrEngine.try_create_from_user_profile_languages()
+        if engine is None: raise RuntimeError("OCR Windows indisponible.")
+        result = await engine.recognize_async(bitmap)
+        return [(word.text, word.bounding_rect.x + word.bounding_rect.width / 2, word.bounding_rect.y + word.bounding_rect.height / 2)
+                for line in result.lines for word in line.words]
+    finally:
+        if bitmap is not None: bitmap.close()
+        stream.close()
 
 
 def read_word_centers(image: Image.Image) -> list[tuple[str, float, float]]:
+    check_cancelled()
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as file: path = Path(file.name)
     try:
         image.save(path)
-        return [(word, x * 100 / image.width, y * 100 / image.height) for word, x, y in asyncio.run(_ocr_words_file(str(path)))]
+        return [(word, x * 100 / image.width, y * 100 / image.height) for word, x, y in asyncio.run(bounded_ocr(_ocr_words_file(str(path))))]
     finally: path.unlink(missing_ok=True)
 
 
 def find_wall_menu_item(image: Image.Image) -> tuple[float, float] | None:
-    for word, x, y in read_word_centers(image):
-        if "rempart" in word.casefold() and 35 <= x <= 55 and 10 <= y <= 60:
-            return x, y
-    return None
+    menu_roi = layout_roi("SCREEN_ROIS", "wall_menu")
+    menu = crop_percent(image, menu_roi)
+    for word, x, y in read_word_centers(menu):
+        if word.casefold().startswith("rempar") and x < 65:
+            return (menu_roi.x1 + x * (menu_roi.x2 - menu_roi.x1) / 100,
+                    menu_roi.y1 + y * (menu_roi.y2 - menu_roi.y1) / 100)
+    # A selected wall shifts the camera and the full-screen OCR can lose the
+    # row even though a narrow crop still reads "Rempart x…" clearly.
+    exact_rows = []
+    partial_rows = []
+    for y in range(math.ceil(menu_roi.y1 + 3), math.floor(menu_roi.y2 - 3) + 1, 2):
+        row = read_text(crop_percent(image, Roi(menu_roi.x1, y - 3, menu_roi.x2, y + 3)), scale=2).casefold()
+        if "rempar" in row:
+            if re.search(r"x\s*\d{1,3}\b", row):
+                exact_rows.append(y)
+            else:
+                partial_rows.append(y)
+    rows = exact_rows
+    return ((menu_roi.x1 + menu_roi.x2) / 2, float(rows[len(rows) // 2])) if rows else None
+
+
+def builders_menu_open(image: Image.Image) -> bool:
+    return "disponible" in read_text(crop_percent(image, layout_roi("SCREEN_ROIS", "builders_menu")), scale=2).casefold()
 
 
 def read_wall_available(image: Image.Image, item: tuple[float, float]) -> int | None:
     x, y = item
-    roi = Roi(max(0, x - 4), max(0, y - 2.5), min(100, x + 9), min(100, y + 2.5))
-    match = re.search(r"[xX]\s*(\d{1,3})", read_text(crop_percent(image, roi), scale=2))
-    return int(match.group(1)) if match else None
+    values = []
+    for offset in (0, 2, -2):
+        roi = Roi(max(0, x - 4), max(0, y + offset - 2.5), min(100, x + 9), min(100, y + offset + 2.5))
+        raw = read_text(crop_percent(image, roi), scale=2).casefold().translate(str.maketrans({"l": "1", "i": "1", "g": "6", "s": "5", "o": "0", "b": "8"}))
+        match = re.search(r"x\s*(\d{1,3})", raw)
+        if match: values.append(int(match.group(1)))
+    return max(values) if values else None
+
+
+def find_wall_remove_button(image, shift=0):
+    roi=shifted_roi(Roi(25,80,44,87),shift)
+    matches=[]
+    for text,x,y in read_word_centers(crop_percent(image,roi)):
+        if text.casefold().strip('.,:')=='supprimer':
+            matches.append((roi.x1+x*(roi.x2-roi.x1)/100,roi.y1+y*(roi.y2-roi.y1)/100))
+    return matches[0] if len(matches)==1 else None
 
 
 def wall_selected(image: Image.Image) -> bool:
-    text = read_text(crop_percent(image, Roi(29, 68, 71, 88)), scale=2).casefold()
-    return "plus" in text and "aj" not in text
+    return find_wall_more_button(image) is not None
+
+
+def find_wall_more_button(image: Image.Image):
+    # A wall-ring button changes the entire row's horizontal alignment.
+    # Locate the actual "Améliorer plus" label instead of clicking its old slot.
+    roi = layout_roi("SCREEN_ROIS", "wall_actions")
+    labels = Roi(roi.x1, roi.y1 + (roi.y2-roi.y1)*.7, roi.x2, roi.y2 - (roi.y2-roi.y1)*.05)
+    for region, masked in ((labels, False), (roi, True)):
+        crop = crop_percent(image, region)
+        if masked:
+            crop = white_text_mask(crop).crop((8, 8, crop.width + 8, crop.height + 8))
+        for text, x, y in read_word_centers(crop.resize((crop.width * 2, crop.height * 2))):
+            if text.casefold().strip(".,:!") in ("plus", "pluse", "plvs", "p1us", "pius"):
+                return (region.x1 + x * (region.x2 - region.x1) / 100,
+                        region.y1 + y * (region.y2 - region.y1) / 100)
+    return None
 
 
 def wall_multi_mode(image: Image.Image) -> bool:
-    text = read_text(crop_percent(image, Roi(29, 68, 71, 88)), scale=2).casefold()
-    return "aj" in text and "remp" in text
+    text = read_text(white_text_mask(crop_percent(image, layout_roi("SCREEN_ROIS", "wall_actions"))), scale=2).casefold()
+    return "remp" in text and any(token in text for token in ("aj", "aiou", "supp"))
+
+
+def wall_batch_confirmation_matches(image: Image.Image, total: int, resource: str) -> bool:
+    text = read_text(crop_percent(image, layout_roi("SCREEN_ROIS", "wall_confirmation")), scale=2).casefold()
+    amount = re.search(r"pour\s*([\d\s]+)", text)
+    payment = "lixir" if resource == "élixir" else "or"
+    ok = read_text(crop_percent(image, layout_roi("SCREEN_ROIS", "wall_confirmation_ok")), scale=2).casefold()
+    return bool("rempart" in text and amount and parse_clash_number(amount.group(1)) == total and payment in text[amount.end():] and "ok" in ok)
 
 
 def read_number(image: Image.Image) -> int | None:
+    check_cancelled()
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as file: path = Path(file.name)
     try:
         image.resize((image.width * 3, image.height * 3)).save(path)
-        digits = re.sub(r"[^0-9]", "", asyncio.run(_ocr_file(str(path))))
+        digits = re.sub(r"[^0-9]", "", asyncio.run(bounded_ocr(_ocr_file(str(path)))))
         return int(digits) if digits else None
     finally: path.unlink(missing_ok=True)
 
 
 def read_text(image: Image.Image, scale: int = 5) -> str:
     """OCR a local UI crop while keeping the raw reading for diagnostics."""
+    check_cancelled()
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as file: path = Path(file.name)
     try:
         image.resize((image.width * scale, image.height * scale)).save(path)
-        return asyncio.run(_ocr_file(str(path))).strip()
+        return asyncio.run(bounded_ocr(_ocr_file(str(path)))).strip()
     finally: path.unlink(missing_ok=True)
 
 
@@ -426,11 +925,12 @@ def parse_clash_number(text: str) -> int | None:
 def read_resource_number(image: Image.Image) -> tuple[int | None, str]:
     """Try normal and high-contrast OCR; keep the most complete valid amount."""
     normal = read_text(image)
-    binary = read_text(ImageOps.grayscale(image).point(lambda pixel: 255 if pixel > 150 else 0))
-    binary_value = parse_clash_number(binary)
-    if binary_value is not None and binary_value <= 2_500_000: return binary_value, binary
-    normal_value = parse_clash_number(normal)
-    return (normal_value, normal) if normal_value is not None and normal_value <= 2_500_000 else (None, normal)
+    binary = read_text(white_text_mask(image), scale=3)
+    candidates = [(parse_clash_number(raw), raw) for raw in (binary, normal)]
+    valid = [(value, raw) for value, raw in candidates if value is not None and value <= 2_500_000]
+    # The mask can lose a thin leading 1. Do not replace a complete reading
+    # with its truncated suffix merely because it came from the mask.
+    return max(valid, key=lambda reading: reading[0]) if valid else (None, normal)
 
 
 def parse_worker_ratio(text: str) -> str | None:
@@ -446,7 +946,7 @@ def parse_worker_ratio(text: str) -> str | None:
 
 
 def read_account_snapshot(image: Image.Image) -> AccountSnapshot:
-    raw = {key: read_text(crop_percent(image, roi)) for key, roi in PROFILE_ROIS.items()}
+    raw = {key: read_text(crop_percent(image, layout_roi("PROFILE_ROIS", key))) for key in PROFILE_ROIS}
     # On the white worker counter, Windows OCR needs the surrounding top bar.
     # Its usual `Sts` output maps to 5/5 through parse_worker_ratio().
     if not raw["builders"]:
@@ -463,13 +963,127 @@ def read_account_snapshot(image: Image.Image) -> AccountSnapshot:
 
 
 def read_enemy_loot(image: Image.Image) -> EnemyLoot:
-    readings = {key: read_resource_number(crop_percent(image, roi)) for key, roi in ENEMY_LOOT_ROIS.items()}
+    readings = {key: read_resource_number(crop_percent(image, layout_roi("ENEMY_LOOT_ROIS", key))) for key in ENEMY_LOOT_ROIS}
     return EnemyLoot(gold=readings["gold"][0], elixir=readings["elixir"][0], dark_elixir=readings["dark_elixir"][0], raw={key: text for key, (_, text) in readings.items()})
 
 
 def enemy_loot_screen_ready(image: Image.Image) -> bool:
-    label = read_text(crop_percent(image, ENEMY_LOOT_LABEL_ROI)).casefold()
-    return "butin" in label or "loot" in label
+    label = read_text(crop_percent(image, layout_roi("ENEMY_LOOT_LABEL_ROI")), scale=2).casefold()
+    return "butin" in label or "disponible" in label or "loot" in label
+
+
+def daily_reward_open(image: Image.Image) -> bool:
+    return has_screen_text(crop_percent(image, layout_roi("SCREEN_ROIS", "daily_reward")), "quotidienne")
+
+
+def battle_reward_open(image: Image.Image) -> bool:
+    return has_screen_text(crop_percent(image, layout_roi("SCREEN_ROIS", "battle_reward")), "choisissez")
+
+
+def connection_retry_point(image):
+    # Observed Google Play Games connection dialog; fast background check
+    # avoids an extra OCR pass on every ordinary combat capture.
+    if any(max(image.getpixel((round(image.width*x/100),round(image.height*y/100)))[:3])>65
+           for x,y in ((29.3,42.5),(70,42.5),(69.5,57.5))):
+        return None
+    heading=read_text(crop_percent(image,Roi(29,41,71,47)),scale=2).casefold()
+    if not re.search(r'connexion\s+perdue',heading):
+        return None
+    for text,x,y in read_word_centers(crop_percent(image,Roi(29,54,71,60))):
+        label=''.join(c for c in unicodedata.normalize('NFD',text.casefold()) if unicodedata.category(c)!='Mn')
+        if label.strip('!?.:')=='reessayer':
+            return (29+x*.42,54+y*.06)
+    return None
+
+
+def read_result_amount(image, main_result=False):
+    values = []
+    variants = []
+    if main_result:
+        r,g,b = image.convert('RGB').split()
+        ink = ImageChops.darker(ImageChops.darker(r,g),b)
+        for threshold in (160,180):
+            variants.append((ImageOps.expand(ink.point(lambda v:0 if v>threshold else 255),border=12,fill=255),2))
+    variants.extend(((image, 2), (image, 3), (white_text_mask(image), 3), (image, 1)))
+    for crop, scale in variants:
+        raw = read_text(crop, scale=scale).strip(" +.,'\"*")
+        raw = raw.translate(str.maketrans({"O": "0", "o": "0", "Ç": "4", "ç": "4"}))
+        if re.fullmatch(r"\d[\d\s]*", raw):
+            digits = re.sub(r"\s", "", raw)
+            if len(digits) > 1 and digits.startswith("0"):
+                continue  # A missing leading digit must not become a smaller gain.
+            value = int(digits)
+            if value <= 20_000_000:
+                values.append(value)
+                if values.count(value) >= 2:
+                    return value
+    return None
+
+
+def read_battle_earnings(image):
+    if not has_screen_text(crop_percent(image, Roi(40,24,59,33)), "victoire", "défaite"):
+        return None
+    rois = (Roi(39,43.5,52.5,49), Roi(39,50,52.5,56), Roi(43,57,52.5,62.5))
+    amounts = [read_result_amount(crop_percent(image, roi), main_result=True) for roi in rois]
+    # Scenery behind short dark-elixir amounts can erase the leading digits
+    # in one crop. Require agreement across distinct crop boundaries.
+    dark_readings = [read_result_amount(crop_percent(image,Roi(x,57.3,52.5,61.3)),main_result=True)
+                     for x in (41,42,43,44)]
+    dark_agreed = [value for value in set(dark_readings) if value is not None and dark_readings.count(value)>=2]
+    amounts[2] = dark_agreed[0] if len(dark_agreed)==1 else None
+    if None in amounts:
+        # A zero-loot defeat omits the dark-elixir row and centres two rows.
+        zero_rows = [result_zero_visible(crop_percent(image, roi)) for roi in
+                     (Roi(49.8,47,52.5,51.5), Roi(49.8,54.5,52.5,59))]
+        if all(zero_rows):
+            amounts = [0, 0, 0]
+        else:
+            return None
+    bonus_rois = (Roi(72,49.3,79,52.5), Roi(72,54,79,58), Roi(72,59,79,63))
+    bonus = [read_result_amount(crop_percent(image, roi)) for roi in bonus_rois]
+    if all(value is None for value in bonus) and not has_screen_text(crop_percent(image, Roi(67,42,83,64)), "bonus"):
+        bonus = [0, 0, 0]
+    if None in bonus:
+        return None
+    return tuple(a+b for a,b in zip(amounts, bonus))
+
+
+def result_zero_visible(crop):
+    # Windows OCR often ignores an isolated character. Repeat the same crop
+    # to make a word, requiring all four characters to be recognised as zero.
+    mask = white_text_mask(crop)
+    repeated = Image.new("RGB", (mask.width * 4, mask.height), "white")
+    for index in range(4):
+        repeated.paste(mask, (index * mask.width, 0))
+    for scale in (2, 3):
+        raw = re.sub(r"\s", "", read_text(repeated, scale=scale)).lower()
+        if raw.replace("o", "0") == "0000":
+            return True
+    return False
+
+
+def battle_reward_choice(image: Image.Image):
+    """Only return a card after all three frames have appeared.
+
+    Prefer gold/elixir, then event tickets. Never choose an event troop.
+    This function is called only inside the recognised event.
+    """
+    centers = (30., 50., 70.)
+    for x in centers:
+        edge = crop_percent(image, Roi(x-6, 30.5, x+6, 31))
+        pixels = list(edge.convert("RGB").get_flattened_data())
+        if sum(min(p) > 120 and p[2] > p[0]*1.04 for p in pixels) < len(pixels)*.45:
+            return None
+    tickets = None
+    for x in centers:
+        readings = [read_text(crop_percent(image, Roi(x-7, 52, x+7, 66)), scale=scale) for scale in (2,1)]
+        for raw in readings:
+            text = "".join(c for c in unicodedata.normalize("NFD", raw.casefold()) if unicodedata.category(c) != "Mn")
+            if re.search(r"\b[o0]r\b|\belixir\b", text):
+                return (x, 53.), raw
+            if re.search(r"\btickets?\b", text):
+                tickets = ((x, 53.), raw)
+    return tickets  # An unreadable card or a troop never authorises a click.
 
 
 class BotApp:
@@ -479,11 +1093,14 @@ class BotApp:
         self.settings = load_settings()
         self.root = Tk()
         self.root.title("CoC Farm Bot")
-        self.root.geometry("1120x900")
-        self.root.minsize(940, 840)
+        self.root.geometry("1200x900")
+        self.root.minsize(1040, 860)
         self.events = queue.Queue()
         self.stop_event = threading.Event()
+        self.action_lock = threading.RLock()
         self.worker = None
+        self.inspection_worker = None
+        self.calibration_dialog = None
         self.photo = None
         self.window_title = StringVar(value=self.settings.window_title)
         self.min_gold = StringVar(value=str(self.settings.min_gold))
@@ -495,134 +1112,101 @@ class BotApp:
         self.dry_run = BooleanVar(value=self.settings.dry_run)
         self.deploy_heroes = BooleanVar(value=self.settings.deploy_heroes)
         self.upgrade_wall = BooleanVar(value=self.settings.upgrade_wall_between_attacks)
+        self.upgrade_recommended = BooleanVar(value=self.settings.upgrade_recommended)
         self.chain_attacks = BooleanVar(value=self.settings.chain_attacks)
         self.status = StringVar(value="Prêt à lire la fenêtre du jeu.")
         self.run_state = StringVar(value="PRÊT")
+        self.farm_stats = FarmStats(STATS_PATH)
+        self.stats_vars = {key: StringVar(value=f"{self.farm_stats.data[key]:,}".replace(",", " "))
+                           for key in ("gold", "elixir", "dark_elixir")}
+        self.stats_count = StringVar(value=f"{self.farm_stats.data['battles']} combat(s) comptabilisé(s) · cumul sauvegardé")
         self._build()
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
         self._pump()
 
-    def _style(self):
-        self.colors = {
-            "bg": "#101B2A", "card": "#1B2A3D", "field": "#26394F",
-            "text": "#EEF5FB", "muted": "#9EB2C7", "accent": "#66C6D8",
-            "line": "#344A60",
-        }
-        self.root.configure(background=self.colors["bg"])
-        style = ttk.Style(self.root)
-        style.theme_use("clam")
-        style.configure("App.TFrame", background=self.colors["bg"])
-        style.configure("Card.TFrame", background=self.colors["card"])
-        style.configure("App.TLabel", background=self.colors["bg"], foreground=self.colors["text"], font=("Segoe UI", 11))
-        style.configure("Card.TLabel", background=self.colors["card"], foreground=self.colors["text"], font=("Segoe UI", 10))
-        style.configure("Muted.TLabel", background=self.colors["card"], foreground=self.colors["muted"], font=("Segoe UI", 9))
-        style.configure("Section.TLabel", background=self.colors["card"], foreground=self.colors["text"], font=("Segoe UI Semibold", 12))
-        style.configure("Hero.TLabel", background=self.colors["bg"], foreground=self.colors["text"], font=("Segoe UI Semibold", 23))
-        style.configure("Eyebrow.TLabel", background=self.colors["bg"], foreground=self.colors["accent"], font=("Segoe UI Semibold", 9))
-        style.configure("State.TLabel", background=self.colors["field"], foreground=self.colors["accent"], font=("Segoe UI Semibold", 9), padding=(12, 6))
-        style.configure("App.TEntry", fieldbackground=self.colors["field"], foreground=self.colors["text"], insertcolor=self.colors["text"], bordercolor=self.colors["line"], padding=6)
-        style.configure("App.TCombobox", fieldbackground=self.colors["field"], foreground=self.colors["text"], arrowcolor=self.colors["accent"], bordercolor=self.colors["line"], padding=6)
-        style.map("App.TCombobox", fieldbackground=[("readonly", self.colors["field"])], foreground=[("readonly", self.colors["text"])])
-        style.configure("App.TCheckbutton", background=self.colors["card"], foreground=self.colors["text"], font=("Segoe UI", 10))
-        style.map("App.TCheckbutton", background=[("active", self.colors["card"])], foreground=[("active", self.colors["text"])])
-        style.configure("Quiet.TButton", background=self.colors["field"], foreground=self.colors["text"], borderwidth=0, padding=(12, 8), font=("Segoe UI Semibold", 10))
-        style.map("Quiet.TButton", background=[("active", self.colors["line"])])
-        style.configure("Primary.TButton", background=self.colors["accent"], foreground=self.colors["bg"], borderwidth=0, padding=(16, 11), font=("Segoe UI Semibold", 11))
-        style.map("Primary.TButton", background=[("active", "#93DBE7"), ("disabled", self.colors["line"])])
+    def _check_stopped(self):
+        if self.stop_event.is_set():
+            raise OperationCancelled("Arrêt demandé.")
 
-    def _card(self, parent, title, subtitle=None):
-        frame = ttk.Frame(parent, style="Card.TFrame", padding=10)
-        ttk.Label(frame, text=title, style="Section.TLabel").pack(anchor="w")
-        if subtitle:
-            ttk.Label(frame, text=subtitle, style="Muted.TLabel").pack(anchor="w", pady=(3, 8))
-        else:
-            ttk.Frame(frame, style="Card.TFrame", height=10).pack()
-        return frame
+    def _capture(self, window):
+        self._check_stopped()
+        image = WindowDriver.capture(window)
+        self._check_stopped()
+        if connection_retry_point(image) is not None:
+            self._reconnect_pending = True
+            raise ReconnectRequired()
+        return image
+
+    def _click(self, window, x, y):
+        # Stop and click share a lock: after stop() returns no new press is sent.
+        with self.action_lock:
+            self._check_stopped()
+            return WindowDriver.click_percent(window, x, y)
+
+    def _wait(self, seconds):
+        if self.stop_event.wait(seconds):
+            raise OperationCancelled("Arrêt demandé.")
+        return False
+
+    def _run_operation(self, target):
+        try:
+            validate_layout(self.settings)
+            while not self.stop_event.is_set():
+                try:
+                    with operation_context(self.stop_event, self.settings):
+                        target()
+                    break
+                except ReconnectRequired:
+                    with operation_context(self.stop_event, self.settings):
+                        self.reconnect_game()
+                    self._reconnect_pending = False
+        except OperationCancelled:
+            self.events.put("Opération interrompue.")
+        except Exception as exc:
+            self.events.put(f"Opération arrêtée : {exc}")
+        finally:
+            self._reconnect_pending = False
+
+    def reconnect_game(self):
+        self.events.put('Connexion perdue : reconnexion automatique en cours.')
+        stable = 0
+        last_attempt = -float('inf')
+        while not self.stop_event.is_set():
+            window = WindowDriver.resolve(self.settings.window_title)
+            if not window:
+                self._wait(2)
+                continue
+            image = WindowDriver.capture(window)
+            point = connection_retry_point(image)
+            if point is not None:
+                stable = 0
+                if time.monotonic()-last_attempt>=10:
+                    if not self._click(window,*point):
+                        raise RuntimeError('Reconnexion refusée par la fenêtre du jeu.')
+                    last_attempt = time.monotonic()
+                    self.events.put('Réessayer envoyé ; attente du jeu.')
+                    self._wait(3)
+            elif has_all_screen_text(image,'attaquer','magasin') or has_screen_text(image,'victoire','défaite','fin de la bataille'):
+                stable += 1
+                if stable >= 2:
+                    self.events.put('Connexion rétablie : reprise depuis un état relu du jeu.')
+                    return
+            else:
+                stable = 0
+            self._wait(1)
+
+    def _busy(self):
+        return bool((self.worker and self.worker.is_alive())
+                    or (self.inspection_worker and self.inspection_worker.is_alive())
+                    or self.calibration_dialog)
+
+    def close(self):
+        self.stop()
+        self.root.destroy()
 
     def _build(self):
-        self._style()
-        root = ttk.Frame(self.root, style="App.TFrame", padding=18)
-        root.pack(fill="both", expand=True)
-        root.columnconfigure(1, weight=1)
-        root.rowconfigure(1, weight=1)
-        header = ttk.Frame(root, style="App.TFrame")
-        header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 12))
-        header.columnconfigure(0, weight=1)
-        ttk.Label(header, text="CLASH OF CLANS  /  PILOTAGE", style="Eyebrow.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(header, text="Pilote de farm", style="Hero.TLabel").grid(row=1, column=0, sticky="w")
-        ttk.Label(header, textvariable=self.run_state, style="State.TLabel").grid(row=1, column=1, sticky="e")
-
-        left = ttk.Frame(root, style="App.TFrame", width=430)
-        left.grid(row=1, column=0, sticky="nsew", padx=(0, 16))
-        left.grid_propagate(False)
-        left.columnconfigure(0, weight=1)
-
-        connection = self._card(left, "Jeu", "Fenêtre Google Play Jeux PC")
-        connection.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        row = ttk.Frame(connection, style="Card.TFrame")
-        row.pack(fill="x")
-        self.windows = ttk.Combobox(row, textvariable=self.window_title, style="App.TCombobox")
-        self.windows.pack(side="left", fill="x", expand=True)
-        ttk.Button(row, text="Détecter", command=self.refresh, style="Quiet.TButton").pack(side="left", padx=(8, 0))
-
-        targets = self._card(left, "Butin recherché", "Valeurs minimales d’une base adverse")
-        targets.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-        target_grid = ttk.Frame(targets, style="Card.TFrame")
-        target_grid.pack(fill="x")
-        for index, (label, variable) in enumerate((("Or", self.min_gold), ("Élixir", self.min_elixir), ("Marge %", self.loot_margin))):
-            target_grid.columnconfigure(index, weight=1)
-            cell = ttk.Frame(target_grid, style="Card.TFrame")
-            cell.grid(row=0, column=index, sticky="ew", padx=(0 if index == 0 else 8, 0))
-            ttk.Label(cell, text=label, style="Muted.TLabel").pack(anchor="w")
-            ttk.Entry(cell, textvariable=variable, style="App.TEntry", width=10).pack(fill="x", pady=(4, 0))
-        ttk.Checkbutton(targets, text="Exiger l’or et l’élixir", variable=self.and_rule, style="App.TCheckbutton").pack(anchor="w", pady=(12, 0))
-
-        army = self._card(left, "Armée", "Toutes les unités disponibles sont envoyées")
-        army.grid(row=2, column=0, sticky="ew", pady=(0, 10))
-        army_grid = ttk.Frame(army, style="Card.TFrame")
-        army_grid.pack(fill="x")
-        for index, (label, variable) in enumerate((("Électro-dragons prévus", self.electrodragon_count), ("Dragons prévus", self.dragon_count))):
-            army_grid.columnconfigure(index, weight=1)
-            cell = ttk.Frame(army_grid, style="Card.TFrame")
-            cell.grid(row=0, column=index, sticky="ew", padx=(0 if index == 0 else 8, 0))
-            ttk.Label(cell, text=label, style="Muted.TLabel").pack(anchor="w")
-            ttk.Entry(cell, textvariable=variable, style="App.TEntry", width=8).pack(fill="x", pady=(4, 0))
-        ttk.Checkbutton(army, text="Déployer les trois héros", variable=self.deploy_heroes, style="App.TCheckbutton").pack(anchor="w", pady=(12, 0))
-
-        cycle = self._card(left, "Cycle", "Préparation et répétition")
-        cycle.grid(row=3, column=0, sticky="ew", pady=(0, 10))
-        ttk.Checkbutton(cycle, text="Améliorer les remparts jusqu’à 1 M de réserves", variable=self.upgrade_wall, style="App.TCheckbutton").pack(anchor="w")
-        ttk.Checkbutton(cycle, text="Enchaîner les attaques", variable=self.chain_attacks, style="App.TCheckbutton").pack(anchor="w", pady=(6, 0))
-        ttk.Checkbutton(cycle, text="Simulation : rechercher sans déployer", variable=self.dry_run, style="App.TCheckbutton").pack(anchor="w", pady=(6, 0))
-
-        actions = ttk.Frame(left, style="App.TFrame")
-        actions.grid(row=4, column=0, sticky="ew", pady=(4, 0))
-        actions.columnconfigure(0, weight=1)
-        self.start_button = ttk.Button(actions, text="Lancer le farm", command=self.start_farm, style="Primary.TButton")
-        self.start_button.grid(row=0, column=0, sticky="ew")
-        self.stop_button = ttk.Button(actions, text="Arrêter", command=self.stop, style="Quiet.TButton")
-        self.stop_button.grid(row=0, column=1, sticky="ew", padx=(8, 0))
-        self.stop_button.state(["disabled"])
-        self.walls_button = ttk.Button(actions, text="Améliorer les remparts", command=self.start_walls, style="Quiet.TButton")
-        self.walls_button.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-
-        right = self._card(root, "Activité", "Capture et messages du bot")
-        right.grid(row=1, column=1, sticky="nsew")
-        right_body = ttk.Frame(right, style="Card.TFrame")
-        right_body.pack(fill="both", expand=True)
-        right_body.columnconfigure(0, weight=1)
-        right_body.rowconfigure(3, weight=1)
-        tools = ttk.Frame(right_body, style="Card.TFrame")
-        tools.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        ttk.Button(tools, text="Lire l’écran", command=self.inspect_game, style="Quiet.TButton").pack(side="left")
-        ttk.Button(tools, text="Relever le profil", command=self.scan_profile, style="Quiet.TButton").pack(side="left", padx=(8, 0))
-        ttk.Button(tools, text="Enregistrer", command=self.persist, style="Quiet.TButton").pack(side="right")
-        self.preview = ttk.Label(right_body, text="Aucune capture. Cliquez sur « Lire l’écran ».", anchor="center", style="Card.TLabel")
-        self.preview.grid(row=1, column=0, sticky="ew", ipady=55)
-        ttk.Label(right_body, text="JOURNAL", style="Muted.TLabel").grid(row=2, column=0, sticky="w", pady=(14, 6))
-        self.log = __import__("tkinter").Text(right_body, height=11, state="disabled", wrap="word", background=self.colors["bg"], foreground=self.colors["text"], insertbackground=self.colors["accent"], relief="flat", padx=12, pady=10, font=("Consolas", 9))
-        self.log.grid(row=3, column=0, sticky="nsew")
-        ttk.Label(root, textvariable=self.status, style="App.TLabel").grid(row=2, column=0, columnspan=2, sticky="w", pady=(14, 0))
-        self.refresh()
+        from dashboard import build
+        build(self)
 
     def refresh(self):
         windows=[window for window in WindowDriver.list_windows() if window.title.casefold().startswith("clash of clans")]
@@ -632,34 +1216,80 @@ class BotApp:
         self.write(f"{len(windows)} fenêtre(s) Clash détectée(s).")
 
     def inspect_game(self):
-        window=WindowDriver.resolve(self.window_title.get())
-        if not window: self.write("Fenêtre Clash introuvable."); return
-        self.window_title.set(window.title)
+        self._start_inspection(self._inspect_game)
+
+    def _start_inspection(self, reader, allow_calibration=False):
+        if ((self.worker and self.worker.is_alive()) or (self.inspection_worker and self.inspection_worker.is_alive())
+                or (self.calibration_dialog and not allow_calibration)):
+            self.write("Attendre la fin de l’opération ou cliquer Arrêter avant une nouvelle lecture.")
+            return
+        title = self.window_title.get()
+        self.stop_event.clear()
+        def inspect():
+            window = WindowDriver.resolve(title)
+            if not window: raise RuntimeError("Fenêtre Clash introuvable.")
+            reader(window)
+        self.inspection_worker = threading.Thread(target=self._run_operation, args=(inspect,), daemon=True)
+        self.inspection_worker.start()
+        self.run_state.set("LECTURE")
+
+    def calibrate(self):
+        def capture_for_calibration(window):
+            self.events.put(PreviewEvent(self._capture(window), window.title, calibrate=True))
+        self._start_inspection(capture_for_calibration, allow_calibration=True)
+
+    def _show_calibration(self, image):
+        if self.calibration_dialog:
+            self.calibration_dialog.set_image(image)
+            return
+        def save(overrides, ratio):
+            # Do not save a moving target while a refresh is still in flight.
+            if self.inspection_worker and self.inspection_worker.is_alive():
+                raise ValueError("Attendre la fin de l’actualisation avant d’enregistrer.")
+            candidate = replace(self.settings, layout_overrides=overrides, layout_aspect_ratio=ratio)
+            validate_layout(candidate)
+            save_settings(candidate)
+            self.settings = candidate
+            self.write(f"Calibrage enregistré : {len(overrides)} position(s) personnalisée(s).")
+        def closed():
+            self.calibration_dialog = None
+            with self.action_lock:
+                self.stop_event.set()
+        self.calibration_dialog = CalibrationDialog(self.root, image, LAYOUT_DEFAULTS,
+                                                    self.settings.layout_overrides, save, closed, self.calibrate, layout_labels())
+
+    def _inspect_game(self, window):
         try:
-            image=WindowDriver.capture(window)
-            self._show_preview(image)
+            image=self._capture(window)
+            self.events.put(PreviewEvent(image, window.title))
             if has_all_screen_text(image, "attaquer", "magasin"):
                 gold, elixir=read_safe_reserve(image, "gold"), read_safe_reserve(image, "elixir")
-                self.write(f"Village : or {gold if gold is not None else '?':,} / élixir {elixir if elixir is not None else '?':,}." if gold is not None and elixir is not None else "Village détecté ; réserves illisibles.")
+                self.events.put(f"Village : or {gold:,} / élixir {elixir:,}." if gold is not None and elixir is not None else "Village détecté ; réserves illisibles.")
             elif enemy_loot_screen_ready(image):
                 loot=read_enemy_loot(image)
-                self.write(f"Base adverse : or {loot.gold:,} / élixir {loot.elixir:,}." if loot.gold is not None and loot.elixir is not None else "Base adverse détectée ; butin illisible.")
+                self.events.put(f"Base adverse : or {loot.gold:,} / élixir {loot.elixir:,}." if loot.gold is not None and loot.elixir is not None else "Base adverse détectée ; butin illisible.")
             else:
-                self.write("Capture reçue ; écran non reconnu pour la lecture des ressources.")
-        except Exception as exc: self.write(f"Lecture impossible : {exc}")
+                self.events.put("Capture reçue ; écran non reconnu pour la lecture des ressources.")
+        except OperationCancelled: raise
+        except Exception as exc: self.events.put(f"Lecture impossible : {exc}")
 
     def _show_preview(self, image):
+        self.activity_tabs.select(1)
+        self.root.update_idletasks()
         preview=image.copy()
-        preview.thumbnail((430, 242))
+        preview.thumbnail((max(300, self.preview.winfo_width()-24), max(170, self.preview.winfo_height()-24)))
         self.photo=ImageTk.PhotoImage(preview)
         self.preview.configure(image=self.photo, text="")
 
     def scan_profile(self):
-        window = WindowDriver.resolve(self.window_title.get())
-        if not window: self.write("Fenêtre Clash introuvable."); return
+        self._start_inspection(self._scan_profile)
+
+    def _scan_profile(self, window):
         try:
-            image = WindowDriver.capture(window); self.window_title.set(window.title); self._show_preview(image)
+            image = self._capture(window)
+            self.events.put(PreviewEvent(image, window.title))
             snapshot = read_account_snapshot(image); APP_DIR.mkdir(parents=True, exist_ok=True)
+            self._check_stopped()
             ACCOUNT_SNAPSHOT_PATH.write_text(json.dumps(asdict(snapshot), indent=2, ensure_ascii=False), encoding="utf-8")
             values = [
                 f"Pseudo : {snapshot.account_name or '?'}", f"Niveau : {snapshot.level or '?'}",
@@ -669,26 +1299,70 @@ class BotApp:
                 f"Gemmes : {snapshot.gems:,}" if snapshot.gems is not None else "Gemmes : ?",
                 f"Ouvriers laboratoire : {snapshot.laboratory_builders or '?'}", f"Ouvriers : {snapshot.builders or '?'}",
             ]
-            self.write(" | ".join(values)); self.write(f"Relevé enregistré : {ACCOUNT_SNAPSHOT_PATH}")
-        except Exception as exc: self.write(f"Relevé du profil impossible : {exc}")
+            self.events.put(" | ".join(values)); self.events.put(f"Relevé enregistré : {ACCOUNT_SNAPSHOT_PATH}")
+        except OperationCancelled: raise
+        except Exception as exc: self.events.put(f"Relevé du profil impossible : {exc}")
 
     def persist(self):
+        if self._busy():
+            self.write("Arrêter l’opération avant de changer les réglages.")
+            return False
         try:
-            self.settings.window_title=self.window_title.get();self.settings.min_gold=int(self.min_gold.get().replace(" ",""));self.settings.min_elixir=int(self.min_elixir.get().replace(" ",""));self.settings.loot_margin_percent=float(self.loot_margin.get().replace(",","."));self.settings.electrodragon_count=int(self.electrodragon_count.get());self.settings.dragon_count=int(self.dragon_count.get());self.settings.use_and_rule=self.and_rule.get();self.settings.dry_run=self.dry_run.get();self.settings.deploy_heroes=self.deploy_heroes.get();self.settings.upgrade_wall_between_attacks=self.upgrade_wall.get();self.settings.chain_attacks=self.chain_attacks.get()
-            if not 0 <= self.settings.min_gold <= 2_500_000 or not 0 <= self.settings.min_elixir <= 2_500_000 or not 0 <= self.settings.loot_margin_percent <= 25 or not 0 <= self.settings.electrodragon_count <= 50 or not 0 <= self.settings.dragon_count <= 50: raise ValueError
-            save_settings(self.settings);self.write(f"Configuration enregistrée : attaque dès {effective_minimum(self.settings.min_gold, self.settings.loot_margin_percent):,} or / {effective_minimum(self.settings.min_elixir, self.settings.loot_margin_percent):,} élixir.");return True
+            candidate = replace(self.settings, window_title=self.window_title.get(),
+                min_gold=int(self.min_gold.get().replace(" ", "")), min_elixir=int(self.min_elixir.get().replace(" ", "")),
+                loot_margin_percent=float(self.loot_margin.get().replace(",", ".")),
+                electrodragon_count=int(self.electrodragon_count.get()), dragon_count=int(self.dragon_count.get()),
+                use_and_rule=self.and_rule.get(), dry_run=self.dry_run.get(), deploy_heroes=self.deploy_heroes.get(),
+                upgrade_wall_between_attacks=self.upgrade_wall.get(), upgrade_recommended=self.upgrade_recommended.get(), chain_attacks=self.chain_attacks.get())
+            if not 0 <= candidate.min_gold <= 2_500_000 or not 0 <= candidate.min_elixir <= 2_500_000 or not 0 <= candidate.loot_margin_percent <= 25 or not 0 <= candidate.electrodragon_count <= 50 or not 0 <= candidate.dragon_count <= 50: raise ValueError
+            save_settings(candidate)
+            self.settings = candidate
+            self.write(f"Configuration enregistrée : attaque dès {effective_minimum(candidate.min_gold, candidate.loot_margin_percent):,} or / {effective_minimum(candidate.min_elixir, candidate.loot_margin_percent):,} élixir.")
+            return True
         except ValueError: messagebox.showerror("Valeur invalide","Seuils : 0 à 2 500 000 ; marge : 0 à 25 % ; troupes : 0 à 50.");return False
+        except OSError as exc: messagebox.showerror("Sauvegarde impossible", str(exc)); return False
     def start_farm(self):
-        if self.worker and self.worker.is_alive(): return
+        if self._busy(): return
         if not self.persist(): return
         if self.settings.dry_run: self.write("Simulation active : recherche et lecture uniquement, aucune pose ne sera envoyée.")
         else: self.write("Mode réel actif : toutes les troupes disponibles seront posées et vérifiées sur une base retenue.")
-        self.stop_event.clear(); self.worker=threading.Thread(target=self.farm_loop,daemon=True); self.worker.start(); self.run_state.set("EN COURS"); self.write("Recherche automatique démarrée.")
+        self.stop_event.clear(); self.worker=threading.Thread(target=self._run_operation,args=(self.farm_loop,),daemon=True); self.worker.start(); self.run_state.set("EN COURS"); self.write("Recherche automatique démarrée.")
     def start_walls(self):
-        if self.worker and self.worker.is_alive(): return
+        if self._busy(): return
         if not self.persist(): return
-        self.stop_event.clear(); self.worker=threading.Thread(target=self.wall_loop,daemon=True); self.worker.start(); self.run_state.set("EN COURS"); self.write("Amélioration des remparts démarrée.")
-    def stop(self):self.stop_event.set();self.write("Arrêt demandé.")
+        self.stop_event.clear(); self.worker=threading.Thread(target=self._run_operation,args=(self.wall_loop,),daemon=True); self.worker.start(); self.run_state.set("EN COURS"); self.write("Amélioration des remparts démarrée.")
+
+    def start_independent(self, action):
+        if self._busy() or not self.persist():
+            return
+        self.stop_event.clear()
+        self.run_state.set('EN COURS')
+        self.worker = threading.Thread(target=self._run_operation, args=(lambda: self.independent_loop(action),), daemon=True)
+        self.worker.start()
+
+    def independent_loop(self, action):
+        original = self.settings
+        try:
+            window = WindowDriver.resolve(self.settings.window_title)
+            if not window:
+                raise RuntimeError('Fenêtre Clash introuvable.')
+            if action == 'attack':
+                self.settings = replace(original, chain_attacks=False, upgrade_recommended=False, upgrade_wall_between_attacks=False)
+                self.farm_loop()
+            elif action == 'buildings':
+                if not has_all_screen_text(self._capture(window),'attaquer','magasin'):
+                    raise RuntimeError('Revenir au village pour lancer les bâtiments.')
+                from upgrades import upgrade_suggested
+                upgrade_suggested(self,window)
+        finally:
+            self.settings = original
+            if not getattr(self,'_reconnect_pending',False):
+                self.stop_event.set()
+                self.events.put('Action indépendante terminée.')
+    def stop(self):
+        with self.action_lock:
+            self.stop_event.set()
+        self.write("Arrêt demandé.")
     def wall_loop(self):
         try:
             if self.settings.dry_run:
@@ -697,30 +1371,39 @@ class BotApp:
             window = WindowDriver.resolve(self.settings.window_title)
             if not window: raise RuntimeError("Fenêtre Clash introuvable.")
             self.upgrade_walls_to_reserve(window, independent=True)
+        except ReconnectRequired: raise
+        except OperationCancelled: self.events.put("Amélioration des remparts interrompue.")
         except Exception as exc: self.events.put(f"Remparts arrêtés : {exc}")
         finally:
-            self.stop_event.set(); self.events.put("Amélioration des remparts terminée.")
+            if not getattr(self,'_reconnect_pending',False):
+                self.stop_event.set(); self.events.put("Amélioration des remparts terminée.")
 
     def stable_reserves(self, window):
         """Require two agreeing home-village readings before authorising spending."""
         previous = None
         for _ in range(5):
-            image = WindowDriver.capture(window)
+            image = self._capture(window)
             values = (read_safe_reserve(image, "gold"), read_safe_reserve(image, "elixir"))
             if None not in values and previous is not None and all(abs(a - b) <= 20_000 for a, b in zip(values, previous)):
                 return tuple(min(a, b) for a, b in zip(values, previous))
             previous = values if None not in values else None
-            if self.stop_event.wait(.4): break
+            if self._wait(.4): break
         return None
 
     def _wall_click(self, window, point, label):
-        if not WindowDriver.click_percent(window, *point): raise RuntimeError(f"Clic {label} refusé.")
-        self.stop_event.wait(.45)
+        if not self._click(window, *point): raise RuntimeError(f"Clic {label} refusé.")
+        self._wait(.45)
 
     def upgrade_walls_to_reserve(self, window, independent=False):
         """Upgrade available walls while keeping both village reserves at or above 1 M."""
         if (not independent and not self.settings.upgrade_wall_between_attacks) or self.settings.dry_run:
             return 0
+        if not independent and self.settings.upgrade_recommended:
+            from upgrades import stable_builders
+            free = stable_builders(self, window)
+            if free != 1:
+                self.events.put(f'Priorité aux bâtiments : ouvriers libres={free}. Ressources conservées ; remparts reportés jusqu’à un seul ouvrier libre.')
+                return 0
         upgraded = 0
         while not self.stop_event.is_set():
             balances = self.stable_reserves(window)
@@ -731,25 +1414,54 @@ class BotApp:
             if gold <= WALL_RESERVE and elixir <= WALL_RESERVE:
                 self.events.put(f"Réserves préservées : or {gold:,}, élixir {elixir:,}.")
                 return upgraded
-            self._wall_click(window, BUILDERS_BUTTON, "ouvriers")
-            menu = WindowDriver.capture(window)
-            item = find_wall_menu_item(menu)
-            available = read_wall_available(menu, item) if item else None
+            menu = self._capture(window)
+            if not builders_menu_open(menu):
+                self._wall_click(window, layout_values("BUILDERS_BUTTON"), "ouvriers")
+            available = None
+            for _ in range(4):
+                menu = self._capture(window)
+                item = find_wall_menu_item(menu)
+                available = read_wall_available(menu, item) if item else None
+                if available is not None: break
+                if builders_menu_open(menu):
+                    with self.action_lock:
+                        self._check_stopped()
+                        if not WindowDriver.scroll_menu(window):
+                            raise RuntimeError('Défilement des remparts refusé.')
+                if self._wait(.4): break
             if self.stop_event.is_set() or item is None or available is None:
                 self.events.put("Liste des remparts indisponible ou illisible : arrêt prudent.")
                 return upgraded
-            self._wall_click(window, item, "rempart")
-            wall_image = WindowDriver.capture(window)
-            if self.stop_event.is_set() or not wall_selected(wall_image):
+            selected = False
+            for _ in range(3):
+                self._wall_click(window, item, "rempart")
+                wall_image = self._capture(window)
+                if wall_selected(wall_image):
+                    selected = True
+                    break
+                if self.stop_event.is_set(): break
+                if not builders_menu_open(wall_image):
+                    self._wall_click(window, layout_values("BUILDERS_BUTTON"), "ouvriers")
+                menu = self._capture(window)
+                item = find_wall_menu_item(menu) or item
+            if self.stop_event.is_set() or not selected:
                 self.events.put("Sélection de rempart non confirmée.")
                 return upgraded
-            self._wall_click(window, WALL_MORE_BUTTON, "Améliorer plus")
-            batch_image = WindowDriver.capture(window)
+            more_button = find_wall_more_button(self._capture(window))
+            if more_button is None:
+                self.events.put("Bouton Améliorer plus introuvable.")
+                return upgraded
+            self._wall_click(window, more_button, "Améliorer plus")
+            row_shift = more_button[0] - layout_values("WALL_MORE_BUTTON")[0]
+            def row_button(name):
+                x, y = layout_values(name)
+                return x + row_shift, y
+            batch_image = self._capture(window)
             if self.stop_event.is_set() or not wall_multi_mode(batch_image):
                 self.events.put("Mode groupé non confirmé : aucune dépense envoyée.")
                 return upgraded
-            gold_cost = read_wall_cost(batch_image, "or")
-            elixir_cost = read_wall_cost(batch_image, "élixir")
+            gold_cost = read_wall_cost(batch_image, "or", row_shift)
+            elixir_cost = read_wall_cost(batch_image, "élixir", row_shift)
             options = []
             if gold_cost: options.append((wall_batch_size(gold, gold_cost, available), "or", gold_cost))
             if elixir_cost: options.append((wall_batch_size(elixir, elixir_cost, available), "élixir", elixir_cost))
@@ -759,25 +1471,36 @@ class BotApp:
             count, resource, unit_cost = max(options, key=lambda option: (option[0], gold if option[1] == "or" else elixir))
             for _ in range((count - 1) // 10):
                 if self.stop_event.is_set(): return upgraded
-                self._wall_click(window, WALL_ADD_TEN_BUTTON, "ajouter 10 remparts")
+                self._wall_click(window, row_button("WALL_ADD_TEN_BUTTON"), "ajouter 10 remparts")
             for _ in range((count - 1) % 10):
                 if self.stop_event.is_set(): return upgraded
-                self._wall_click(window, WALL_ADD_ONE_BUTTON, "ajouter un rempart")
-            batch_image = WindowDriver.capture(window)
+                self._wall_click(window, row_button("WALL_ADD_ONE_BUTTON"), "ajouter un rempart")
+            batch_image = self._capture(window)
             if not wall_multi_mode(batch_image):
                 self.events.put("Mode groupé interrompu : aucune dépense envoyée.")
                 return upgraded
-            total = read_wall_cost(batch_image, resource)
+            total = read_wall_cost(batch_image, resource, row_shift)
+            while total != count * unit_cost and count > 1:
+                remove = find_wall_remove_button(batch_image,row_shift)
+                if remove is None:
+                    break
+                self.events.put('Prix groupé illisible : réduction du groupe avant une nouvelle vérification.')
+                self._wall_click(window,remove,'retirer un rempart du groupe')
+                count -= 1
+                batch_image = self._capture(window)
+                if not wall_multi_mode(batch_image):
+                    return upgraded
+                total = read_wall_cost(batch_image,resource,row_shift)
             if total != count * unit_cost:
                 self.events.put(f"Coût groupé non confirmé ({total} au lieu de {count * unit_cost}) : aucune dépense envoyée.")
                 return upgraded
-            button = WALL_MULTI_GOLD_BUTTON if resource == "or" else WALL_MULTI_ELIXIR_BUTTON
+            button = row_button("WALL_MULTI_GOLD_BUTTON") if resource == "or" else row_button("WALL_MULTI_ELIXIR_BUTTON")
             self._wall_click(window, button, f"amélioration groupée {resource}")
-            if self.stop_event.is_set() or not has_all_screen_text(WindowDriver.capture(window), "confirmer", "rempart"):
-                self.events.put("Confirmation du rempart absente : aucun autre clic envoyé.")
+            if self.stop_event.is_set() or not wall_batch_confirmation_matches(self._capture(window), total, resource):
+                self.events.put("Montant ou ressource de la confirmation groupée non vérifié : aucun autre clic envoyé.")
                 return upgraded
-            self._wall_click(window, WALL_CONFIRM_BUTTON, "confirmation remparts")
-            self.stop_event.wait(.8)
+            self._wall_click(window, layout_values("WALL_MULTI_CONFIRM_BUTTON"), "confirmation remparts")
+            self._wait(.8)
             after = self.stable_reserves(window)
             before_spend = gold if resource == "or" else elixir
             after_spend = after[0] if resource == "or" and after else (after[1] if after else None)
@@ -789,87 +1512,212 @@ class BotApp:
                 return upgraded
             upgraded += count
             self.events.put(f"{count} rempart(s) amélioré(s) avec {total:,} {resource} ({upgraded} au total).")
-            self.stop_event.wait(1)
+            if (gold_cost is not None and elixir_cost is not None and available > count and
+                    after[0] - gold_cost < WALL_RESERVE and after[1] - elixir_cost < WALL_RESERVE):
+                self.events.put(f"Réserves préservées : or {after[0]:,}, élixir {after[1]:,} ; aucun autre rempart payable.")
+                return upgraded
+            self._wait(1)
         return upgraded
 
     def deploy_unit(self, window, label, slot, points):
-        remaining = read_troop_count(WindowDriver.capture(window), label)
+        self._check_stopped()
+        if not points: raise RuntimeError("Aucun point de déploiement configuré.")
+        remaining = self.stable_troop_count(window, label)
         if remaining is None: raise RuntimeError(f"Quantité de {label} illisible : pose non vérifiable.")
         if remaining == 0: return 0
         initial = remaining
         expected = self.settings.electrodragon_count if label == "Électro-dragon" else self.settings.dragon_count
         if remaining != expected: self.events.put(f"{label} : {remaining} disponible(s), {expected} prévu(s) ; toutes les unités visibles seront envoyées.")
-        if not WindowDriver.click_percent(window, *slot): raise RuntimeError(f"Sélection {label} refusée.")
-        self.stop_event.wait(.3)
+        if not self._click(window, *slot): raise RuntimeError(f"Sélection {label} refusée.")
+        self._wait(.3)
         placed = 0
+        rejected = set()
         while remaining and not self.stop_event.is_set():
             accepted = False
             for offset in range(len(points)):
+                self._check_stopped()
                 x, y = points[(int(placed * len(points) / initial) + offset) % len(points)]
-                if not WindowDriver.click_percent(window, x, y): raise RuntimeError(f"Clic pose {label} refusé.")
-                self.stop_event.wait(max(.35, self.settings.delay_between_dragons_ms / 1000))
-                observed = read_troop_count(WindowDriver.capture(window), label)
+                if (x, y) in rejected:
+                    continue
+                before = self._battle_capture(window)
+                if not self._click(window, x, y): raise RuntimeError(f"Clic pose {label} refusé.")
+                self._wait(max(.35, self.settings.delay_between_dragons_ms / 1000))
+                observed = self.stable_troop_count(window, label)
+                # Never retry a drop whose outcome is unknown: that could deploy
+                # another troop while counting only one, or click a changed menu.
                 if observed is None:
-                    self.stop_event.wait(.3)
-                    observed = read_troop_count(WindowDriver.capture(window), label)
-                if observed is None: raise RuntimeError(f"Quantité de {label} illisible après clic : pose non confirmée.")
-                if observed < remaining:
-                    placed += remaining - observed
+                    raise RuntimeError(f"Compteur de {label} non confirmé après le clic : arrêt de la pose.")
+                if observed == remaining - 1:
+                    placed += 1
                     remaining = observed
                     self.events.put(f"{label} confirmé à {x:.1f} %, {y:.1f} % ; {remaining} restant(s).")
                     accepted = True
                     break
-                if observed > remaining: raise RuntimeError(f"Quantité de {label} incohérente ({observed} > {remaining}).")
+                if observed != remaining:
+                    raise RuntimeError(f"Quantité de {label} incohérente ({remaining} → {observed} pour un seul clic).")
+                rejected.add((x, y))
             if not accepted: raise RuntimeError(f"Aucun point de pose accepté pour {label} ; {remaining} unité(s) restante(s).")
         return placed
 
+    def stable_troop_count(self, window, label):
+        previous = None
+        try:
+            with ocr_deadline(time.monotonic() + OCR_TIMEOUT):
+                for _ in range(4):
+                    image = self._battle_capture(window)
+                    observed = read_troop_count(image, label)
+                    self._check_stopped()
+                    if observed is not None and observed == previous:
+                        return observed
+                    previous = observed
+                    self._wait(.15)
+        except TimeoutError:
+            return None
+        return None
+
+    def _battle_capture(self, window):
+        image = self._capture(window)
+        deadline = time.monotonic() + 12
+        clicked = False
+        chosen_label = None
+        while battle_reward_open(image):
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Récompense de bataille toujours affichée après 12 secondes.")
+            if not clicked:
+                choice = battle_reward_choice(image)
+                if choice is not None:
+                    point, label = choice
+                    if not self._click(window, *point):
+                        raise RuntimeError("Sélection de la récompense refusée.")
+                    clicked = True
+                    chosen_label = label
+            self._wait(.15)
+            image = self._capture(window)
+        if chosen_label is not None:
+            self.events.put(f"Récompense de l’événement sélectionnée : {chosen_label} ; retour au combat confirmé.")
+        return image
+
     def deploy_attack_composition(self, window):
-        perimeter = ELECTRODRAGON_PERIMETER_POINTS
-        electro = self.deploy_unit(window, "Électro-dragon", ELECTRODRAGON_SLOT, perimeter)
-        dragons = self.deploy_unit(window, "Dragon", DRAGON_SLOT, perimeter[5:] + perimeter[:5])
+        self._check_stopped()
+        perimeter = layout_points("ELECTRODRAGON_PERIMETER_POINTS")
+        electro = self.deploy_unit(window, "Électro-dragon", layout_values("ELECTRODRAGON_SLOT"), perimeter)
+        dragons = self.deploy_unit(window, "Dragon", layout_values("DRAGON_SLOT"), perimeter[5:] + perimeter[:5])
         heroes = 0
         if self.settings.deploy_heroes:
-            for index, slot in enumerate(HERO_SLOTS):
-                before = WindowDriver.capture(window)
-                if hero_health_visible(before, index):
+            self._check_stopped()
+            shift = hero_layout_shift(self._battle_capture(window))
+            for index, slot in enumerate(layout_points("HERO_SLOTS")):
+                self._check_stopped()
+                before = self._battle_capture(window)
+                if hero_health_visible(before, index, shift):
                     heroes += 1
+                    self.events.put(f"Héros {index + 1} déjà posé : barre de vie confirmée.")
                     continue
-                baseline = hero_icon_saturation(before, index)
+                baseline = hero_icon_saturation(before, index, shift)
                 if baseline < 55:
                     self.events.put(f"Héros {index + 1} indisponible ; non compté comme posé.")
                     continue
-                if not WindowDriver.click_percent(window, *slot): raise RuntimeError(f"Sélection héros {index + 1} refusée.")
-                self.stop_event.wait(.3)
+                slot_shift = 0 if f"HERO_SLOTS.{index}" in self.settings.layout_overrides else shift
                 for offset in range(len(perimeter)):
+                    self._check_stopped()
+                    # A reward overlay or rejected drop can lose the selection.
+                    # Recheck before selecting so an already deployed hero's
+                    # ability is never deliberately clicked as a retry.
+                    current = self._battle_capture(window)
+                    if hero_health_visible(current, index, shift):
+                        heroes += 1
+                        self.events.put(f"Héros {index + 1} posé : barre de vie confirmée.")
+                        break
+                    if not self._click(window, slot[0] + slot_shift, slot[1]): raise RuntimeError(f"Sélection héros {index + 1} refusée.")
+                    self._wait(.3)
+                    self._check_stopped()
                     x, y = perimeter[(index * 3 + offset) % len(perimeter)]
-                    if not WindowDriver.click_percent(window, x, y): raise RuntimeError(f"Clic héros {index + 1} refusé.")
-                    self.stop_event.wait(.4)
-                    after = WindowDriver.capture(window)
-                    if hero_health_visible(after, index) or hero_icon_saturation(after, index) < baseline * .5:
+                    if not self._click(window, x, y): raise RuntimeError(f"Clic héros {index + 1} refusé.")
+                    self._wait(.4)
+                    after = self._battle_capture(window)
+                    if hero_health_visible(after, index, shift):
                         heroes += 1
                         self.events.put(f"Héros {index + 1} confirmé à {x:.1f} %, {y:.1f} %.")
                         break
                 else: raise RuntimeError(f"Pose du héros {index + 1} non confirmée.")
+        self._check_stopped()
         self.events.put(f"Déploiement vérifié : {electro} électro-dragons, {dragons} dragons, {heroes} héros.")
+
+    def prepare_attack(self, window):
+        self._capture(window)
+        for _ in range(16):
+            with self.action_lock:
+                self._check_stopped()
+                if not WindowDriver.zoom_out_step(window):
+                    raise RuntimeError("Commande de dézoom refusée.")
+            self._wait(.06)
+        self._wait(.35)
+        self._capture(window)
+        self.events.put("Dézoom maximal envoyé avant le déploiement.")
 
     def wait_for_battle_return(self, window):
         """Wait for Clash's result screen, return home, then allow the next cycle."""
         deadline=time.monotonic()+240
         self.events.put("Attente de la fin de bataille avant le prochain cycle.")
         while not self.stop_event.is_set() and time.monotonic()<deadline:
-            image=WindowDriver.capture(window)
+            image=self._battle_capture(window)
             if has_all_screen_text(image,"attaquer","magasin"): return True
             if has_screen_text(image,"retour au village","victoire","défaite"):
-                WindowDriver.click_percent(window,50.0,86.0); self.stop_event.wait(4)
-            else: self.stop_event.wait(3)
+                self.record_battle_earnings(window)
+                self._click(window, *layout_values("RETURN_HOME_BUTTON")); self._wait(4)
+            else: self._wait(.35)
         self.events.put("Fin de bataille non confirmée : cycle arrêté sans cliquer Terminer la bataille."); return False
 
+    def record_battle_earnings(self, window):
+        stats = getattr(self, "farm_stats", None)
+        if stats is None or not stats.data.get("pending"):
+            return
+        self._wait(1.5)  # Let the result counters finish their animation.
+        previous = None
+        for _ in range(5):
+            result_image = self._capture(window)
+            amounts = read_battle_earnings(result_image)
+            if amounts is not None and amounts == previous:
+                if stats.finish(amounts):
+                    self.events.put(StatsEvent(dict(stats.data)))
+                    self.events.put(f"Récolte comptabilisée : {amounts[0]:,} or, {amounts[1]:,} élixir, {amounts[2]:,} élixir noir (bonus inclus).")
+                return
+            previous = amounts
+            self._wait(.35)
+        self._check_stopped()
+        archived = stats.defer_result(result_image)
+        self.events.put(f'Butin final illisible : capture conservée dans {archived}. Gains non ajoutés aux statistiques ; reprise du cycle.')
+
     def open_search(self, window):
-        for point,delay,label in ((ATTACK_HOME_BUTTON,1.0,"Ouverture du menu Attaquer"),(FIND_MATCH_BUTTON,1.0,"Ouverture de la sélection d'armée"),(START_SEARCH_BUTTON,6.0,"Recherche d'une base adverse")):
-            if not WindowDriver.click_percent(window,*point): raise RuntimeError(f"Clic refusé : {label}.")
-            self.events.put(label); self.stop_event.wait(delay)
+        def dismiss_daily_reward():
+            image = self._capture(window)
+            if daily_reward_open(image):
+                if not self._click(window, *layout_values("DAILY_REWARD_CLOSE_BUTTON")): raise RuntimeError("Fermeture de la récompense quotidienne refusée.")
+                self._wait(.7)
+                self.events.put("Fenêtre de récompense quotidienne fermée.")
+
+        dismiss_daily_reward()
+        for point, label, expected in (
+            (layout_values("ATTACK_HOME_BUTTON"), "Ouverture du menu Attaquer", "multijoueur"),
+            (layout_values("FIND_MATCH_BUTTON"), "Ouverture de la sélection d'armée", "mon armée"),
+        ):
+            if not self._click(window, *point): raise RuntimeError(f"Clic refusé : {label}.")
+            self.events.put(label); self._wait(1)
             if self.stop_event.is_set(): return False
-        return True
+            dismiss_daily_reward()
+            if not has_screen_text(self._capture(window), expected): raise RuntimeError(f"Écran attendu absent après : {label}.")
+        if not self._click(window, *layout_values("START_SEARCH_BUTTON")): raise RuntimeError("Clic de recherche refusé.")
+        self.events.put("Recherche d'une base adverse")
+        deadline = time.monotonic() + 35
+        while not self.stop_event.is_set() and time.monotonic() < deadline:
+            self._wait(1)
+            image = self._capture(window)
+            if enemy_loot_screen_ready(image): return True
+            if daily_reward_open(image):
+                dismiss_daily_reward()
+                raise RuntimeError("Récompense quotidienne apparue pendant la recherche ; relancer le farm.")
+        if self.stop_event.is_set(): return False
+        raise RuntimeError("Base adverse non affichée après 35 secondes de recherche.")
 
     def farm_loop(self):
         """Prepare, find a valid base, deploy the configured army, then repeat."""
@@ -877,37 +1725,102 @@ class BotApp:
             while not self.stop_event.is_set():
                 window=WindowDriver.resolve(self.settings.window_title)
                 if not window: raise RuntimeError("Fenêtre Clash introuvable.")
+                stats = getattr(self, "farm_stats", None)
+                if stats and stats.data.get("pending"):
+                    if stats.data["pending"]["window_title"] != window.title:
+                        raise RuntimeError("Revenir au compte du combat en attente pour comptabiliser son butin.")
+                    if not has_all_screen_text(self._capture(window), "attaquer", "magasin"):
+                        if not self.wait_for_battle_return(window): return
+                        if not self.settings.chain_attacks: return
+                    else:
+                        self.events.put("Résultat du combat précédent absent : sa récolte ne peut pas être comptabilisée.")
+                        stats.clear_pending()
+                if self.settings.upgrade_recommended and not self.settings.dry_run:
+                    from upgrades import upgrade_suggested
+                    upgrade_suggested(self, window)
                 self.upgrade_walls_to_reserve(window)
                 if self.stop_event.is_set() or not self.open_search(window): return
-                accepted=False
-                while not self.stop_event.is_set():
-                    image=WindowDriver.capture(window); loot=read_enemy_loot(image)
-                    if not enemy_loot_screen_ready(image):
-                        self.events.put("Attente de l'affichage complet de la base adverse."); self.stop_event.wait(.5); continue
-                    if loot.gold is None or loot.elixir is None:
-                        self.events.put("Butin adverse illisible : aucune action envoyée."); self.stop_event.wait(1); continue
-                    accepted,gold_minimum,elixir_minimum=loot_is_accepted(loot.gold,loot.elixir,self.settings)
-                    self.events.put(f"Base adverse : or {loot.gold:,}, élixir {loot.elixir:,} | seuils avec marge : {gold_minimum:,}/{elixir_minimum:,} → {'attaque' if accepted else 'suivant'}.")
-                    if accepted: break
-                    if not WindowDriver.click_percent(window,*NEXT_BASE_BUTTON): raise RuntimeError("Clic Suivant refusé.")
-                    self.stop_event.wait(3)
-                if not accepted or self.stop_event.is_set(): return
+                if not self.find_suitable_base(window): return
+                self._check_stopped()
                 if self.settings.dry_run:
                     self.events.put("Simulation : base retenue ; aucune troupe ni amélioration n'est envoyée."); return
-                self.deploy_attack_composition(window)
-                if not self.settings.chain_attacks or not self.wait_for_battle_return(window): return
+                self.prepare_attack(window)
+                if stats: stats.begin(window.title)
+                try:
+                    self.deploy_attack_composition(window)
+                except OperationCancelled:
+                    raise
+                except RuntimeError as exc:
+                    # A failed deployment must not abandon event handling or
+                    # the result screen while a real battle is still running.
+                    self.events.put(f"Déploiement interrompu : {exc} Suivi du combat jusqu’au résultat.")
+                    self.wait_for_battle_return(window)
+                    return
+                if not self.wait_for_battle_return(window) or not self.settings.chain_attacks: return
+        except ReconnectRequired: raise
+        except OperationCancelled: self.events.put("Recherche interrompue.")
         except Exception as exc: self.events.put(f"Recherche arrêtée : {exc}")
         finally:
-            self.stop_event.set(); self.events.put("Bot arrêté.")
+            if not getattr(self,'_reconnect_pending',False):
+                self.stop_event.set(); self.events.put("Bot arrêté.")
+
+    def find_suitable_base(self, window):
+        deadline = time.monotonic() + BASE_READ_TIMEOUT
+        while not self.stop_event.is_set():
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Écran ou butin illisible après 35 secondes sur cette base.")
+            with ocr_deadline(deadline):
+                image = self._capture(window)
+                if not enemy_loot_screen_ready(image):
+                    if daily_reward_open(image):
+                        raise RuntimeError("Récompense quotidienne affichée pendant le choix de base.")
+                    self.events.put("Attente de l'affichage complet de la base adverse.")
+                    self._wait(.5)
+                    continue
+                loot = read_enemy_loot(image)
+            self._check_stopped()
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Délai de lecture du butin dépassé sur cette base.")
+            if loot.gold is None or loot.elixir is None:
+                self.events.put("Butin adverse illisible : nouvelle lecture, sans clic.")
+                self._wait(1)
+                continue
+            accepted, gold_minimum, elixir_minimum = loot_is_accepted(loot.gold, loot.elixir, self.settings)
+            self.events.put(f"Base adverse : or {loot.gold:,}, élixir {loot.elixir:,} | seuils avec marge : {gold_minimum:,}/{elixir_minimum:,} → {'attaque' if accepted else 'suivant'}.")
+            if accepted:
+                return True
+            if not self._click(window, *layout_values("NEXT_BASE_BUTTON")):
+                raise RuntimeError("Clic Suivant refusé.")
+            # The read budget belongs to one base; only a new search resets it.
+            deadline = time.monotonic() + BASE_READ_TIMEOUT
+            self._wait(3)
+        return False
+
     def _pump(self):
         try:
-            while True:self.write(self.events.get_nowait())
+            for _ in range(100):
+                event = self.events.get_nowait()
+                if isinstance(event, PreviewEvent):
+                    if not self.stop_event.is_set():
+                        self.window_title.set(event.title)
+                        self._show_preview(event.image)
+                        if event.calibrate: self._show_calibration(event.image)
+                elif isinstance(event, StatsEvent):
+                    for key, variable in self.stats_vars.items():
+                        variable.set(f"{event.totals[key]:,}".replace(",", " "))
+                    self.stats_count.set(f"{event.totals['battles']} combat(s) comptabilisé(s) · cumul sauvegardé")
+                else:
+                    self.write(event)
         except queue.Empty:pass
-        running=bool(self.worker and self.worker.is_alive())
+        running=self._busy()
         self.start_button.state(["disabled"] if running else ["!disabled"])
         self.walls_button.state(["disabled"] if running else ["!disabled"])
         self.stop_button.state(["!disabled"] if running else ["disabled"])
-        if not running and self.run_state.get()=="EN COURS": self.run_state.set("PRÊT")
+        for button in (self.inspect_button, self.profile_button, self.save_button, self.calibrate_button):
+            button.state(["disabled"] if running else ["!disabled"])
+        for button in getattr(self,'independent_buttons',[]):
+            button.state(['disabled'] if running else ['!disabled'])
+        if not running and self.run_state.get() in ("EN COURS", "LECTURE"): self.run_state.set("PRÊT")
         self.root.after(250,self._pump)
     def write(self,text):
         logging.info(text);self.status.set(text);self.log.configure(state="normal");self.log.insert("end",text+"\n");self.log.see("end");self.log.configure(state="disabled")
@@ -932,5 +1845,34 @@ def profile_test():
     if any(value is None for value in required): raise RuntimeError(f"Relevé incomplet : {asdict(snapshot)}")
     print(json.dumps(asdict(snapshot), ensure_ascii=False))
 
+
+def self_test_report(path):
+    """Exercise packaged imports/OCR and identify the exact embedded sources."""
+    report = {"ok": False, "frozen": bool(getattr(sys, "frozen", False))}
+    try:
+        metadata_path = Path(__file__).with_name("build_info.json")
+        if metadata_path.exists():
+            report["build"] = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+        self_test()
+        validate_layout(Settings())
+        report["ok"] = True
+    except Exception as exc:
+        report["error"] = f"{type(exc).__name__}: {exc}"
+    Path(path).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return 0 if report["ok"] else 1
+
+
 if __name__ == "__main__":
-    profile_test() if "--profile-test" in sys.argv else (self_test() if "--self-test" in sys.argv else BotApp().run())
+    parser = argparse.ArgumentParser(description="CoC Farm Bot")
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--profile-test", action="store_true")
+    parser.add_argument("--self-test-report", metavar="JSON")
+    args = parser.parse_args()
+    if args.self_test_report:
+        sys.exit(self_test_report(args.self_test_report))
+    elif args.profile_test:
+        profile_test()
+    elif args.self_test:
+        self_test()
+    else:
+        BotApp().run()

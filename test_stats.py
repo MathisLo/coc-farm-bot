@@ -1,0 +1,88 @@
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+from PIL import Image
+import main
+from farm_stats import FarmStats
+from test_regressions import app_without_gui
+
+
+class StatisticsTests(unittest.TestCase):
+    def test_unreadable_result_still_returns_home(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app=app_without_gui()
+            app.farm_stats=FarmStats(Path(directory)/'stats.json')
+            app.farm_stats.begin('account')
+            frame=Image.new('RGB',(30,30))
+            app._capture=Mock(return_value=frame)
+            app._battle_capture=Mock(return_value=frame)
+            app._wait=Mock()
+            app._click=Mock(return_value=True)
+            with patch.object(main,'read_battle_earnings',return_value=None),patch.object(main,'has_all_screen_text',side_effect=[False,True]),patch.object(main,'has_screen_text',return_value=True):
+                self.assertTrue(app.wait_for_battle_return(object()))
+            app._click.assert_called_once()
+            self.assertIsNone(app.farm_stats.data['pending'])
+
+    def test_unreadable_result_is_archived_and_next_battle_can_start(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = app_without_gui()
+            app.farm_stats = FarmStats(Path(directory)/'stats.json')
+            app.farm_stats.begin('account')
+            app._wait = Mock()
+            app._capture = Mock(return_value=Image.new('RGB',(30,30),'red'))
+            with patch.object(main,'read_battle_earnings',return_value=None):
+                app.record_battle_earnings(object())
+            self.assertEqual(app.farm_stats.data['gold'],0)
+            self.assertEqual(app.farm_stats.data['battles'],0)
+            self.assertIsNone(app.farm_stats.data['pending'])
+            self.assertEqual(len(list((Path(directory)/'unread-results').glob('*.png'))),1)
+            self.assertEqual(len(list((Path(directory)/'unread-results').glob('*.json'))),1)
+            app.farm_stats.begin('account')
+            self.assertTrue(app.farm_stats.data['pending'])
+
+    def test_short_dark_amount_keeps_its_leading_digits(self):
+        for filename in ('result_short_dark.png','result_short_dark_background.png'):
+            with Image.open(Path(__file__).parent/'testdata'/filename) as im:
+                self.assertEqual(main.read_battle_earnings(im),(316672,730999,16130))
+
+    def test_persistence_and_duplicate_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'stats.json'
+            stats = FarmStats(path)
+            stats.begin('account')
+            stats = FarmStats(path)
+            self.assertTrue(stats.finish((100, 200, 3)))
+            self.assertFalse(stats.finish((100, 200, 3)))
+            stats = FarmStats(path)
+            stats.begin('account')
+            stats.finish((40, 50, 2))
+            self.assertEqual(FarmStats(path).data,
+                             dict(gold=140, elixir=250, dark_elixir=5, battles=2, pending=None))
+
+    def test_real_result_reaches_persistent_totals_and_ui_event(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = app_without_gui()
+            app.farm_stats = FarmStats(Path(directory) / 'stats.json')
+            app.farm_stats.begin('account')
+            app._wait = Mock()
+            with Image.open(Path(__file__).parent / 'testdata/result_bonus.png') as screenshot:
+                app._capture = Mock(return_value=screenshot)
+                app.record_battle_earnings(object())
+            event = app.events.get_nowait()
+            self.assertIsInstance(event, main.StatsEvent)
+            self.assertEqual([event.totals[k] for k in ('gold', 'elixir', 'dark_elixir')],
+                             [393408, 55180, 1400])
+            self.assertEqual(FarmStats(app.farm_stats.path).data, event.totals)
+
+    def test_large_result_includes_league_bonus(self):
+        with Image.open(Path(__file__).parent / 'testdata/result_large.png') as screenshot:
+            self.assertEqual(main.read_battle_earnings(screenshot), (1773011, 2057709, 16323))
+
+    def test_unknown_screen_does_not_count_as_zero(self):
+        self.assertIsNone(main.read_battle_earnings(Image.new('RGB', (1920,1080))))
+
+    def test_zero_loot_defeat_has_no_dark_elixir_row(self):
+        with Image.open(Path(__file__).parent / 'testdata/result_zero.png') as screenshot:
+            self.assertEqual(main.read_battle_earnings(screenshot), (0, 0, 0))
