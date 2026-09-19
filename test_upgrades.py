@@ -8,6 +8,32 @@ import upgrades
 
 
 class UpgradeTests(unittest.TestCase):
+    def test_wall_more_label_on_observed_background(self):
+        with Image.open(Path(__file__).parent/'testdata/wall_more_background.png') as image:
+            self.assertTrue(main.builders_menu_open(image))
+            point = main.find_wall_more_button(image)
+            self.assertIsNotNone(point)
+            self.assertTrue(43 < point[0] < 49 and 81 < point[1] < 87)
+
+    def test_army_and_heroes_share_one_straight_attack_edge(self):
+        app = app_without_gui()
+        app._wait = Mock()
+        app._battle_capture = Mock(return_value=object())
+        app._click = Mock(return_value=True)
+        with patch.object(app, 'deploy_unit', return_value=1) as deploy, patch.object(main, 'hero_layout_shift', return_value=0), patch.object(main, 'hero_icon_saturation', return_value=100), patch.object(main, 'hero_health_visible', side_effect=[False,False,True]*3):
+            app.deploy_attack_composition('window')
+        line = deploy.call_args_list[0].args[3]
+        self.assertEqual(line, deploy.call_args_list[1].args[3])
+        x0,y0=line[0]; x1,y1=line[-1]
+        self.assertGreater(abs(x1-x0), 15)
+        for x,y in line:
+            self.assertLess(x, 50)
+            self.assertAlmostEqual((x-x0)*(y1-y0), (y-y0)*(x1-x0))
+        drops=[c.args[1:] for c in app._click.call_args_list][1::2]
+        self.assertEqual(len(drops), 3)
+        self.assertTrue(all(p in line for p in drops))
+        self.assertTrue(all(c.args[0] <= .12 for c in app._wait.call_args_list))
+
     def test_hdv_waits_for_other_rows_and_running_builders(self):
         image=Image.new('RGB',(1920,1080))
         words=[('Améliorations',10,10),('suggérées',40,10),('Hôtel',15,25),('de',30,25),('ville',40,25),('3000000',85,25),('Autres',15,40),('améliorations',45,40)]

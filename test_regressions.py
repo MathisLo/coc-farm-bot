@@ -26,6 +26,32 @@ def app_without_gui():
 
 
 class CancellationRegressions(unittest.TestCase):
+    def test_fast_line_counts_all_units_in_three_verified_bursts(self):
+        app=app_without_gui()
+        app._wait=Mock()
+        app._battle_capture=Mock(return_value=object())
+        app._click=Mock(return_value=True)
+        app.stable_troop_count=Mock(side_effect=[8,5,2,0])
+        points=main.layout_points("ELECTRODRAGON_PERIMETER_POINTS")
+        self.assertEqual(app.deploy_unit('window', 'Électro-dragon', (23,92), points, burst=True), 8)
+        self.assertEqual(app.stable_troop_count.call_count, 4)
+        # Initial selection, then a fresh selection and drop for each troop.
+        self.assertEqual(app._click.call_count, 17)
+        drops=[c.args[1:] for c in app._click.call_args_list][2::2]
+        self.assertEqual(len(set(drops)),8)
+        self.assertTrue(all(p in points for p in drops))
+        self.assertLess(sum(c.args[0] for c in app._wait.call_args_list), .6)
+
+    def test_fast_line_stops_when_burst_outcome_is_unknown(self):
+        app=app_without_gui()
+        app._wait=Mock()
+        app._battle_capture=Mock(return_value=object())
+        app._click=Mock(return_value=True)
+        app.stable_troop_count=Mock(side_effect=[8,None])
+        with self.assertRaisesRegex(RuntimeError, 'non confirmé'):
+            app.deploy_unit('window','Électro-dragon',(23,92),[(18,40),(28,26),(38,13)],burst=True)
+        self.assertEqual(app._click.call_count,7)
+
     def test_dimmed_hero_is_not_confirmed_and_retry_reselects(self):
         app = app_without_gui()
         app._wait = Mock()

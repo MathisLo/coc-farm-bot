@@ -219,15 +219,10 @@ WALL_ADD_ONE_BUTTON = (50.0, 80.0)
 WALL_MULTI_GOLD_BUTTON = (58.3, 80.0)
 WALL_MULTI_ELIXIR_BUTTON = (66.5, 80.0)
 WALL_MULTI_CONFIRM_BUTTON = (59.0, 62.0)
-# Positions extérieures, réparties de chaque côté du terrain. Elles évitent
-# le carré central de la base : Clash n'autorise la pose des troupes que sur
-# le pourtour jouable. Les points personnalisés ne sont employés que s'ils
-# respectent eux aussi cette couronne extérieure.
+# A single upper-left attack edge, away from the central no-deploy area.
+# Every unit and hero uses this same straight line, never the opposite edge.
 ELECTRODRAGON_PERIMETER_POINTS = [
-    (24.0, 35.0), (35.0, 20.0), (65.0, 20.0), (76.0, 35.0),
-    (80.0, 48.0), (68.0, 67.0), (32.0, 67.0), (20.0, 48.0),
-    (18.0, 32.0), (32.0, 16.0), (68.0, 16.0), (82.0, 32.0),
-    (87.0, 46.0), (78.0, 62.0), (22.0, 62.0), (13.0, 46.0),
+    (18.0 + 20.0*i/15, 40.0 - 27.0*i/15) for i in range(16)
 ]
 TROOP_COUNT_ROIS = {
     "Électro-dragon": Roi(23.7, 85.19, 26.3, 89.35),
@@ -840,7 +835,11 @@ def find_wall_menu_item(image: Image.Image) -> tuple[float, float] | None:
 
 
 def builders_menu_open(image: Image.Image) -> bool:
-    return "disponible" in read_text(crop_percent(image, layout_roi("SCREEN_ROIS", "builders_menu")), scale=2).casefold()
+    for roi in (layout_roi("SCREEN_ROIS", "builders_menu"), layout_roi("SCREEN_ROIS", "wall_menu")):
+        text = read_text(crop_percent(image, roi), scale=2).casefold()
+        if "disponible" in text or "amélioration" in text or re.search(r"rempar\w*\s*x\s*\d+", text):
+            return True
+    return False
 
 
 def read_wall_available(image: Image.Image, item: tuple[float, float]) -> int | None:
@@ -872,14 +871,16 @@ def find_wall_more_button(image: Image.Image):
     # Locate the actual "Améliorer plus" label instead of clicking its old slot.
     roi = layout_roi("SCREEN_ROIS", "wall_actions")
     labels = Roi(roi.x1, roi.y1 + (roi.y2-roi.y1)*.7, roi.x2, roi.y2 - (roi.y2-roi.y1)*.05)
-    for region, masked in ((labels, False), (roi, True)):
+    for region, masked in ((labels, False), (Roi(20,79,80,87), False), (roi, True)):
         crop = crop_percent(image, region)
         if masked:
             crop = white_text_mask(crop).crop((8, 8, crop.width + 8, crop.height + 8))
-        for text, x, y in read_word_centers(crop.resize((crop.width * 2, crop.height * 2))):
-            if text.casefold().strip(".,:!") in ("plus", "pluse", "plvs", "p1us", "pius"):
-                return (region.x1 + x * (region.x2 - region.x1) / 100,
-                        region.y1 + y * (region.y2 - region.y1) / 100)
+        for scale in (2,1,3):
+            for text, x, y in read_word_centers(crop.resize((crop.width * scale, crop.height * scale))):
+                text = unicodedata.normalize("NFKD", text.casefold()).encode("ascii", "ignore").decode().strip(".,:!")
+                if text in ("plus", "pluse", "plvs", "p1us", "pius"):
+                    return (region.x1 + x * (region.x2 - region.x1) / 100,
+                            region.y1 + y * (region.y2 - region.y1) / 100)
     return None
 
 
@@ -1433,7 +1434,7 @@ class BotApp:
             if not builders_menu_open(menu):
                 self._wall_click(window, layout_values("BUILDERS_BUTTON"), "ouvriers")
             available = None
-            for _ in range(4):
+            for _ in range(16):
                 menu = self._capture(window)
                 item = find_wall_menu_item(menu)
                 available = read_wall_available(menu, item) if item else None
@@ -1509,6 +1510,11 @@ class BotApp:
             if total != count * unit_cost:
                 self.events.put(f"Coût groupé non confirmé ({total} au lieu de {count * unit_cost}) : aucune dépense envoyée.")
                 return upgraded
+            fresh = self.stable_reserves(window)
+            if fresh is None or min(fresh) < WALL_RESERVE or fresh[0 if resource == "or" else 1] - total < WALL_RESERVE:
+                self.events.put("Réserves revérifiées : groupe trop coûteux ou lecture incertaine, aucune dépense envoyée.")
+                return upgraded
+            gold, elixir = fresh
             button = row_button("WALL_MULTI_GOLD_BUTTON") if resource == "or" else row_button("WALL_MULTI_ELIXIR_BUTTON")
             self._wall_click(window, button, f"amélioration groupée {resource}")
             if self.stop_event.is_set() or not wall_batch_confirmation_matches(self._capture(window), total, resource):
@@ -1534,7 +1540,7 @@ class BotApp:
             self._wait(1)
         return upgraded
 
-    def deploy_unit(self, window, label, slot, points):
+    def deploy_unit(self, window, label, slot, points, burst=False):
         self._check_stopped()
         if not points: raise RuntimeError("Aucun point de déploiement configuré.")
         remaining = self.stable_troop_count(window, label)
@@ -1544,10 +1550,36 @@ class BotApp:
         expected = self.settings.electrodragon_count if label == "Électro-dragon" else self.settings.dragon_count
         if remaining != expected: self.events.put(f"{label} : {remaining} disponible(s), {expected} prévu(s) ; toutes les unités visibles seront envoyées.")
         if not self._click(window, *slot): raise RuntimeError(f"Sélection {label} refusée.")
-        self._wait(.3)
+        self._wait(.08)
         placed = 0
         rejected = set()
         while remaining and not self.stop_event.is_set():
+            if burst:
+                candidates = [p for p in points if p not in rejected]
+                if not candidates:
+                    raise RuntimeError(f"Aucun point accepté pour {label} ; {remaining} unité(s) restante(s).")
+                drops = []
+                for index in range(min(3, remaining)):
+                    self._check_stopped()
+                    point = candidates[min(len(candidates)-1, int((placed+index)*len(candidates)/initial))]
+                    self._battle_capture(window)
+                    # Event choices can clear the selected troop. Reselect only
+                    # while the last confirmed count covers this whole burst.
+                    if not self._click(window, *slot) or not self._click(window, *point):
+                        raise RuntimeError(f"Pose rapide {label} refusée.")
+                    drops.append(point)
+                    self._wait(.06)
+                observed = self.stable_troop_count(window, label)
+                if observed is None or not remaining-len(drops) <= observed <= remaining:
+                    raise RuntimeError(f"Compteur de {label} non confirmé après la pose rapide.")
+                deployed = remaining-observed
+                if deployed == 0:
+                    rejected.update(drops)
+                else:
+                    placed += deployed
+                    remaining = observed
+                    self.events.put(f"{label} : {deployed} pose(s) confirmée(s) en ligne ; {remaining} restant(s).")
+                continue
             accepted = False
             for offset in range(len(points)):
                 self._check_stopped()
@@ -1556,7 +1588,7 @@ class BotApp:
                     continue
                 before = self._battle_capture(window)
                 if not self._click(window, x, y): raise RuntimeError(f"Clic pose {label} refusé.")
-                self._wait(max(.35, self.settings.delay_between_dragons_ms / 1000))
+                self._wait(max(.08, self.settings.delay_between_dragons_ms / 1000))
                 observed = self.stable_troop_count(window, label)
                 # Never retry a drop whose outcome is unknown: that could deploy
                 # another troop while counting only one, or click a changed menu.
@@ -1585,7 +1617,7 @@ class BotApp:
                     if observed is not None and observed == previous:
                         return observed
                     previous = observed
-                    self._wait(.15)
+                    self._wait(.04)
         except TimeoutError:
             return None
         return None
@@ -1615,8 +1647,8 @@ class BotApp:
     def deploy_attack_composition(self, window):
         self._check_stopped()
         perimeter = layout_points("ELECTRODRAGON_PERIMETER_POINTS")
-        electro = self.deploy_unit(window, "Électro-dragon", layout_values("ELECTRODRAGON_SLOT"), perimeter)
-        dragons = self.deploy_unit(window, "Dragon", layout_values("DRAGON_SLOT"), perimeter[5:] + perimeter[:5])
+        electro = self.deploy_unit(window, "Électro-dragon", layout_values("ELECTRODRAGON_SLOT"), perimeter, burst=True)
+        dragons = self.deploy_unit(window, "Dragon", layout_values("DRAGON_SLOT"), perimeter, burst=True)
         heroes = 0
         if self.settings.deploy_heroes:
             self._check_stopped()
@@ -1644,11 +1676,11 @@ class BotApp:
                         self.events.put(f"Héros {index + 1} posé : barre de vie confirmée.")
                         break
                     if not self._click(window, slot[0] + slot_shift, slot[1]): raise RuntimeError(f"Sélection héros {index + 1} refusée.")
-                    self._wait(.3)
+                    self._wait(.08)
                     self._check_stopped()
                     x, y = perimeter[(index * 3 + offset) % len(perimeter)]
                     if not self._click(window, x, y): raise RuntimeError(f"Clic héros {index + 1} refusé.")
-                    self._wait(.4)
+                    self._wait(.12)
                     after = self._battle_capture(window)
                     if hero_health_visible(after, index, shift):
                         heroes += 1
@@ -1720,7 +1752,10 @@ class BotApp:
             self.events.put(label); self._wait(1)
             if self.stop_event.is_set(): return False
             dismiss_daily_reward()
-            if not has_screen_text(self._capture(window), expected): raise RuntimeError(f"Écran attendu absent après : {label}.")
+            screen = self._capture(window)
+            header = Roi(2,2,50,12) if expected == "multijoueur" else Roi(20,0,80,20)
+            if not has_screen_text(screen, expected) and not has_screen_text(crop_percent(screen, header), expected):
+                raise RuntimeError(f"Écran attendu absent après : {label}.")
         if not self._click(window, *layout_values("START_SEARCH_BUTTON")): raise RuntimeError("Clic de recherche refusé.")
         self.events.put("Recherche d'une base adverse")
         deadline = time.monotonic() + 35

@@ -4,7 +4,7 @@ Application Windows pour Google Play Jeux PC. Elle lit le butin des bases advers
 
 ## Démarrer
 
-Lancer [l’exécutable](dist/CoCFarmBot.exe) ou, depuis le dossier du projet :
+Télécharger puis lancer [CoCFarmBot.exe depuis la dernière Release GitHub](https://github.com/MathisLo/coc-farm-bot/releases/latest/download/CoCFarmBot.exe) ou, depuis le dossier du projet :
 
 ```powershell
 .\.venv\Scripts\python.exe main.py
@@ -17,7 +17,7 @@ Dans l’application :
 3. Cliquer sur **Enregistrer** pour garder ces réglages, ou sur **Lancer le farm** pour les enregistrer et démarrer.
 4. **Arrêter** interrompt la boucle. Les événements sont affichés dans le journal.
 
-La **simulation** clique réellement pour rechercher et passer les bases, mais ne déploie pas de troupes et n’améliore pas de remparts. En mode réel, le bot lit le nombre de troupes présentes dans la barre de combat, les répartit sur les quatre côtés et exige deux lectures concordantes du compteur avant et après la pose. Un clic doit diminuer le compteur d’exactement une unité. Un résultat illisible ou incohérent arrête la pose ; un simple changement de pixels n’est pas une confirmation. Les nombres saisis dans l’interface servent de prévision ; toutes les unités disponibles des deux types pris en charge sont envoyées. La pose des trois héros est également vérifiée visuellement.
+La **simulation** clique réellement pour rechercher et passer les bases, mais ne déploie pas de troupes et n’améliore pas de remparts. En mode réel, le bot lit le nombre de troupes présentes dans la barre de combat, les répartit sur une seule ligne en haut à gauche et envoie les héros sur cette même ligne juste derrière. Les troupes sont posées par groupes de trois maximum, à 60 ms d’intervalle hors capture et clics. Deux lectures concordantes du compteur vérifient chaque groupe avant de continuer. Un résultat illisible ou incohérent arrête la pose ; un simple changement de pixels n’est pas une confirmation. Les nombres saisis dans l’interface servent de prévision ; toutes les unités disponibles des deux types pris en charge sont envoyées. La pose des trois héros est également vérifiée visuellement.
 
 **Arrêter** bloque les nouveaux clics de toutes les actions, y compris les héros et les confirmations de remparts. Un clic déjà envoyé est relâché. Les lectures OCR sont annulables et limitées à huit secondes par appel ; une base dont l’écran ou le butin reste illisible dispose d’un budget total de 35 secondes. **Lire l’écran** et **Relever le profil** travaillent en arrière-plan : l’interface et le bouton Arrêter restent disponibles. Une seule opération est autorisée à la fois, et les réglages utilisés ne changent pas en cours de cycle.
 
@@ -75,7 +75,7 @@ La reconnaissance des héros exige une barre de vie verte horizontale sous un bo
 - `%USERPROFILE%\CoCFarmBot\bot.log` : journal détaillé.
 - `%USERPROFILE%\CoCFarmBot\account_snapshot.json` : dernier relevé demandé via **Relever le profil**.
 
-Le suivi des fonctionnalités et des validations se trouve dans [Notion](https://app.notion.com/p/3dccca7fe8b78060a5c3ca2aa4b73fa8). Le dépôt GitHub contient les sources ; les fichiers de construction et les captures de diagnostic restent locaux.
+Le suivi des fonctionnalités et des validations se trouve dans [Notion](https://app.notion.com/p/3dccca7fe8b78060a5c3ca2aa4b73fa8). Le dépôt GitHub contient les sources et chaque mise à jour publiée fournit un exécutable Windows testé dans les Releases. Les fichiers de construction et les captures de diagnostic restent locaux.
 # Statistiques de récolte
 
 L'interface « Le coffre de guerre » regroupe les trois ressources dans des cartes colorées avec emojis. Les réglages se trouvent dans les onglets Butin, Armée et Cycle ; le journal et l'aperçu du jeu ont leurs propres onglets. Les commandes Lancer, Arrêter et Améliorer les remparts restent en bas de la fenêtre. Taille minimale : 1040 × 860.
