@@ -8,6 +8,57 @@ import upgrades
 
 
 class UpgradeTests(unittest.TestCase):
+    def test_translucent_menu_does_not_select_background_wall_label(self):
+        with Image.open(Path(__file__).parent/'testdata/wall_menu_background_false_row.png') as im:
+            self.assertTrue(main.builders_menu_open(im))
+            self.assertFalse(main.wall_menu_row_matches(im,61))
+            self.assertIsNone(main.find_wall_menu_item(im))
+
+    def test_last_wall_has_an_individual_payment_path(self):
+        with Image.open(Path(__file__).parent/'testdata/wall_last_menu.png') as im:
+            self.assertIsNotNone(main.find_wall_menu_item(im))
+        with Image.open(Path(__file__).parent/'testdata/wall_last_selected.png') as im:
+            controls=main.wall_group_controls(im,single=True)
+            self.assertIsNotNone(controls)
+            self.assertIsNone(controls['add'])
+            self.assertEqual(controls['payments']['or'][1],500000)
+        with Image.open(Path(__file__).parent/'testdata/wall_single_confirmation.png') as im:
+            self.assertTrue(main.single_wall_confirmation_matches(im,500000,'or'))
+            self.assertFalse(main.single_wall_confirmation_matches(im,750000,'or'))
+            self.assertFalse(main.single_wall_confirmation_matches(im,500000,'élixir'))
+        self.assertEqual(main.layout_values('WALL_CONFIRM_BUTTON'),(70,87))
+
+    def test_group_buttons_follow_five_and_six_button_rows(self):
+        cases = [('wall_group_no_ten.png',41.8,50.1,58.3,500000),
+                 ('wall_group_background.png',41.8,50.1,58.3,500000),
+                 ('wall_group_two_no_ten.png',41.8,50.1,58.3,1000000),
+                 ('builders_one_wall_group.png',45.9,54.2,62.4,1000000)]
+        for filename,add,gold,elixir,price in cases:
+            with self.subTest(filename=filename), Image.open(Path(__file__).parent/'testdata'/filename) as image:
+                controls=main.wall_group_controls(image)
+                self.assertIsNotNone(controls)
+                self.assertAlmostEqual(controls['add'][0],add,delta=.3)
+                self.assertEqual(set(controls['payments']),{'or','élixir'})
+                for resource,x in [('or',gold),('élixir',elixir)]:
+                    point,cost=controls['payments'][resource]
+                    self.assertAlmostEqual(point[0],x,delta=.3)
+                    self.assertTrue(78 < point[1] < 84)
+                    self.assertEqual(cost,price)
+
+    def test_army_camp_is_never_a_wall_group(self):
+        with Image.open(Path(__file__).parent/'testdata/wall_wrong_army_camp.png') as image:
+            self.assertIsNone(main.wall_group_controls(image))
+
+    def test_wrong_screen_after_one_add_prevents_further_wall_clicks(self):
+        app=app_without_gui();app._capture=Mock(return_value=object())
+        app._wall_click=Mock();app._wait=Mock()
+        app.stable_reserves=Mock(return_value=(6000000,8000000))
+        controls={'add':(41.8,80),'remove':(33.6,80),'payments':{'or':((50,80),500000),'élixir':((58.3,80),500000)}}
+        app.stable_wall_group=Mock(side_effect=[controls,None])
+        with patch.object(main,'builders_menu_open',return_value=True),patch.object(main,'find_wall_menu_item',return_value=(44,54)),patch.object(main,'read_wall_available',return_value=7),patch.object(main,'wall_selected',return_value=True),patch.object(main,'find_wall_more_button',return_value=(46,85)):
+            self.assertEqual(app.upgrade_walls_to_reserve('window',independent=True),0)
+        self.assertEqual([c.args[1] for c in app._wall_click.call_args_list],[(44,54),(46,85),(41.8,80)])
+
     def test_wall_more_label_on_observed_background(self):
         with Image.open(Path(__file__).parent/'testdata/wall_more_background.png') as image:
             self.assertTrue(main.builders_menu_open(image))

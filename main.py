@@ -259,7 +259,7 @@ def layout_defaults():
     for name in ("ATTACK_HOME_BUTTON", "FIND_MATCH_BUTTON", "START_SEARCH_BUTTON", "NEXT_BASE_BUTTON",
                  "ELECTRODRAGON_SLOT", "DRAGON_SLOT", "HERO_SLOTS", "BUILDERS_BUTTON", "WALL_MORE_BUTTON",
                  "WALL_ADD_TEN_BUTTON", "WALL_ADD_ONE_BUTTON", "WALL_MULTI_GOLD_BUTTON", "WALL_MULTI_ELIXIR_BUTTON",
-                 "WALL_MULTI_CONFIRM_BUTTON", "RETURN_HOME_BUTTON", "DAILY_REWARD_CLOSE_BUTTON",
+                 "WALL_MULTI_CONFIRM_BUTTON", "WALL_CONFIRM_BUTTON", "RETURN_HOME_BUTTON", "DAILY_REWARD_CLOSE_BUTTON",
                  "ELECTRODRAGON_PERIMETER_POINTS", "PROFILE_ROIS", "ENEMY_LOOT_ROIS", "ENEMY_LOOT_LABEL_ROI",
                  "TROOP_COUNT_ROIS", "TROOP_ICON_ROIS", "TROOP_COUNTER_INK_ROIS", "HERO_HEALTH_ROIS", "HERO_ICON_ROIS",
                  "WALL_GOLD_COST_ROI", "WALL_ELIXIR_COST_ROI", "WALL_GOLD_TIGHT_COST_ROI", "WALL_ELIXIR_TIGHT_COST_ROI",
@@ -286,7 +286,7 @@ def layout_labels():
         "START_SEARCH_BUTTON": "Recherche · Lancer", "NEXT_BASE_BUTTON": "Recherche · Suivant",
         "ELECTRODRAGON_SLOT": "Armée · Sélection électro-dragon", "DRAGON_SLOT": "Armée · Sélection dragon",
         "HERO_SLOTS": "Armée · Sélection héros", "BUILDERS_BUTTON": "Village · Ouvriers",
-        "WALL_MORE_BUTTON": "Remparts · Améliorer plus", "WALL_ADD_TEN_BUTTON": "Remparts · Ajouter 10",
+        "WALL_CONFIRM_BUTTON": "Remparts · Confirmer un seul rempart", "WALL_MORE_BUTTON": "Remparts · Améliorer plus", "WALL_ADD_TEN_BUTTON": "Remparts · Ajouter 10",
         "WALL_ADD_ONE_BUTTON": "Remparts · Ajouter 1", "WALL_MULTI_GOLD_BUTTON": "Remparts · Payer en or",
         "WALL_MULTI_ELIXIR_BUTTON": "Remparts · Payer en élixir", "WALL_MULTI_CONFIRM_BUTTON": "Remparts · Confirmer",
         "RETURN_HOME_BUTTON": "Bataille · Retour au village", "DAILY_REWARD_CLOSE_BUTTON": "Récompense quotidienne · Fermer",
@@ -812,13 +812,32 @@ def read_word_centers(image: Image.Image) -> list[tuple[str, float, float]]:
     finally: path.unlink(missing_ok=True)
 
 
+def wall_menu_row_matches(image,y):
+    # The builder menu is translucent: a village label visible through it
+    # is not a menu row. Require its green upgrade tag and the row caption.
+    pixels=list(crop_percent(image,Roi(39.3,y-1.4,40.9,y+1.4)).convert("RGB").get_flattened_data())
+    if sum(g>100 and g>r*1.2 and g>b*1.4 for r,g,b in pixels)<len(pixels)*.2:
+        return False
+    crop=crop_percent(image,Roi(41.1,y-1.4,50,y+1.4))
+    for scale in (2,1):
+        text=read_text(crop,scale=scale).casefold().strip(" .,:;!'\"")
+        if text.startswith(("rempar","rempamt")):
+            return True
+    return False
+
+
 def find_wall_menu_item(image: Image.Image) -> tuple[float, float] | None:
+    if not builders_menu_open(image):
+        return None
     menu_roi = layout_roi("SCREEN_ROIS", "wall_menu")
     menu = crop_percent(image, menu_roi)
-    for word, x, y in read_word_centers(menu):
-        if word.casefold().startswith("rempar") and x < 65:
-            return (menu_roi.x1 + x * (menu_roi.x2 - menu_roi.x1) / 100,
-                    menu_roi.y1 + y * (menu_roi.y2 - menu_roi.y1) / 100)
+    for scale in (1,2):
+        for word, x, y in read_word_centers(menu.resize((menu.width*scale,menu.height*scale))):
+            if word.casefold().startswith(("rempar", "rempamt")) and x < 65:
+                point=(menu_roi.x1 + x * (menu_roi.x2 - menu_roi.x1) / 100,
+                       menu_roi.y1 + y * (menu_roi.y2 - menu_roi.y1) / 100)
+                if wall_menu_row_matches(image,point[1]):
+                    return point
     # A selected wall shifts the camera and the full-screen OCR can lose the
     # row even though a narrow crop still reads "Rempart x…" clearly.
     exact_rows = []
@@ -830,11 +849,24 @@ def find_wall_menu_item(image: Image.Image) -> tuple[float, float] | None:
                 exact_rows.append(y)
             else:
                 partial_rows.append(y)
-    rows = exact_rows
+    rows = [y for y in exact_rows if wall_menu_row_matches(image,y)]
     return ((menu_roi.x1 + menu_roi.x2) / 2, float(rows[len(rows) // 2])) if rows else None
 
 
 def builders_menu_open(image: Image.Image) -> bool:
+    # The menu can be scrolled past its heading. Both pale vertical borders
+    # remain visible and distinguish its rows from labels in the village.
+    rgb=image.convert("RGB")
+    borders=[]
+    for x in (38.65,63.45):
+        hits=0
+        for y in range(15,61):
+            px,py=round(image.width*x/100),round(image.height*y/100)
+            pixels=[rgb.getpixel((max(0,min(image.width-1,px+dx)),py)) for dx in (-1,0,1)]
+            hits+=any(min(p)>140 and max(p)-min(p)<60 for p in pixels)
+        borders.append(hits/46)
+    if min(borders)>.8:
+        return True
     for roi in (layout_roi("SCREEN_ROIS", "builders_menu"), layout_roi("SCREEN_ROIS", "wall_menu")):
         text = read_text(crop_percent(image, roi), scale=2).casefold()
         if "disponible" in text or "amélioration" in text or re.search(r"rempar\w*\s*x\s*\d+", text):
@@ -850,6 +882,8 @@ def read_wall_available(image: Image.Image, item: tuple[float, float]) -> int | 
         raw = read_text(crop_percent(image, roi), scale=2).casefold().translate(str.maketrans({"l": "1", "i": "1", "g": "6", "s": "5", "o": "0", "b": "8"}))
         match = re.search(r"x\s*(\d{1,3})", raw)
         if match: values.append(int(match.group(1)))
+        elif raw.strip(" .,:;!'\"") in ("rempart", "rempamt"):
+            values.append(1)  # The game omits x1 on the last wall row.
     return max(values) if values else None
 
 
@@ -887,6 +921,74 @@ def find_wall_more_button(image: Image.Image):
 def wall_multi_mode(image: Image.Image) -> bool:
     text = read_text(white_text_mask(crop_percent(image, layout_roi("SCREEN_ROIS", "wall_actions"))), scale=2).casefold()
     return "remp" in text and any(token in text for token in ("aj", "aiou", "supp"))
+
+
+def wall_group_controls(image, single=False):
+    """Locate the controls in the current row; never reuse a row offset.
+
+    The +10 button disappears for small remaining groups and every other
+    button moves. Resource icons distinguish gold/elixir from wall rings.
+    """
+    from upgrades import normal, resource_icon
+    if single:
+        heading = crop_percent(image,Roi(30,68,70,74))
+        if not has_all_screen_text(heading,"rempart","niveau"):
+            return None
+    elif not wall_multi_mode(image):
+        return None
+    roi = Roi(20,81,80,87)
+    crop = crop_percent(image, roi)
+    adds, removes, upgrades = [], [], []
+    for scale in (2,1,3):
+        words = read_word_centers(crop.resize((crop.width*scale,crop.height*scale)))
+        for text, x, y in words:
+            label = normal(text).replace('0','o').replace('1','l').strip(".,:!(){}?'\"")
+            x, y = roi.x1+x*.6, roi.y1+y*.06
+            target = None
+            if label.endswith(('ajouter','aiouter')):
+                target = adds
+            elif label in ('supprimer','supprimea','suppripaer'):
+                target = removes
+            elif label in ('ameliorer','ameiiorer','amelioaer','ameiioaer'):
+                target = upgrades
+            if target is not None and not any(abs(px-x)<.5 for px,py in target):
+                target.append((x,y))
+    if not single and (not adds or len(removes)!=1):
+        return None
+    payments = {}
+    for x,y in upgrades:
+        resource = resource_icon(image,Roi(x+2,y-9.2,x+3.7,y-6.4))
+        if resource is None:
+            continue
+        price = None
+        for price_roi in (Roi(x-3,y-8.7,x+2.1,y-6.7), Roi(x-2.7,75,x+2.1,77), Roi(x-3.6,y-9.5,x+2.1,y-6.2)):
+            price = read_result_amount(crop_percent(image,price_roi),main_result=True)
+            if price is not None:
+                break
+        if price is not None and price > 0:
+            if resource in payments:
+                return None
+            payments[resource] = ((x,y-3),price)
+    if payments:
+        # When +10 is present, +1 is the rightmost Ajouter button.
+        if single:
+            return {'add':None, 'remove':None, 'payments':payments}
+        x,y=max(adds)
+        return {'add':(x,y-3), 'remove':(removes[0][0],removes[0][1]-3), 'payments':payments}
+    return None
+
+
+def single_wall_confirmation_matches(image,total,resource):
+    from upgrades import resource_icon
+    heading=crop_percent(image,Roi(15,3,85,10))
+    prices=[]
+    for scale in (2,3):
+        raw=read_text(crop_percent(image,Roi(64,85,74,89)),scale=scale).casefold().translate(str.maketrans({'s':'5','o':'0','l':'1'}))
+        if re.fullmatch(r"[0-9\s]+",raw.strip()):
+            prices.append(int(re.sub(r"\s","",raw)))
+    price=prices[0] if len(prices)==2 and prices[0]==prices[1] else None
+    return (has_all_screen_text(heading,"rempart","niveau") and price==total and
+            resource_icon(image,Roi(74.5,85.5,77.5,92))==resource)
 
 
 def wall_batch_confirmation_matches(image: Image.Image, total: int, resource: str) -> bool:
@@ -1424,6 +1526,21 @@ class BotApp:
         if not self._click(window, *point): raise RuntimeError(f"Clic {label} refusé.")
         self._wait(.45)
 
+    def stable_wall_group(self, window, resource=None, single=False):
+        previous = None
+        for _ in range(4):
+            controls = wall_group_controls(self._capture(window),single=single)
+            if controls is not None and resource is not None and resource not in controls["payments"]:
+                controls = None
+            if controls is not None and previous is not None:
+                same_prices = {r:p[1] for r,p in controls['payments'].items()} == {r:p[1] for r,p in previous['payments'].items()}
+                same_add = single or all(abs(a-b)<.5 for a,b in zip(controls['add'],previous['add']))
+                if same_prices and same_add:
+                    return controls
+            previous = controls
+            self._wait(.15)
+        return None
+
     def upgrade_walls_to_reserve(self, window, independent=False):
         """Upgrade available walls while keeping both village reserves at or above 1 M."""
         if (not independent and not self.settings.upgrade_wall_between_attacks) or self.settings.dry_run:
@@ -1452,6 +1569,8 @@ class BotApp:
                 menu = self._capture(window)
                 item = find_wall_menu_item(menu)
                 available = read_wall_available(menu, item) if item else None
+                if item and available is None:
+                    available = 1  # Select and verify only one wall when xN is unreadable.
                 if available is not None: break
                 if builders_menu_open(menu):
                     with self.action_lock:
@@ -1464,77 +1583,77 @@ class BotApp:
                 return upgraded
             selected = False
             for _ in range(3):
+                # Opening/closing a dialog can reset the menu scroll position.
+                # Never reuse the row retained before reading its quantity.
+                current_item = find_wall_menu_item(self._capture(window))
+                if current_item is None:
+                    self.events.put("Ligne des remparts non confirmée avant sélection : aucun clic envoyé.")
+                    return upgraded
+                item = current_item
                 self._wall_click(window, item, "rempart")
                 wall_image = self._capture(window)
-                if wall_selected(wall_image):
+                if wall_selected(wall_image) or (available == 1 and wall_group_controls(wall_image,single=True) is not None):
                     selected = True
                     break
                 if self.stop_event.is_set(): break
                 if not builders_menu_open(wall_image):
                     self._wall_click(window, layout_values("BUILDERS_BUTTON"), "ouvriers")
                 menu = self._capture(window)
-                item = find_wall_menu_item(menu) or item
+                item = find_wall_menu_item(menu)
+                if item is None:
+                    self.events.put("Ligne des remparts déplacée ou illisible : aucune répétition du clic.")
+                    return upgraded
             if self.stop_event.is_set() or not selected:
                 self.events.put("Sélection de rempart non confirmée.")
                 return upgraded
-            more_button = find_wall_more_button(self._capture(window))
-            if more_button is None:
-                self.events.put("Bouton Améliorer plus introuvable.")
-                return upgraded
-            self._wall_click(window, more_button, "Améliorer plus")
-            row_shift = more_button[0] - layout_values("WALL_MORE_BUTTON")[0]
-            def row_button(name):
-                x, y = layout_values(name)
-                return x + row_shift, y
-            batch_image = self._capture(window)
-            if self.stop_event.is_set() or not wall_multi_mode(batch_image):
-                self.events.put("Mode groupé non confirmé : aucune dépense envoyée.")
-                return upgraded
-            gold_cost = read_wall_cost(batch_image, "or", row_shift)
-            elixir_cost = read_wall_cost(batch_image, "élixir", row_shift)
-            options = []
-            if gold_cost: options.append((wall_batch_size(gold, gold_cost, available), "or", gold_cost))
-            if elixir_cost: options.append((wall_batch_size(elixir, elixir_cost, available), "élixir", elixir_cost))
-            if not options or max(option[0] for option in options) == 0:
-                self.events.put(f"Achat supplémentaire impossible sans passer sous 1 M : or {gold:,}, élixir {elixir:,}.")
-                return upgraded
-            count, resource, unit_cost = max(options, key=lambda option: (option[0], gold if option[1] == "or" else elixir))
-            for _ in range((count - 1) // 10):
-                if self.stop_event.is_set(): return upgraded
-                self._wall_click(window, row_button("WALL_ADD_TEN_BUTTON"), "ajouter 10 remparts")
-            for _ in range((count - 1) % 10):
-                if self.stop_event.is_set(): return upgraded
-                self._wall_click(window, row_button("WALL_ADD_ONE_BUTTON"), "ajouter un rempart")
-            batch_image = self._capture(window)
-            if not wall_multi_mode(batch_image):
-                self.events.put("Mode groupé interrompu : aucune dépense envoyée.")
-                return upgraded
-            total = read_wall_cost(batch_image, resource, row_shift)
-            while total != count * unit_cost and count > 1:
-                remove = find_wall_remove_button(batch_image,row_shift)
-                if remove is None:
-                    break
-                self.events.put('Prix groupé illisible : réduction du groupe avant une nouvelle vérification.')
-                self._wall_click(window,remove,'retirer un rempart du groupe')
-                count -= 1
-                batch_image = self._capture(window)
-                if not wall_multi_mode(batch_image):
+            single = available == 1
+            if not single:
+                more_button = find_wall_more_button(self._capture(window))
+                if more_button is None:
+                    self.events.put("Bouton Améliorer plus introuvable.")
                     return upgraded
-                total = read_wall_cost(batch_image,resource,row_shift)
-            if total != count * unit_cost:
-                self.events.put(f"Coût groupé non confirmé ({total} au lieu de {count * unit_cost}) : aucune dépense envoyée.")
+                self._wall_click(window, more_button, "Améliorer plus")
+            controls = self.stable_wall_group(window,single=single)
+            if controls is None:
+                self.events.put("Boutons du groupe de remparts non confirmés : aucun clic envoyé.")
                 return upgraded
+            payments = controls['payments']
+            gold_cost = payments.get('or', (None,None))[1]
+            elixir_cost = payments.get('élixir', (None,None))[1]
+            options = [(wall_batch_size(gold if resource=='or' else elixir,price,available),resource,price)
+                       for resource,(_,price) in payments.items()]
+            count, resource, unit_cost = max(options, key=lambda option:(option[0],gold if option[1]=='or' else elixir))
+            if count == 0:
+                self.events.put(f"Aucun rempart payable en conservant 1 M : or {gold:,}, élixir {elixir:,}.")
+                return upgraded
+            for selected_count in range(1,count):
+                # Each addition can remove +10 and shift the whole row.
+                # Re-read the buttons and the actual price before another click.
+                self._wall_click(window, controls['add'], "ajouter un rempart identifié")
+                controls = self.stable_wall_group(window, resource, single=single)
+                payment = controls['payments'].get(resource) if controls else None
+                if payment is None or payment[1] != (selected_count+1)*unit_cost:
+                    self.events.put("Ajout de rempart non confirmé : aucun autre clic envoyé.")
+                    return upgraded
+            total = count*unit_cost
             fresh = self.stable_reserves(window)
-            if fresh is None or min(fresh) < WALL_RESERVE or fresh[0 if resource == "or" else 1] - total < WALL_RESERVE:
-                self.events.put("Réserves revérifiées : groupe trop coûteux ou lecture incertaine, aucune dépense envoyée.")
+            if fresh is None or min(fresh) < WALL_RESERVE or fresh[0 if resource=='or' else 1]-total < WALL_RESERVE:
+                self.events.put("Réserves insuffisantes ou incertaines : aucune dépense envoyée.")
                 return upgraded
             gold, elixir = fresh
-            button = row_button("WALL_MULTI_GOLD_BUTTON") if resource == "or" else row_button("WALL_MULTI_ELIXIR_BUTTON")
-            self._wall_click(window, button, f"amélioration groupée {resource}")
-            if self.stop_event.is_set() or not wall_batch_confirmation_matches(self._capture(window), total, resource):
-                self.events.put("Montant ou ressource de la confirmation groupée non vérifié : aucun autre clic envoyé.")
+            controls = self.stable_wall_group(window, resource, single=single)
+            payment = controls['payments'].get(resource) if controls else None
+            if payment is None or payment[1] != total:
+                self.events.put("Bouton de paiement ou coût modifié : aucune dépense envoyée.")
                 return upgraded
-            self._wall_click(window, layout_values("WALL_MULTI_CONFIRM_BUTTON"), "confirmation remparts")
+            self._wall_click(window, payment[0], f"amélioration groupée {resource} identifiée")
+            confirmation=self._capture(window)
+            matches = single_wall_confirmation_matches(confirmation,total,resource) if single else wall_batch_confirmation_matches(confirmation,total,resource)
+            if self.stop_event.is_set() or not matches:
+                self.events.put("Montant, rempart ou ressource de la confirmation non vérifié : aucun autre clic envoyé.")
+                return upgraded
+            confirm_button = "WALL_CONFIRM_BUTTON" if single else "WALL_MULTI_CONFIRM_BUTTON"
+            self._wall_click(window, layout_values(confirm_button), "confirmation remparts")
             self._wait(.8)
             after = self.stable_reserves(window)
             before_spend = gold if resource == "or" else elixir
