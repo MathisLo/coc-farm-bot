@@ -18,7 +18,7 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from tkinter import BooleanVar, StringVar, Tk, ttk, messagebox
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageTk
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageStat, ImageTk
 
 APP_DIR = Path.home() / "CoCFarmBot"
 CONFIG_PATH = APP_DIR / "config-v2.json"
@@ -125,14 +125,30 @@ WALL_CONFIRM_BUTTON = (70.0, 87.0)
 WALL_GOLD_COST_ROI = Roi(50.0, 72.0, 60.2, 79.4)
 WALL_ELIXIR_COST_ROI = Roi(59.0, 71.0, 69.0, 80.0)
 WALL_RESERVE = 1_000_000
+WALL_MORE_BUTTON = (50.0, 80.0)
+WALL_ADD_TEN_BUTTON = (42.0, 80.0)
+WALL_ADD_ONE_BUTTON = (50.0, 80.0)
+WALL_MULTI_GOLD_BUTTON = (58.3, 80.0)
+WALL_MULTI_ELIXIR_BUTTON = (66.5, 80.0)
 # Positions extérieures, réparties de chaque côté du terrain. Elles évitent
 # le carré central de la base : Clash n'autorise la pose des troupes que sur
 # le pourtour jouable. Les points personnalisés ne sont employés que s'ils
 # respectent eux aussi cette couronne extérieure.
 ELECTRODRAGON_PERIMETER_POINTS = [
-    (15.0, 31.0), (15.0, 31.0), (15.0, 40.0), (15.0, 49.0),
-    (85.0, 31.0), (85.0, 31.0), (85.0, 40.0), (85.0, 49.0),
+    (24.0, 35.0), (35.0, 20.0), (50.0, 13.0), (65.0, 20.0),
+    (76.0, 35.0), (80.0, 48.0), (68.0, 67.0), (50.0, 74.0),
+    (32.0, 67.0), (20.0, 48.0),
 ]
+TROOP_COUNT_ROIS = {
+    "Électro-dragon": Roi(23.7, 85.19, 26.3, 89.35),
+    "Dragon": Roi(17.45, 85.19, 20.05, 89.35),
+}
+TROOP_ICON_ROIS = {
+    "Électro-dragon": Roi(20.8, 89.8, 26.3, 97.2),
+    "Dragon": Roi(14.6, 89.8, 20.1, 97.2),
+}
+HERO_HEALTH_ROIS = (Roi(34.6, 82.6, 39.5, 84.9), Roi(40.9, 82.6, 45.8, 84.9), Roi(47.2, 82.6, 52.1, 84.9))
+HERO_ICON_ROIS = (Roi(34.4, 85.7, 40.4, 98.1), Roi(40.6, 85.7, 46.6, 98.1), Roi(46.9, 85.7, 52.6, 98.1))
 ENEMY_LOOT_ROIS = {
     "gold": Roi(3.8, 10.2, 15.0, 15.5), "elixir": Roi(3.90625, 15.277777778, 13.020833333, 19.907407407), "dark_elixir": Roi(3.8, 19.0, 15.0, 25.0),
 }
@@ -177,10 +193,25 @@ def loot_is_accepted(gold: int, elixir: int, settings: Settings) -> tuple[bool, 
 
 def read_safe_reserve(image: Image.Image, resource: str) -> int | None:
     """Read a home-village reserve conservatively; invalid OCR stops upgrades."""
-    crop = crop_percent(image, PROFILE_ROIS[resource])
-    candidates = (parse_clash_number(read_text(crop)), read_number(crop))
-    valid = [value for value in candidates if value is not None and 0 <= value <= 20_000_000]
-    return min(valid) if valid else None
+    rois = (PROFILE_ROIS[resource], Roi(86, 3, 95, 6.2) if resource == "gold" else Roi(86, 10.5, 95, 15))
+    values = []
+    for roi in rois:
+        crop = crop_percent(image, roi)
+        for variant in (crop, ImageOps.grayscale(crop)):
+            value = parse_reserve_number(read_text(variant, scale=3))
+            if value is not None and 0 <= value <= 20_000_000:
+                values.append(value)
+    if not values: return None
+    # A malformed shorter reading cannot silently turn 9.5 M into 950 k.
+    return max(values) if max(values) - min(values) <= 20_000 or len(values) == 1 else None
+
+
+def parse_reserve_number(text: str) -> int | None:
+    corrected = text.translate(str.maketrans({"O": "0", "o": "0", "I": "1", "l": "1", "i": "1", "S": "5", "s": "5", "B": "8", "g": "9", "G": "9"}))
+    match = re.search(r"(?<!\d)(\d{1,2})\s+(\d{3})\s+(\d{3})(?!\d)", corrected)
+    if match: return int("".join(match.groups()))
+    stripped = corrected.strip(" ,-.")
+    return int(stripped) if re.fullmatch(r"\d{7,8}", stripped) else None
 
 
 def read_wall_cost(image: Image.Image, resource: str) -> int | None:
@@ -203,6 +234,36 @@ def choose_wall_payment(gold: int, elixir: int, gold_cost: int | None, elixir_co
         return None
     _, resource, cost = max(choices, key=lambda choice: choice[0])
     return resource, cost
+
+
+def wall_batch_size(balance: int, unit_cost: int, available: int) -> int:
+    """Buy the largest affordable group without crossing the reserve floor."""
+    return max(0, min(available, (balance - WALL_RESERVE) // unit_cost)) if unit_cost > 0 else 0
+
+
+def read_troop_count(image: Image.Image, label: str) -> int | None:
+    icon = crop_percent(image, TROOP_ICON_ROIS[label]).convert("HSV").getchannel(1)
+    if ImageStat.Stat(icon).mean[0] < 30:
+        return 0
+    roi = TROOP_COUNT_ROIS[label]
+    for area in (roi, Roi(roi.x1, roi.y1 - .46, roi.x2, roi.y2)):
+        crop = crop_percent(image, area)
+        for variant in (crop, ImageOps.grayscale(crop)):
+            raw = read_text(variant, scale=5).casefold().translate(str.maketrans({"o": "0", "l": "1", "i": "1"}))
+            match = re.search(r"x\s*(\d{1,2})", raw)
+            if match:
+                return int(match.group(1))
+    return None
+
+
+def hero_health_visible(image: Image.Image, index: int) -> bool:
+    pixels = crop_percent(image, HERO_HEALTH_ROIS[index]).convert("RGB").getdata()
+    return sum(g > 100 and g > r * 1.3 and g > b * 1.15 for r, g, b in pixels) > 150
+
+
+def hero_icon_saturation(image: Image.Image, index: int) -> float:
+    icon = crop_percent(image, HERO_ICON_ROIS[index]).convert("HSV").getchannel(1)
+    return ImageStat.Stat(icon).mean[0]
 
 
 def repeated_points(points: tuple[tuple[float, float], ...] | list[tuple[float, float]], count: int) -> list[tuple[float, float]]:
@@ -290,6 +351,52 @@ async def _ocr_file(path: str) -> str:
     engine = OcrEngine.try_create_from_user_profile_languages()
     if engine is None: raise RuntimeError("OCR Windows indisponible.")
     return (await engine.recognize_async(bitmap)).text
+
+
+async def _ocr_words_file(path: str) -> list[tuple[str, float, float]]:
+    from winrt.windows.graphics.imaging import BitmapDecoder
+    from winrt.windows.media.ocr import OcrEngine
+    from winrt.windows.storage import FileAccessMode, StorageFile
+
+    stream = await (await StorageFile.get_file_from_path_async(path)).open_async(FileAccessMode.READ)
+    bitmap = await (await BitmapDecoder.create_async(stream)).get_software_bitmap_async()
+    engine = OcrEngine.try_create_from_user_profile_languages()
+    if engine is None: raise RuntimeError("OCR Windows indisponible.")
+    result = await engine.recognize_async(bitmap)
+    return [(word.text, word.bounding_rect.x + word.bounding_rect.width / 2, word.bounding_rect.y + word.bounding_rect.height / 2)
+            for line in result.lines for word in line.words]
+
+
+def read_word_centers(image: Image.Image) -> list[tuple[str, float, float]]:
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as file: path = Path(file.name)
+    try:
+        image.save(path)
+        return [(word, x * 100 / image.width, y * 100 / image.height) for word, x, y in asyncio.run(_ocr_words_file(str(path)))]
+    finally: path.unlink(missing_ok=True)
+
+
+def find_wall_menu_item(image: Image.Image) -> tuple[float, float] | None:
+    for word, x, y in read_word_centers(image):
+        if "rempart" in word.casefold() and 35 <= x <= 55 and 10 <= y <= 60:
+            return x, y
+    return None
+
+
+def read_wall_available(image: Image.Image, item: tuple[float, float]) -> int | None:
+    x, y = item
+    roi = Roi(max(0, x - 4), max(0, y - 2.5), min(100, x + 9), min(100, y + 2.5))
+    match = re.search(r"[xX]\s*(\d{1,3})", read_text(crop_percent(image, roi), scale=2))
+    return int(match.group(1)) if match else None
+
+
+def wall_selected(image: Image.Image) -> bool:
+    text = read_text(crop_percent(image, Roi(29, 68, 71, 88)), scale=2).casefold()
+    return "plus" in text and "aj" not in text
+
+
+def wall_multi_mode(image: Image.Image) -> bool:
+    text = read_text(crop_percent(image, Roi(29, 68, 71, 88)), scale=2).casefold()
+    return "aj" in text and "remp" in text
 
 
 def read_number(image: Image.Image) -> int | None:
@@ -469,11 +576,11 @@ class BotApp:
             ttk.Entry(cell, textvariable=variable, style="App.TEntry", width=10).pack(fill="x", pady=(4, 0))
         ttk.Checkbutton(targets, text="Exiger l’or et l’élixir", variable=self.and_rule, style="App.TCheckbutton").pack(anchor="w", pady=(12, 0))
 
-        army = self._card(left, "Armée", "Unités envoyées sur chaque base retenue")
+        army = self._card(left, "Armée", "Toutes les unités disponibles sont envoyées")
         army.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         army_grid = ttk.Frame(army, style="Card.TFrame")
         army_grid.pack(fill="x")
-        for index, (label, variable) in enumerate((("Électro-dragons", self.electrodragon_count), ("Dragons", self.dragon_count))):
+        for index, (label, variable) in enumerate((("Électro-dragons prévus", self.electrodragon_count), ("Dragons prévus", self.dragon_count))):
             army_grid.columnconfigure(index, weight=1)
             cell = ttk.Frame(army_grid, style="Card.TFrame")
             cell.grid(row=0, column=index, sticky="ew", padx=(0 if index == 0 else 8, 0))
@@ -495,6 +602,8 @@ class BotApp:
         self.stop_button = ttk.Button(actions, text="Arrêter", command=self.stop, style="Quiet.TButton")
         self.stop_button.grid(row=0, column=1, sticky="ew", padx=(8, 0))
         self.stop_button.state(["disabled"])
+        self.walls_button = ttk.Button(actions, text="Améliorer les remparts", command=self.start_walls, style="Quiet.TButton")
+        self.walls_button.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
         right = self._card(root, "Activité", "Capture et messages du bot")
         right.grid(row=1, column=1, sticky="nsew")
@@ -573,73 +682,175 @@ class BotApp:
         if self.worker and self.worker.is_alive(): return
         if not self.persist(): return
         if self.settings.dry_run: self.write("Simulation active : recherche et lecture uniquement, aucune pose ne sera envoyée.")
-        else: self.write(f"Mode réel actif : {self.settings.electrodragon_count} électro-dragons, {self.settings.dragon_count} dragons et {'3 héros' if self.settings.deploy_heroes else 'aucun héros'} sur une base retenue.")
+        else: self.write("Mode réel actif : toutes les troupes disponibles seront posées et vérifiées sur une base retenue.")
         self.stop_event.clear(); self.worker=threading.Thread(target=self.farm_loop,daemon=True); self.worker.start(); self.run_state.set("EN COURS"); self.write("Recherche automatique démarrée.")
+    def start_walls(self):
+        if self.worker and self.worker.is_alive(): return
+        if not self.persist(): return
+        self.stop_event.clear(); self.worker=threading.Thread(target=self.wall_loop,daemon=True); self.worker.start(); self.run_state.set("EN COURS"); self.write("Amélioration des remparts démarrée.")
     def stop(self):self.stop_event.set();self.write("Arrêt demandé.")
-    def upgrade_walls_to_reserve(self, window):
+    def wall_loop(self):
+        try:
+            if self.settings.dry_run:
+                self.events.put("Simulation activée : aucune amélioration de rempart envoyée.")
+                return
+            window = WindowDriver.resolve(self.settings.window_title)
+            if not window: raise RuntimeError("Fenêtre Clash introuvable.")
+            self.upgrade_walls_to_reserve(window, independent=True)
+        except Exception as exc: self.events.put(f"Remparts arrêtés : {exc}")
+        finally:
+            self.stop_event.set(); self.events.put("Amélioration des remparts terminée.")
+
+    def stable_reserves(self, window):
+        """Require two agreeing home-village readings before authorising spending."""
+        previous = None
+        for _ in range(5):
+            image = WindowDriver.capture(window)
+            values = (read_safe_reserve(image, "gold"), read_safe_reserve(image, "elixir"))
+            if None not in values and previous is not None and all(abs(a - b) <= 20_000 for a, b in zip(values, previous)):
+                return tuple(min(a, b) for a, b in zip(values, previous))
+            previous = values if None not in values else None
+            if self.stop_event.wait(.4): break
+        return None
+
+    def _wall_click(self, window, point, label):
+        if not WindowDriver.click_percent(window, *point): raise RuntimeError(f"Clic {label} refusé.")
+        self.stop_event.wait(.45)
+
+    def upgrade_walls_to_reserve(self, window, independent=False):
         """Upgrade available walls while keeping both village reserves at or above 1 M."""
-        if not self.settings.upgrade_wall_between_attacks or self.settings.dry_run:
+        if (not independent and not self.settings.upgrade_wall_between_attacks) or self.settings.dry_run:
             return 0
         upgraded = 0
         while not self.stop_event.is_set():
-            reserves_image = WindowDriver.capture(window)
-            gold = read_safe_reserve(reserves_image, "gold")
-            elixir = read_safe_reserve(reserves_image, "elixir")
-            if gold is None or elixir is None:
-                self.events.put("Réserves illisibles : aucun rempart n’est confirmé.")
+            balances = self.stable_reserves(window)
+            if balances is None:
+                self.events.put("Réserves instables ou illisibles : aucune dépense envoyée.")
                 return upgraded
+            gold, elixir = balances
             if gold <= WALL_RESERVE and elixir <= WALL_RESERVE:
                 self.events.put(f"Réserves préservées : or {gold:,}, élixir {elixir:,}.")
                 return upgraded
-            if not WindowDriver.click_percent(window, *BUILDERS_BUTTON):
-                raise RuntimeError("Clic ouvriers refusé.")
-            self.stop_event.wait(.7)
-            if self.stop_event.is_set() or not has_screen_text(WindowDriver.capture(window), "rempart"):
-                self.events.put("Aucun rempart disponible à améliorer.")
+            self._wall_click(window, BUILDERS_BUTTON, "ouvriers")
+            menu = WindowDriver.capture(window)
+            item = find_wall_menu_item(menu)
+            available = read_wall_available(menu, item) if item else None
+            if self.stop_event.is_set() or item is None or available is None:
+                self.events.put("Liste des remparts indisponible ou illisible : arrêt prudent.")
                 return upgraded
-            if not WindowDriver.click_percent(window, *WALL_LIST_ITEM):
-                raise RuntimeError("Clic rempart refusé.")
-            self.stop_event.wait(.7)
+            self._wall_click(window, item, "rempart")
             wall_image = WindowDriver.capture(window)
-            if self.stop_event.is_set() or not has_screen_text(wall_image, "rempart"):
+            if self.stop_event.is_set() or not wall_selected(wall_image):
                 self.events.put("Sélection de rempart non confirmée.")
                 return upgraded
-            choice = choose_wall_payment(gold, elixir, read_wall_cost(wall_image, "or"), read_wall_cost(wall_image, "élixir"))
-            if choice is None:
-                self.events.put(f"Plancher de 1 M conservé : or {gold:,}, élixir {elixir:,}.")
+            self._wall_click(window, WALL_MORE_BUTTON, "Améliorer plus")
+            batch_image = WindowDriver.capture(window)
+            if self.stop_event.is_set() or not wall_multi_mode(batch_image):
+                self.events.put("Mode groupé non confirmé : aucune dépense envoyée.")
                 return upgraded
-            resource, cost = choice
-            button = WALL_GOLD_UPGRADE_BUTTON if resource == "or" else WALL_ELIXIR_UPGRADE_BUTTON
-            if not WindowDriver.click_percent(window, *button):
-                raise RuntimeError(f"Clic amélioration rempart {resource} refusé.")
-            self.stop_event.wait(.7)
+            gold_cost = read_wall_cost(batch_image, "or")
+            elixir_cost = read_wall_cost(batch_image, "élixir")
+            options = []
+            if gold_cost: options.append((wall_batch_size(gold, gold_cost, available), "or", gold_cost))
+            if elixir_cost: options.append((wall_batch_size(elixir, elixir_cost, available), "élixir", elixir_cost))
+            if not options or max(option[0] for option in options) == 0:
+                self.events.put(f"Achat supplémentaire impossible sans passer sous 1 M : or {gold:,}, élixir {elixir:,}.")
+                return upgraded
+            count, resource, unit_cost = max(options, key=lambda option: (option[0], gold if option[1] == "or" else elixir))
+            for _ in range((count - 1) // 10):
+                if self.stop_event.is_set(): return upgraded
+                self._wall_click(window, WALL_ADD_TEN_BUTTON, "ajouter 10 remparts")
+            for _ in range((count - 1) % 10):
+                if self.stop_event.is_set(): return upgraded
+                self._wall_click(window, WALL_ADD_ONE_BUTTON, "ajouter un rempart")
+            batch_image = WindowDriver.capture(window)
+            if not wall_multi_mode(batch_image):
+                self.events.put("Mode groupé interrompu : aucune dépense envoyée.")
+                return upgraded
+            total = read_wall_cost(batch_image, resource)
+            if total != count * unit_cost:
+                self.events.put(f"Coût groupé non confirmé ({total} au lieu de {count * unit_cost}) : aucune dépense envoyée.")
+                return upgraded
+            button = WALL_MULTI_GOLD_BUTTON if resource == "or" else WALL_MULTI_ELIXIR_BUTTON
+            self._wall_click(window, button, f"amélioration groupée {resource}")
             if self.stop_event.is_set() or not has_all_screen_text(WindowDriver.capture(window), "confirmer", "rempart"):
                 self.events.put("Confirmation du rempart absente : aucun autre clic envoyé.")
                 return upgraded
-            if not WindowDriver.click_percent(window, *WALL_CONFIRM_BUTTON):
-                raise RuntimeError("Confirmation rempart refusée.")
-            upgraded += 1
-            self.events.put(f"Rempart amélioré avec {cost:,} {resource} ({upgraded} au total).")
+            self._wall_click(window, WALL_CONFIRM_BUTTON, "confirmation remparts")
+            self.stop_event.wait(.8)
+            after = self.stable_reserves(window)
+            before_spend = gold if resource == "or" else elixir
+            after_spend = after[0] if resource == "or" and after else (after[1] if after else None)
+            if after_spend is None or abs(before_spend - after_spend - total) > 50_000:
+                self.events.put("Dépense groupée non vérifiée sur les réserves : arrêt sans annoncer de remparts améliorés.")
+                return upgraded
+            if after[0] < WALL_RESERVE or after[1] < WALL_RESERVE:
+                self.events.put("Une réserve est passée sous le plancher : arrêt immédiat.")
+                return upgraded
+            upgraded += count
+            self.events.put(f"{count} rempart(s) amélioré(s) avec {total:,} {resource} ({upgraded} au total).")
             self.stop_event.wait(1)
         return upgraded
 
     def deploy_unit(self, window, label, slot, points):
-        if not points: return
-        if not WindowDriver.click_percent(window,*slot): raise RuntimeError(f"Sélection {label} refusée.")
-        self.stop_event.wait(self.settings.delay_between_dragons_ms/1000)
-        for x,y in points:
-            if self.stop_event.is_set(): return
-            if not WindowDriver.click_percent(window,x,y): raise RuntimeError(f"Pose {label} refusée.")
-            self.events.put(f"{label} posé : {x:.1f} %, {y:.1f} %")
-            self.stop_event.wait(self.settings.delay_between_dragons_ms/1000)
+        remaining = read_troop_count(WindowDriver.capture(window), label)
+        if remaining is None: raise RuntimeError(f"Quantité de {label} illisible : pose non vérifiable.")
+        if remaining == 0: return 0
+        initial = remaining
+        expected = self.settings.electrodragon_count if label == "Électro-dragon" else self.settings.dragon_count
+        if remaining != expected: self.events.put(f"{label} : {remaining} disponible(s), {expected} prévu(s) ; toutes les unités visibles seront envoyées.")
+        if not WindowDriver.click_percent(window, *slot): raise RuntimeError(f"Sélection {label} refusée.")
+        self.stop_event.wait(.3)
+        placed = 0
+        while remaining and not self.stop_event.is_set():
+            accepted = False
+            for offset in range(len(points)):
+                x, y = points[(int(placed * len(points) / initial) + offset) % len(points)]
+                if not WindowDriver.click_percent(window, x, y): raise RuntimeError(f"Clic pose {label} refusé.")
+                self.stop_event.wait(max(.35, self.settings.delay_between_dragons_ms / 1000))
+                observed = read_troop_count(WindowDriver.capture(window), label)
+                if observed is None:
+                    self.stop_event.wait(.3)
+                    observed = read_troop_count(WindowDriver.capture(window), label)
+                if observed is None: raise RuntimeError(f"Quantité de {label} illisible après clic : pose non confirmée.")
+                if observed < remaining:
+                    placed += remaining - observed
+                    remaining = observed
+                    self.events.put(f"{label} confirmé à {x:.1f} %, {y:.1f} % ; {remaining} restant(s).")
+                    accepted = True
+                    break
+                if observed > remaining: raise RuntimeError(f"Quantité de {label} incohérente ({observed} > {remaining}).")
+            if not accepted: raise RuntimeError(f"Aucun point de pose accepté pour {label} ; {remaining} unité(s) restante(s).")
+        return placed
 
     def deploy_attack_composition(self, window):
-        perimeter=ELECTRODRAGON_PERIMETER_POINTS
-        self.deploy_unit(window,"Électro-dragon",ELECTRODRAGON_SLOT,repeated_points(perimeter,self.settings.electrodragon_count))
-        self.deploy_unit(window,"Dragon",DRAGON_SLOT,repeated_points(perimeter,self.settings.dragon_count))
+        perimeter = ELECTRODRAGON_PERIMETER_POINTS
+        electro = self.deploy_unit(window, "Électro-dragon", ELECTRODRAGON_SLOT, perimeter)
+        dragons = self.deploy_unit(window, "Dragon", DRAGON_SLOT, perimeter[5:] + perimeter[:5])
+        heroes = 0
         if self.settings.deploy_heroes:
-            for number,(slot,point) in enumerate(zip(HERO_SLOTS,HERO_DROP_POINTS),1): self.deploy_unit(window,f"Héros {number}",slot,[point])
-        self.events.put("Composition d'attaque entièrement déployée.")
+            for index, slot in enumerate(HERO_SLOTS):
+                before = WindowDriver.capture(window)
+                if hero_health_visible(before, index):
+                    heroes += 1
+                    continue
+                baseline = hero_icon_saturation(before, index)
+                if baseline < 55:
+                    self.events.put(f"Héros {index + 1} indisponible ; non compté comme posé.")
+                    continue
+                if not WindowDriver.click_percent(window, *slot): raise RuntimeError(f"Sélection héros {index + 1} refusée.")
+                self.stop_event.wait(.3)
+                for offset in range(len(perimeter)):
+                    x, y = perimeter[(index * 3 + offset) % len(perimeter)]
+                    if not WindowDriver.click_percent(window, x, y): raise RuntimeError(f"Clic héros {index + 1} refusé.")
+                    self.stop_event.wait(.4)
+                    after = WindowDriver.capture(window)
+                    if hero_health_visible(after, index) or hero_icon_saturation(after, index) < baseline * .5:
+                        heroes += 1
+                        self.events.put(f"Héros {index + 1} confirmé à {x:.1f} %, {y:.1f} %.")
+                        break
+                else: raise RuntimeError(f"Pose du héros {index + 1} non confirmée.")
+        self.events.put(f"Déploiement vérifié : {electro} électro-dragons, {dragons} dragons, {heroes} héros.")
 
     def wait_for_battle_return(self, window):
         """Wait for Clash's result screen, return home, then allow the next cycle."""
@@ -694,6 +905,7 @@ class BotApp:
         except queue.Empty:pass
         running=bool(self.worker and self.worker.is_alive())
         self.start_button.state(["disabled"] if running else ["!disabled"])
+        self.walls_button.state(["disabled"] if running else ["!disabled"])
         self.stop_button.state(["!disabled"] if running else ["disabled"])
         if not running and self.run_state.get()=="EN COURS": self.run_state.set("PRÊT")
         self.root.after(250,self._pump)
