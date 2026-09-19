@@ -423,7 +423,7 @@ class BotApp:
         style.map("Primary.TButton", background=[("active", "#93DBE7"), ("disabled", self.colors["line"])])
 
     def _card(self, parent, title, subtitle=None):
-        frame = ttk.Frame(parent, style="Card.TFrame", padding=14)
+        frame = ttk.Frame(parent, style="Card.TFrame", padding=10)
         ttk.Label(frame, text=title, style="Section.TLabel").pack(anchor="w")
         if subtitle:
             ttk.Label(frame, text=subtitle, style="Muted.TLabel").pack(anchor="w", pady=(3, 8))
@@ -438,7 +438,7 @@ class BotApp:
         root.columnconfigure(1, weight=1)
         root.rowconfigure(1, weight=1)
         header = ttk.Frame(root, style="App.TFrame")
-        header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 18))
+        header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 12))
         header.columnconfigure(0, weight=1)
         ttk.Label(header, text="CLASH OF CLANS  /  PILOTAGE", style="Eyebrow.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(header, text="Pilote de farm", style="Hero.TLabel").grid(row=1, column=0, sticky="w")
