@@ -70,15 +70,17 @@ La reconnaissance des héros exige une barre de vie verte horizontale sous un bo
 
 - `main.py` : interface et automatisation du jeu.
 - `calibration.py` : édition des positions sur une capture.
-- `test_main.py`, `test_regressions.py`, `test_windows_integration.py` : validations locales.
+- `test_main.py`, `test_regressions.py`, `test_storage.py`, `test_windows_integration.py` : validations locales.
 - `requirements.txt` : dépendances Python.
 - `BUILD.ps1` : création de l’exécutable Windows.
-- `%USERPROFILE%\CoCFarmBot\config-v2.json` : réglages personnels, repris automatiquement depuis les versions précédentes.
+- `%USERPROFILE%\CoCFarmBot\config-v2.json` : réglages personnels de la version en cours.
 - `%USERPROFILE%\CoCFarmBot\bot.log` : journal détaillé.
 - `%USERPROFILE%\CoCFarmBot\runs\` : un journal distinct pour chaque action lancée ; une capture `.png` du dernier écran est ajoutée si l'action échoue.
 - `%USERPROFILE%\CoCFarmBot\account_snapshot.json` : dernier relevé demandé via **Relever le profil**.
 
 Dans l'onglet **Journal**, cliquez sur **Exporter le diagnostic (.zip)**, puis joignez ce ZIP à votre message en cas de blocage. Le bouton reste disponible pendant un cycle. Chaque action a son propre fichier avec ses réglages, toutes les demandes et réponses OCR, les captures demandées, les clics et défilements, les choix et refus de dépense, les réserves, les ouvriers, les attentes et les erreurs complètes. En cas d'erreur, le ZIP inclut aussi le dernier écran capturé. Un export pendant l'action est une copie à cet instant ; exportez de nouveau après l'arrêt pour obtenir la fin du journal.
+
+**Effacer toutes les données du bot** dans le même onglet supprime le dossier `%USERPROFILE%\CoCFarmBot` après confirmation et ferme l'application. Arrêtez d'abord toute action en cours. La prochaine ouverture repart avec les réglages et statistiques par défaut ; les nouveaux journaux sont créés au fil des actions. Les ZIP déjà exportés ailleurs restent à supprimer manuellement. La première ouverture de la version v1.0.13 efface aussi automatiquement les données des versions précédentes, une seule fois.
 
 Le suivi des fonctionnalités et des validations se trouve dans [Notion](https://app.notion.com/p/3dccca7fe8b78060a5c3ca2aa4b73fa8). Le dépôt GitHub contient les sources et chaque mise à jour publiée fournit un exécutable Windows testé dans les Releases. Les fichiers de construction et les captures de diagnostic restent locaux.
 # Statistiques de récolte
@@ -93,6 +95,8 @@ Les totaux sont sauvegardés dans `%USERPROFILE%\CoCFarmBot\farm-stats.json` et 
 
 
 Les améliorations de bâtiments utilisent les ressources disponibles sans imposer le plancher d'un million réservé aux remparts. Le bot lit toute la liste, confirme deux fois le prix et la ressource, puis sélectionne le bâtiment payable le plus cher. Il relit l'écran de confirmation et les ouvriers avant l'achat. L'Hôtel de ville est exclu, même si son prix est le plus élevé. Les remparts automatiques commencent lorsque exactement un ouvrier reste libre ; ils conservent au moins un million d'or et d'élixir.
+
+Si aucun rempart n'est payable avec cette réserve, le bot termine la recherche des remparts et poursuit le cycle vers l'attaque.
 
 ## Validation réelle du 20 septembre 2026
 

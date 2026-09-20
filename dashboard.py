@@ -194,6 +194,9 @@ def build(app):
     app.export_log_button = ttk.Button(journal, text='↓  Exporter le diagnostic (.zip)',
                                        command=app.export_log, style='Quiet.TButton')
     app.export_log_button.pack(anchor='e', padx=8, pady=(8, 0))
+    app.reset_data_button = ttk.Button(journal, text='Effacer toutes les données du bot',
+                                       command=app.reset_all_data, style='Stop.TButton')
+    app.reset_data_button.pack(anchor='e', padx=8, pady=(6, 0))
     app.log = tk.Text(journal, height=6, width=30, state='disabled', wrap='word',
                       bg=COLORS['card'], fg=COLORS['text'], relief='flat', padx=12, pady=16,
                       font=('Cascadia Mono', 10), spacing1=5, spacing3=5)

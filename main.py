@@ -11,6 +11,7 @@ import json
 import math
 import queue
 import re
+import shutil
 import sys
 import tempfile
 import threading
@@ -34,6 +35,8 @@ LOG_PATH = APP_DIR / "bot.log"
 RUNS_DIR = APP_DIR / "runs"
 ACCOUNT_SNAPSHOT_PATH = APP_DIR / "account_snapshot.json"
 STATS_PATH = APP_DIR / "farm-stats.json"
+STORAGE_GENERATION = "v1.0.13-clean-start"
+STORAGE_MARKER = ".storage-generation"
 ASSET_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "assets"
 OCR_TIMEOUT = 8.0
 BASE_READ_TIMEOUT = 35.0
@@ -139,7 +142,7 @@ class Roi:
 
 @dataclass
 class Settings:
-    version: int = 7
+    version: int = 8
     window_title: str = ""
     min_gold: int = 500000
     min_elixir: int = 500000
@@ -340,6 +343,52 @@ def validate_layout(settings):
         raise ValueError("Format du calibrage invalide.")
 
 
+def checked_storage_directory(path: Path) -> Path:
+    """Accept only the bot's named directory, never a parent or redirected tree."""
+    path = Path(path).absolute()
+    if path.name.casefold() != "cocfarmbot":
+        raise ValueError("Dossier de données inattendu : suppression refusée.")
+    if path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()):
+        raise ValueError("Dossier de données redirigé : suppression refusée.")
+    if path.resolve(strict=False).parent != path.parent.resolve(strict=True):
+        raise ValueError("Dossier de données hors de l'emplacement prévu.")
+    return path
+
+
+def clear_saved_data(path: Path):
+    """Remove every bot-owned file, including legacy and unknown future files."""
+    directory = checked_storage_directory(path)
+    if directory.exists():
+        if not directory.is_dir():
+            raise ValueError("Le chemin des données n'est pas un dossier.")
+        shutil.rmtree(directory)
+    if directory.exists():
+        raise OSError("Les données du bot n'ont pas toutes été supprimées.")
+
+
+def prepare_storage(path: Path) -> bool:
+    """Clear older releases exactly once, before loading settings or stats."""
+    directory = checked_storage_directory(path)
+    marker = directory / STORAGE_MARKER
+    try:
+        current = marker.read_text(encoding="utf-8") == STORAGE_GENERATION
+    except OSError:
+        current = False
+    settings_file = directory / "config-v2.json"
+    if current and settings_file.exists():
+        try:
+            current = json.loads(settings_file.read_text(encoding="utf-8")).get("version", 0) >= 8
+        except (OSError, ValueError, TypeError, AttributeError):
+            current = False
+    if current:
+        return False
+    had_old_data = directory.exists() and any(directory.iterdir())
+    clear_saved_data(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    marker.write_text(STORAGE_GENERATION, encoding="utf-8")
+    return had_old_data
+
+
 def load_settings() -> Settings:
     try:
         data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
@@ -354,7 +403,7 @@ def load_settings() -> Settings:
                 data.setdefault(key, value)
         if data.get("version", 0) < 6:
             data["version"] = 6
-        data["version"] = 7
+        data["version"] = 8
         kept = {item.name for item in fields(Settings)}
         return Settings(**{key: value for key, value in data.items() if key in kept})
     except (OSError, TypeError, ValueError): return Settings()
@@ -1540,9 +1589,10 @@ class DiagnosticEvents(queue.Queue):
 
 class BotApp:
     def __init__(self):
-        APP_DIR.mkdir(parents=True, exist_ok=True)
+        cleared_previous_data = prepare_storage(APP_DIR)
         self.journal = DiagnosticJournal(LOG_PATH)
         self.journal.record("SESSION", f"Ouverture du bot ; programme={sys.executable}")
+        self.journal.record("STOCKAGE", "Anciennes données supprimées au premier lancement de cette version." if cleared_previous_data else "Stockage neuf ou déjà remis à zéro pour cette version.")
         build_info = Path(__file__).with_name("build_info.json")
         if build_info.exists():
             try:
@@ -1702,10 +1752,47 @@ class BotApp:
                     or self.calibration_dialog)
 
     def close(self):
+        if getattr(self, "_closed", False):
+            return
         self.stop()
         self._trace("SESSION", "Fermeture de l'application")
+        self._cancel_pump()
         self.root.destroy()
         self.journal.close()
+        self._closed = True
+
+    def _cancel_pump(self):
+        callback = getattr(self, "_pump_after", None)
+        if callback is not None:
+            self.root.after_cancel(callback)
+            self._pump_after = None
+
+    def reset_all_data(self):
+        if self._busy():
+            self.write("Arrêtez l'action en cours avant d'effacer les données du bot.")
+            return False
+        if not messagebox.askyesno(
+                "Effacer toutes les données ?",
+                "Tous les réglages, statistiques, journaux et captures enregistrés par le bot seront supprimés. "
+                "L'application se fermera ensuite. Les ZIP exportés hors du dossier du bot restent à supprimer séparément. Continuer ?",
+                parent=self.root):
+            return False
+        self._trace("EFFACEMENT", f"Suppression demandée du dossier {APP_DIR}")
+        self.stop_event.set()
+        self._cancel_pump()
+        self.journal.close()
+        try:
+            clear_saved_data(APP_DIR)
+        except (OSError, ValueError) as exc:
+            self.journal = DiagnosticJournal(LOG_PATH)
+            self.events.journal = self.journal
+            self._trace("ERREUR", f"Effacement incomplet : {exc}")
+            messagebox.showerror("Effacement incomplet", str(exc), parent=self.root)
+            self._pump_after = self.root.after(250, self._pump)
+            return False
+        self._closed = True
+        self.root.destroy()
+        return True
 
     def export_log(self):
         destination = filedialog.asksaveasfilename(
@@ -2006,6 +2093,7 @@ class BotApp:
         upgraded = 0
         batches = 0
         rejected_rows = set()
+        rejected_groups = set()
         rejected_attempts = 0
         while not self.stop_event.is_set():
             balances = self.stable_reserves(window)
@@ -2029,7 +2117,9 @@ class BotApp:
                 menu = self._capture(window)
                 if rejected_rows:
                     item = next((point for point in find_wall_menu_items(menu)
-                                 if (round(point[1]), read_wall_available(menu, point) or 1) not in rejected_rows), None)
+                                 if all(abs(point[1] - y) >= 1.5 or
+                                        (read_wall_available(menu, point) or 1) != quantity
+                                        for y, quantity in rejected_rows)), None)
                 else:
                     item = find_wall_menu_item(menu)
                 available = read_wall_available(menu, item) if item else None
@@ -2122,7 +2212,12 @@ class BotApp:
             count, resource, unit_cost = max(options, key=lambda option:(option[0],gold if option[1]=='or' else elixir))
             self._trace("REMPARTS", f"Lots payables={options!r}; choisi={count} x {unit_cost} {resource}; réserves={balances}")
             if count == 0:
-                rejected_rows.add((round(item[1]), available))
+                group = (available, tuple(sorted((name, price) for name, (_, price) in payments.items())))
+                if group in rejected_groups:
+                    self.events.put(f"Aucun autre rempart payable en conservant 1 M : or {gold:,}, élixir {elixir:,}.")
+                    return upgraded
+                rejected_groups.add(group)
+                rejected_rows.add((item[1], available))
                 rejected_attempts += 1
                 if rejected_attempts >= 8:
                     self.events.put(f"Aucun rempart payable en conservant 1 M : or {gold:,}, élixir {elixir:,}.")
@@ -2195,6 +2290,7 @@ class BotApp:
             upgraded += count
             batches += 1
             rejected_rows.clear()
+            rejected_groups.clear()
             rejected_attempts = 0
             self.events.put(f"{count} rempart(s) amélioré(s) avec {total:,} {resource} ({upgraded} au total).")
             if max_batches is not None and batches >= max_batches:
@@ -2585,6 +2681,7 @@ class BotApp:
         return False
 
     def _pump(self):
+        self._cancel_pump()
         try:
             for _ in range(100):
                 event = self.events.get_nowait()
@@ -2603,13 +2700,14 @@ class BotApp:
         running=self._busy()
         self.start_button.state(["disabled"] if running else ["!disabled"])
         self.walls_button.state(["disabled"] if running else ["!disabled"])
+        self.reset_data_button.state(["disabled"] if running else ["!disabled"])
         self.stop_button.state(["!disabled"] if running else ["disabled"])
         for button in (self.inspect_button, self.profile_button, self.save_button, self.calibrate_button):
             button.state(["disabled"] if running else ["!disabled"])
         for button in getattr(self,'independent_buttons',[]):
             button.state(['disabled'] if running else ['!disabled'])
         if not running and self.run_state.get() in ("EN COURS", "LECTURE"): self.run_state.set("PRÊT")
-        self.root.after(250,self._pump)
+        self._pump_after = self.root.after(250,self._pump)
     def write(self, text, record=True):
         if record:
             self._trace("INTERFACE", text)

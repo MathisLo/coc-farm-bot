@@ -15,7 +15,7 @@ if (-not $SkipDependencyInstall) {
 
 Push-Location $PSScriptRoot
 try {
-    & $projectPython -B -m unittest -v test_main test_regressions test_windows_integration test_stats test_upgrades
+    & $projectPython -B -m unittest -v test_main test_regressions test_storage test_windows_integration test_stats test_upgrades
     if ($LASTEXITCODE -ne 0) { throw 'Tests échoués : aucun exécutable remplacé.' }
 
     $buildDirectory = Join-Path $PSScriptRoot 'build'

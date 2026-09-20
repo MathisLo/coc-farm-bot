@@ -129,10 +129,10 @@ class WindowsIntegrationTests(unittest.TestCase):
 
     def test_tk_interface_and_calibration_save_without_game_input(self):
         with tempfile.TemporaryDirectory() as directory, \
-             patch.object(main, "APP_DIR", Path(directory)), \
-             patch.object(main, "CONFIG_PATH", Path(directory) / "config.json"), \
-             patch.object(main, "STATS_PATH", Path(directory) / "stats.json"), \
-             patch.object(main, "LOG_PATH", Path(directory) / "bot.log"), \
+             patch.object(main, "APP_DIR", Path(directory) / "CoCFarmBot"), \
+             patch.object(main, "CONFIG_PATH", Path(directory) / "CoCFarmBot" / "config-v2.json"), \
+             patch.object(main, "STATS_PATH", Path(directory) / "CoCFarmBot" / "farm-stats.json"), \
+             patch.object(main, "LOG_PATH", Path(directory) / "CoCFarmBot" / "bot.log"), \
              patch.object(main.WindowDriver, "list_windows", return_value=[]), \
              patch.object(main.WindowDriver, "capture") as capture, \
              patch.object(main.WindowDriver, "click_percent") as click:
@@ -159,17 +159,48 @@ class WindowsIntegrationTests(unittest.TestCase):
                                  ["1 773 011", "2 057 709", "16 323"])
                 self.assertIn("1 combat", app.stats_count.get())
                 self.assertFalse(app.start_button.instate(["disabled"]))
+                self.assertTrue(app.reset_data_button.winfo_exists())
             finally:
                 app.close()
             capture.assert_not_called()
             click.assert_not_called()
 
+    def test_reset_button_erases_saved_data_and_closes_app(self):
+        with tempfile.TemporaryDirectory() as parent, \
+             patch.object(main, "APP_DIR", Path(parent) / "CoCFarmBot"), \
+             patch.object(main, "CONFIG_PATH", Path(parent) / "CoCFarmBot" / "config-v2.json"), \
+             patch.object(main, "STATS_PATH", Path(parent) / "CoCFarmBot" / "farm-stats.json"), \
+             patch.object(main, "LOG_PATH", Path(parent) / "CoCFarmBot" / "bot.log"), \
+             patch.object(main.WindowDriver, "list_windows", return_value=[]), \
+             patch.object(main.WindowDriver, "click_percent") as click:
+            app = main.BotApp()
+            directory = Path(parent) / "CoCFarmBot"
+            (directory / "runs").mkdir(exist_ok=True)
+            (directory / "runs" / "old.txt").write_text("old", encoding="utf-8")
+            try:
+                with patch.object(main.messagebox, "askyesno", return_value=False):
+                    app.reset_data_button.invoke()
+                self.assertTrue(directory.exists())
+                app.worker = SimpleNamespace(is_alive=lambda: True)
+                with patch.object(main.messagebox, "askyesno") as confirmation:
+                    app.reset_data_button.invoke()
+                    confirmation.assert_not_called()
+                self.assertTrue(directory.exists())
+                app.worker = None
+                with patch.object(main.messagebox, "askyesno", return_value=True):
+                    app.reset_data_button.invoke()
+                self.assertFalse(directory.exists())
+                self.assertTrue(app._closed)
+            finally:
+                app.close()
+            click.assert_not_called()
+
     def test_stop_button_remains_responsive_during_slow_inspection(self):
         with tempfile.TemporaryDirectory() as directory, \
-             patch.object(main, "APP_DIR", Path(directory)), \
-             patch.object(main, "CONFIG_PATH", Path(directory) / "config.json"), \
-             patch.object(main, "STATS_PATH", Path(directory) / "stats.json"), \
-             patch.object(main, "LOG_PATH", Path(directory) / "bot.log"), \
+             patch.object(main, "APP_DIR", Path(directory) / "CoCFarmBot"), \
+             patch.object(main, "CONFIG_PATH", Path(directory) / "CoCFarmBot" / "config-v2.json"), \
+             patch.object(main, "STATS_PATH", Path(directory) / "CoCFarmBot" / "farm-stats.json"), \
+             patch.object(main, "LOG_PATH", Path(directory) / "CoCFarmBot" / "bot.log"), \
              patch.object(main.WindowDriver, "list_windows", return_value=[]), \
              patch.object(main.WindowDriver, "resolve", return_value=object()):
             app = main.BotApp()
@@ -193,10 +224,10 @@ class WindowsIntegrationTests(unittest.TestCase):
 
     def test_journal_button_exports_live_actions_and_errors_as_zip(self):
         with tempfile.TemporaryDirectory() as directory, \
-             patch.object(main, "APP_DIR", Path(directory)), \
-             patch.object(main, "CONFIG_PATH", Path(directory) / "config.json"), \
-             patch.object(main, "STATS_PATH", Path(directory) / "stats.json"), \
-             patch.object(main, "LOG_PATH", Path(directory) / "bot.log"), \
+             patch.object(main, "APP_DIR", Path(directory) / "CoCFarmBot"), \
+             patch.object(main, "CONFIG_PATH", Path(directory) / "CoCFarmBot" / "config-v2.json"), \
+             patch.object(main, "STATS_PATH", Path(directory) / "CoCFarmBot" / "farm-stats.json"), \
+             patch.object(main, "LOG_PATH", Path(directory) / "CoCFarmBot" / "bot.log"), \
              patch.object(main.WindowDriver, "list_windows", return_value=[]), \
              patch.object(main.WindowDriver, "click_percent", return_value=True):
             app = main.BotApp()
