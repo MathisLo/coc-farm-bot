@@ -164,7 +164,7 @@ def build(app):
     check(cycle, 'Enchaîner les attaques', app.chain_attacks)
     check(cycle, 'Améliorations conseillées', app.upgrade_recommended)
     check(cycle, 'Améliorer les remparts', app.upgrade_wall)
-    label(cycle, 'Au moins 1 ouvrier libre et 1 M de chaque ressource conservés.', color=COLORS['muted'], size=9).pack(anchor='w', pady=(0, 4))
+    label(cycle, 'Bâtiments jusqu’à 1 ouvrier libre, puis remparts avec 1 M de réserve.', color=COLORS['muted'], size=9).pack(anchor='w', pady=(0, 4))
     check(cycle, 'Simulation sans déploiement', app.dry_run)
 
     activity = Panel(content)
@@ -191,7 +191,7 @@ def build(app):
     button = ttk.Button(separate, text='Améliorer les remparts', command=app.start_walls, style='Quiet.TButton')
     button.pack(fill='x', pady=5)
     app.independent_buttons.append(button)
-    app.export_log_button = ttk.Button(journal, text='↓  Télécharger le journal (.txt)',
+    app.export_log_button = ttk.Button(journal, text='↓  Exporter le diagnostic (.zip)',
                                        command=app.export_log, style='Quiet.TButton')
     app.export_log_button.pack(anchor='e', padx=8, pady=(8, 0))
     app.log = tk.Text(journal, height=6, width=30, state='disabled', wrap='word',

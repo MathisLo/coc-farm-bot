@@ -3,6 +3,7 @@ import tempfile
 import threading
 import time
 import unittest
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -190,7 +191,7 @@ class WindowsIntegrationTests(unittest.TestCase):
                 app.stop_event.set()
                 app.close()
 
-    def test_journal_button_exports_live_actions_and_errors_as_txt(self):
+    def test_journal_button_exports_live_actions_and_errors_as_zip(self):
         with tempfile.TemporaryDirectory() as directory, \
              patch.object(main, "APP_DIR", Path(directory)), \
              patch.object(main, "CONFIG_PATH", Path(directory) / "config.json"), \
@@ -199,7 +200,7 @@ class WindowsIntegrationTests(unittest.TestCase):
              patch.object(main.WindowDriver, "list_windows", return_value=[]), \
              patch.object(main.WindowDriver, "click_percent", return_value=True):
             app = main.BotApp()
-            destination = Path(directory) / 'diagnostic.txt'
+            destination = Path(directory) / 'diagnostic.zip'
             try:
                 app.root.geometry('1040x860')
                 app.root.update()
@@ -207,6 +208,7 @@ class WindowsIntegrationTests(unittest.TestCase):
                 self.assertLess(app.export_log_button.winfo_rooty() + app.export_log_button.winfo_height(),
                                 app.root.winfo_rooty() + app.root.winfo_height())
                 app.root.withdraw()
+                app._begin_run('essai diagnostic')
                 app.events.put('Étape de diagnostic')
                 self.assertTrue(app._click(SimpleNamespace(title='Fenêtre test'), 30, 60))
                 with patch.object(main.WindowDriver, 'capture', return_value=Image.new('RGB', (1920, 1080), 'white')):
@@ -220,14 +222,17 @@ class WindowsIntegrationTests(unittest.TestCase):
                 self.assertFalse(app.export_log_button.instate(['disabled']))
                 with patch.object(main.filedialog, 'asksaveasfilename', return_value=str(destination)):
                     app.export_log_button.invoke()
-                exported = destination.read_text(encoding='utf-8')
+                with zipfile.ZipFile(destination) as archive:
+                    self.assertEqual(len(archive.namelist()),2)
+                    self.assertTrue(any(name.endswith('.png') for name in archive.namelist()))
+                    exported = archive.read(next(name for name in archive.namelist() if name.endswith('.txt'))).decode('utf-8')
                 self.assertIn('Étape de diagnostic', exported)
                 self.assertIn('CLIC Envoi à 30.00 %, 60.00 %', exported)
                 self.assertIn('CLIC Résultat à 30.00 %, 60.00 % : accepté', exported)
                 self.assertIn('CAPTURE Image reçue : 1920x1080', exported)
                 self.assertIn('ATTENTE 0.00 s', exported)
                 self.assertIn('RuntimeError: blocage exemple', exported)
-                self.assertIn('SESSION Ouverture du bot', exported)
+                self.assertIn('DÉBUT Action=essai diagnostic', exported)
                 self.assertTrue(exported.splitlines()[0].startswith('20'))
             finally:
                 app.close()

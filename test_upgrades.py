@@ -36,10 +36,30 @@ class UpgradeTests(unittest.TestCase):
         app.stable_reserves = Mock(return_value=(2_000_000, 2_000_000))
         with patch.object(main, 'builders_menu_open', return_value=False), \
                 patch.object(main, 'find_wall_menu_item', return_value=None), \
+                patch.object(upgrades, 'scroll_builders_to_top'), \
                 patch.object(main.WindowDriver, 'scroll_menu', return_value=True) as scroll:
             self.assertEqual(app.upgrade_walls_to_reserve('window', independent=True), 0)
-        self.assertEqual(scroll.call_count, 16)
+        self.assertEqual(scroll.call_count, 20)
         app._wall_click.assert_called_once()
+
+    def test_wall_row_is_selected_after_menu_slides_to_a_new_position(self):
+        app = app_without_gui()
+        app._capture = Mock(return_value=object())
+        app._wall_click = Mock()
+        app._wait = Mock(return_value=False)
+        app.stable_reserves = Mock(return_value=(2_000_000, 2_000_000))
+        original_row = (42.2, 49.5)
+        settled_row = (42.2, 43.6)
+        with patch.object(upgrades, 'scroll_builders_to_top'), \
+                patch.object(main, 'builders_menu_open', return_value=True), \
+                patch.object(main, 'find_wall_menu_item', side_effect=[original_row, settled_row]), \
+                patch.object(main, 'find_wall_menu_items', return_value=[settled_row]), \
+                patch.object(main, 'read_wall_available', return_value=203), \
+                patch.object(main, 'wall_selected', return_value=True), \
+                patch.object(main, 'find_wall_more_button', return_value=None):
+            with self.assertRaisesRegex(RuntimeError, 'Améliorer plus introuvable'):
+                app.upgrade_walls_to_reserve('window', independent=True)
+        app._wall_click.assert_called_once_with('window', settled_row, 'rempart')
 
     def test_unaffordable_wall_row_falls_through_to_second_row(self):
         with Image.open(Path(__file__).parent/'testdata/builders_selected_menu.png') as base, \
@@ -60,6 +80,7 @@ class UpgradeTests(unittest.TestCase):
                                                   'élixir': ((58, 80), 500_000)}}
         app.stable_wall_group = Mock(side_effect=[expensive, affordable, affordable])
         with patch.object(main, 'wall_selected', return_value=True), \
+                patch.object(upgrades, 'scroll_builders_to_top'), \
                 patch.object(main, 'find_wall_more_button', return_value=(46, 85)), \
                 patch.object(main, 'wall_multi_mode', return_value=True), \
                 patch.object(main, 'wall_batch_confirmation_matches', return_value=True):
@@ -165,7 +186,7 @@ class UpgradeTests(unittest.TestCase):
         app.stable_reserves=Mock(return_value=(6000000,8000000))
         controls={'add':(41.8,80),'remove':(33.6,80),'payments':{'or':((50,80),500000),'élixir':((58.3,80),500000)}}
         app.stable_wall_group=Mock(side_effect=[controls,None,None])
-        with patch.object(main,'builders_menu_open',return_value=True),patch.object(main,'find_wall_menu_item',return_value=(44,54)),patch.object(main,'read_wall_available',return_value=7),patch.object(main,'wall_selected',return_value=True),patch.object(main,'find_wall_more_button',return_value=(46,85)),patch.object(main,'wall_multi_mode',return_value=True):
+        with patch.object(upgrades,'scroll_builders_to_top'),patch.object(main,'builders_menu_open',return_value=True),patch.object(main,'find_wall_menu_item',return_value=(44,54)),patch.object(main,'read_wall_available',return_value=7),patch.object(main,'wall_selected',return_value=True),patch.object(main,'find_wall_more_button',return_value=(46,85)),patch.object(main,'wall_multi_mode',return_value=True):
             with self.assertRaisesRegex(RuntimeError,'cycle arrêté avant l’attaque'):
                 app.upgrade_walls_to_reserve('window',independent=True)
         self.assertEqual([c.args[1] for c in app._wall_click.call_args_list],[(44,54),(46,85),(41.8,80)])
@@ -189,7 +210,7 @@ class UpgradeTests(unittest.TestCase):
         old={'add':(45.9,80),'remove':(33.6,80),'payments':{'or':((50,80),500000),'élixir':((58.3,80),500000)}}
         new={'add':(45.9,80),'remove':(33.6,80),'payments':{'or':((50,80),1000000),'élixir':((58.3,80),1000000)}}
         app.stable_wall_group=Mock(side_effect=[old,None,old,new,new])
-        with patch.object(main,'builders_menu_open',return_value=True),patch.object(main,'find_wall_menu_item',return_value=(44,54)),patch.object(main,'read_wall_available',return_value=2),patch.object(main,'wall_selected',return_value=True),patch.object(main,'find_wall_more_button',return_value=(46,85)),patch.object(main,'wall_multi_mode',return_value=True),patch.object(main,'wall_batch_confirmation_matches',return_value=True):
+        with patch.object(upgrades,'scroll_builders_to_top'),patch.object(main,'builders_menu_open',return_value=True),patch.object(main,'find_wall_menu_item',return_value=(44,54)),patch.object(main,'read_wall_available',return_value=2),patch.object(main,'wall_selected',return_value=True),patch.object(main,'find_wall_more_button',return_value=(46,85)),patch.object(main,'wall_multi_mode',return_value=True),patch.object(main,'wall_batch_confirmation_matches',return_value=True):
             self.assertEqual(app.upgrade_walls_to_reserve('window',independent=True),2)
         labels=[c.args[2] for c in app._wall_click.call_args_list]
         self.assertEqual(labels.count('ajouter un rempart identifié'),2)
@@ -203,7 +224,7 @@ class UpgradeTests(unittest.TestCase):
         app.stable_reserves=Mock(return_value=(1100000,1100000))
         controls={'add':(45.9,80),'remove':None,'payments':{'or':((50,80),600000),'élixir':((58.3,80),600000)}}
         app.stable_wall_group=Mock(return_value=controls)
-        with patch.object(main,'builders_menu_open',return_value=True),patch.object(main,'find_wall_menu_item',return_value=(44,54)),patch.object(main,'find_wall_menu_items',return_value=[]),patch.object(main,'read_wall_available',return_value=265),patch.object(main,'wall_selected',return_value=True),patch.object(main,'find_wall_more_button',return_value=(46,85)),patch.object(main,'wall_multi_mode',side_effect=[False,True]),patch.object(main.WindowDriver,'scroll_menu',return_value=True):
+        with patch.object(upgrades,'scroll_builders_to_top'),patch.object(main,'builders_menu_open',return_value=True),patch.object(main,'find_wall_menu_item',return_value=(44,54)),patch.object(main,'find_wall_menu_items',return_value=[]),patch.object(main,'read_wall_available',return_value=265),patch.object(main,'wall_selected',return_value=True),patch.object(main,'find_wall_more_button',return_value=(46,85)),patch.object(main,'wall_multi_mode',side_effect=[False,True]),patch.object(main.WindowDriver,'scroll_menu',return_value=True):
             self.assertEqual(app.upgrade_walls_to_reserve('window',independent=True),0)
         labels=[c.args[2] for c in app._wall_click.call_args_list]
         self.assertEqual(labels.count('Améliorer plus'),2)
@@ -262,6 +283,37 @@ class UpgradeTests(unittest.TestCase):
             self.assertTrue(all(not upgrades.is_town_hall(item[0]) for item in items))
             self.assertTrue(any('ressort' in upgrades.normal(item[0]) for item in items))
 
+    def test_costliest_payable_building_is_chosen_across_menu_pages(self):
+        app = app_without_gui()
+        app._capture = Mock(return_value=Image.new('RGB', (1920, 1080)))
+        app._wait = Mock()
+        app._trace = Mock()
+        position = [0]
+        pages = {
+            0: [('Petit piège', 25, 500_000, 'or'),
+                ('Prix OCR erroné', 29, 6_800_002, 'or'),
+                ('Hôtel de ville', 35, 4_000_000, 'or')],
+            1: [('Grand bâtiment', 45, 2_000_000, 'élixir')],
+            2: [('Grand bâtiment', 15, 2_000_000, 'élixir'),
+                ('Bâtiment moyen', 55, 1_000_000, 'or')],
+        }
+
+        def scroll(window, delta=-120):
+            position[0] = 0 if delta > 0 else min(2, position[0] + 1)
+            return True
+
+        def visible_items(image, include_others=False, include_town_hall=False):
+            return [item for item in pages[position[0]]
+                    if include_town_hall or not upgrades.is_town_hall(item[0])]
+
+        with patch.object(main.WindowDriver, 'scroll_menu', side_effect=scroll), \
+                patch.object(upgrades, 'scroll_builders_to_top', side_effect=lambda app,window: position.__setitem__(0,0)), \
+                patch.object(main, 'read_text', side_effect=lambda *args, **kwargs: str(position[0])), \
+                patch.object(upgrades, 'suggested_items', side_effect=visible_items):
+            choice = upgrades.find_payable_upgrade(app, 'window', 3, (10_000_000, 2_100_000))
+        self.assertEqual(choice, pages[1][0])
+        self.assertEqual(position[0], 1)
+
     def test_automatic_walls_require_a_confirmed_free_builder(self):
         for free in (None,0):
             app=app_without_gui()
@@ -272,13 +324,16 @@ class UpgradeTests(unittest.TestCase):
             app.stable_reserves.assert_not_called()
             app._wall_click.assert_not_called()
 
-    def test_automatic_walls_are_considered_with_any_free_builder(self):
+    def test_automatic_walls_wait_until_only_one_builder_is_free(self):
         for free in (1,2,3,5):
             app=app_without_gui()
             app.stable_reserves=Mock(return_value=(1000000,1000000))
             with patch.object(upgrades,'stable_builders',return_value=free):
                 app.upgrade_walls_to_reserve(object())
-            app.stable_reserves.assert_called_once()
+            if free == 1:
+                app.stable_reserves.assert_called_once()
+            else:
+                app.stable_reserves.assert_not_called()
 
     def test_grouped_wall_quantity_jump_uses_verified_price(self):
         app=app_without_gui()
@@ -289,7 +344,7 @@ class UpgradeTests(unittest.TestCase):
         initial={'add':(45.9,80),'remove':(33.6,80),'payments':{'or':((50,80),500000),'élixir':((58.3,80),500000)}}
         after_add={'add':(41.8,80),'remove':(33.6,80),'payments':{'or':((50,80),3000000)}}
         app.stable_wall_group=Mock(side_effect=[initial,after_add,after_add])
-        with patch.object(main,'builders_menu_open',return_value=True),patch.object(main,'find_wall_menu_item',return_value=(44,54)),patch.object(main,'read_wall_available',return_value=6),patch.object(main,'wall_selected',return_value=True),patch.object(main,'find_wall_more_button',return_value=(46,85)),patch.object(main,'wall_multi_mode',return_value=True),patch.object(main,'wall_batch_confirmation_matches',return_value=True):
+        with patch.object(upgrades,'scroll_builders_to_top'),patch.object(main,'builders_menu_open',return_value=True),patch.object(main,'find_wall_menu_item',return_value=(44,54)),patch.object(main,'read_wall_available',return_value=6),patch.object(main,'wall_selected',return_value=True),patch.object(main,'find_wall_more_button',return_value=(46,85)),patch.object(main,'wall_multi_mode',return_value=True),patch.object(main,'wall_batch_confirmation_matches',return_value=True):
             self.assertEqual(app.upgrade_walls_to_reserve('window',independent=True),6)
         self.assertEqual([c.args[1] for c in app._wall_click.call_args_list],[(44,54),(46,85),(45.9,80),(50,80),main.layout_values('WALL_MULTI_CONFIRM_BUTTON')])
 
@@ -341,11 +396,12 @@ class UpgradeTests(unittest.TestCase):
             self.assertTrue(main.hero_health_visible(im,1,-6.25))
             self.assertFalse(main.hero_health_visible(im,2,-6.25))
 
-    def test_last_builder_and_reserve_are_never_spent(self):
+    def test_last_builder_is_reserved_and_buildings_use_available_resources(self):
         for free in (None,0,1):
             self.assertFalse(upgrades.can_start_upgrade(free,10_000_000,500_000))
-        self.assertFalse(upgrades.can_start_upgrade(2,1_499_999,500_000))
-        self.assertTrue(upgrades.can_start_upgrade(2,1_500_000,500_000))
+        self.assertFalse(upgrades.can_start_upgrade(2,499_999,500_000))
+        self.assertTrue(upgrades.can_start_upgrade(2,500_000,500_000))
+        self.assertTrue(upgrades.can_start_upgrade(2,1_499_999,500_000))
 
     def test_workers_on_real_home_screens(self):
         for filename, count in [('builders_one_wall_group.png',1),('builders_two.png',2),('builders_four.png',4),('builders_five.png',5),('builders_selected_menu.png',4)]:

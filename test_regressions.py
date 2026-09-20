@@ -4,6 +4,7 @@ import queue
 import tempfile
 import threading
 import unittest
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -592,3 +593,29 @@ class ConnectionRegressions(unittest.TestCase):
         app._click=Mock()
         app.reconnect_game()
         app._click.assert_not_called()
+
+
+class DiagnosticLogRegressions(unittest.TestCase):
+    def test_each_action_has_an_exportable_log_and_error_screen(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            journal = main.DiagnosticJournal(root/'bot.log')
+            first = journal.start_run('remparts', main.Settings())
+            journal.record('OCR', 'ligne Rempart x203, coût 600000 élixir')
+            journal.record('ERREUR', 'confirmation illisible')
+            Image.new('RGB',(10,10),'red').save(first.with_suffix('.png'))
+            journal.end_run('terminée')
+            bundle = root/'diagnostic.zip'
+            journal.export_bundle(bundle)
+            second = journal.start_run('bâtiments', main.Settings())
+            journal.record('ÉTAPE', 'ouvrier réservé')
+            journal.end_run('terminée')
+            journal.close()
+            self.assertNotEqual(first,second)
+            with zipfile.ZipFile(bundle) as archive:
+                self.assertEqual(set(archive.namelist()),{first.name,first.with_suffix('.png').name})
+                text = archive.read(first.name).decode('utf-8')
+            self.assertIn('Rempart x203',text)
+            self.assertIn('Statut=erreur',text)
+            self.assertNotIn('ouvrier réservé',text)
+            self.assertIn('ouvrier réservé',(root/'bot.log').read_text(encoding='utf-8'))

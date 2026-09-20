@@ -17,6 +17,8 @@ import threading
 import time
 import traceback
 import unicodedata
+import uuid
+import zipfile
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
@@ -29,6 +31,7 @@ from farm_stats import FarmStats
 APP_DIR = Path.home() / "CoCFarmBot"
 CONFIG_PATH = APP_DIR / "config-v2.json"
 LOG_PATH = APP_DIR / "bot.log"
+RUNS_DIR = APP_DIR / "runs"
 ACCOUNT_SNAPSHOT_PATH = APP_DIR / "account_snapshot.json"
 STATS_PATH = APP_DIR / "farm-stats.json"
 ASSET_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "assets"
@@ -52,10 +55,11 @@ def check_cancelled():
 
 
 @contextmanager
-def operation_context(stop_event, settings):
+def operation_context(stop_event, settings, journal=None):
     previous = vars(_operation).copy()
     _operation.stop_event = stop_event
     _operation.settings = settings
+    _operation.journal = journal
     try:
         check_cancelled()
         yield
@@ -854,11 +858,24 @@ async def _ocr_words_file(path: str) -> list[tuple[str, float, float]]:
 
 def read_word_centers(image: Image.Image) -> list[tuple[str, float, float]]:
     check_cancelled()
+    trace_ocr("mots demandés", image, 1)
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as file: path = Path(file.name)
     try:
         image.save(path)
-        return [(word, x * 100 / image.width, y * 100 / image.height) for word, x, y in asyncio.run(bounded_ocr(_ocr_words_file(str(path))))]
+        words = [(word, x * 100 / image.width, y * 100 / image.height)
+                 for word, x, y in asyncio.run(bounded_ocr(_ocr_words_file(str(path))))]
+        trace_ocr("mots lus", image, 1, words)
+        return words
     finally: path.unlink(missing_ok=True)
+
+
+def trace_ocr(step, image, scale, result=None):
+    journal = getattr(_operation, "journal", None)
+    if journal is not None:
+        details = {"étape": step, "taille": [image.width,image.height], "agrandissement": scale}
+        if result is not None:
+            details["lecture"] = result
+        journal.record("OCR", json.dumps(details, ensure_ascii=False))
 
 
 def _collector_reference(resource):
@@ -1171,10 +1188,13 @@ def wall_batch_confirmation_matches(image: Image.Image, total: int, resource: st
 
 def read_number(image: Image.Image) -> int | None:
     check_cancelled()
+    trace_ocr("nombre demandé", image, 3)
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as file: path = Path(file.name)
     try:
         image.resize((image.width * 3, image.height * 3)).save(path)
-        digits = re.sub(r"[^0-9]", "", asyncio.run(bounded_ocr(_ocr_file(str(path)))))
+        raw = asyncio.run(bounded_ocr(_ocr_file(str(path))))
+        digits = re.sub(r"[^0-9]", "", raw)
+        trace_ocr("nombre lu", image, 3, {"brut":raw,"valeur":int(digits) if digits else None})
         return int(digits) if digits else None
     finally: path.unlink(missing_ok=True)
 
@@ -1182,10 +1202,13 @@ def read_number(image: Image.Image) -> int | None:
 def read_text(image: Image.Image, scale: int = 5) -> str:
     """OCR a local UI crop while keeping the raw reading for diagnostics."""
     check_cancelled()
+    trace_ocr("texte demandé", image, scale)
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as file: path = Path(file.name)
     try:
         image.resize((image.width * scale, image.height * scale)).save(path)
-        return asyncio.run(bounded_ocr(_ocr_file(str(path)))).strip()
+        result = asyncio.run(bounded_ocr(_ocr_file(str(path)))).strip()
+        trace_ocr("texte lu", image, scale, result)
+        return result
     finally: path.unlink(missing_ok=True)
 
 
@@ -1399,14 +1422,46 @@ def battle_reward_choice(image: Image.Image):
 
 
 class DiagnosticJournal:
-    """Append an immediately flushed trace and export a consistent text snapshot."""
+    """Flush every event to the history and to a separate file for each run."""
 
     def __init__(self, path: Path):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._file = path.open("a", encoding="utf-8")
+        self._run_file = None
+        self.run_path = None
+        self.last_run_path = None
+        self._run_failed = False
         self._closed = False
+
+    def start_run(self, label: str, settings=None):
+        with self._lock:
+            if self._run_file is not None:
+                raise RuntimeError("Un journal d'opération est déjà ouvert.")
+            run_dir = self.path.parent / "runs"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+            slug = re.sub(r"[^a-z0-9]+", "-", label.casefold()).strip("-") or "action"
+            self.run_path = run_dir / f"CoCFarmBot-{stamp}-{slug}-{uuid.uuid4().hex[:8]}.txt"
+            self._run_file = self.run_path.open("x", encoding="utf-8")
+            self.last_run_path = self.run_path
+            self._run_failed = False
+            self.record("DÉBUT", f"Action={label}; journal={self.run_path}; programme={sys.executable}")
+            if settings is not None:
+                self.record("CONFIG", json.dumps(asdict(settings), ensure_ascii=False, sort_keys=True))
+            return self.run_path
+
+    def end_run(self, status: str):
+        with self._lock:
+            if self._run_file is None:
+                return
+            if self._run_failed:
+                status = "erreur"
+            self.record("FIN", f"Statut={status}; journal={self.run_path}")
+            self._run_file.close()
+            self._run_file = None
+            self.run_path = None
 
     def record(self, kind: str, message: str):
         with self._lock:
@@ -1414,20 +1469,30 @@ class DiagnosticJournal:
                 return
             stamp = datetime.now().astimezone().isoformat(timespec="milliseconds")
             thread = threading.current_thread().name
+            if kind == "ERREUR":
+                self._run_failed = True
             for line in str(message).splitlines() or [""]:
-                self._file.write(f"{stamp} [{thread}] {kind} {line}\n")
+                entry = f"{stamp} [{thread}] {kind} {line}\n"
+                self._file.write(entry)
+                if self._run_file is not None:
+                    self._run_file.write(entry)
             self._file.flush()
+            if self._run_file is not None:
+                self._run_file.flush()
 
     def export(self, destination: Path):
-        if destination.resolve() == self.path.resolve():
+        source_path = self.last_run_path or self.path
+        if destination.resolve() in (self.path.resolve(), source_path.resolve()):
             raise ValueError("Le fichier exporté doit être différent du journal actif.")
         with self._lock:
             self._file.flush()
-            remaining = self.path.stat().st_size
+            if self._run_file is not None:
+                self._run_file.flush()
+            remaining = source_path.stat().st_size
         decoder = codecs.getincrementaldecoder("utf-8")("surrogateescape")
         legacy = {0xdc00 + byte: bytes([byte]).decode("cp1252", errors="replace")
                   for byte in range(0x80, 0x100)}
-        with self.path.open("rb") as source, destination.open("wb") as output:
+        with source_path.open("rb") as source, destination.open("wb") as output:
             while remaining:
                 block = source.read(min(1024 * 1024, remaining))
                 if not block:
@@ -1435,9 +1500,25 @@ class DiagnosticJournal:
                 remaining -= len(block)
                 output.write(decoder.decode(block, final=not remaining).translate(legacy).encode("utf-8"))
 
+    def export_bundle(self, destination: Path):
+        source_path = self.last_run_path or self.path
+        if destination.resolve() == source_path.resolve():
+            raise ValueError("Le diagnostic exporté doit être différent du journal actif.")
+        with self._lock:
+            self._file.flush()
+            if self._run_file is not None:
+                self._run_file.flush()
+            with zipfile.ZipFile(destination,"w",compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.write(source_path,arcname=source_path.name)
+                screenshot = source_path.with_suffix(".png")
+                if screenshot.exists():
+                    archive.write(screenshot,arcname=screenshot.name)
+
     def close(self):
         with self._lock:
             if not self._closed:
+                if self._run_file is not None:
+                    self.end_run("application fermée")
                 self._file.close()
                 self._closed = True
 
@@ -1518,6 +1599,7 @@ class BotApp:
         self._check_stopped()
         self._trace("CAPTURE", f"Lecture demandée : {getattr(window, 'title', '?')}")
         image = WindowDriver.capture(window)
+        self._last_capture = image
         self._trace("CAPTURE", f"Image reçue : {image.width}x{image.height}")
         self._check_stopped()
         if connection_retry_point(image) is not None:
@@ -1542,24 +1624,48 @@ class BotApp:
         return False
 
     def _run_operation(self, target):
+        status = "terminée"
         try:
             validate_layout(self.settings)
             while not self.stop_event.is_set():
                 try:
-                    with operation_context(self.stop_event, self.settings):
+                    with operation_context(self.stop_event, self.settings, getattr(self,"journal",None)):
                         target()
                     break
                 except ReconnectRequired:
-                    with operation_context(self.stop_event, self.settings):
+                    self._trace("REPRISE", "Action interrompue par la déconnexion ; tentative de reconnexion")
+                    with operation_context(self.stop_event, self.settings, getattr(self,"journal",None)):
                         self.reconnect_game()
                     self._reconnect_pending = False
         except OperationCancelled:
+            status = "interrompue"
             self.events.put("Opération interrompue.")
         except Exception as exc:
+            status = "erreur"
             self._trace("ERREUR", traceback.format_exc())
             self.events.put(f"Opération arrêtée : {exc}")
         finally:
             self._reconnect_pending = False
+            journal = getattr(self,"journal",None)
+            if journal is not None:
+                if journal._run_failed and journal.run_path is not None:
+                    image = getattr(self,"_last_capture",None)
+                    if image is not None:
+                        try:
+                            screenshot = journal.run_path.with_suffix(".png")
+                            image.save(screenshot)
+                            self._trace("CAPTURE ERREUR", f"Dernier écran enregistré : {screenshot}")
+                        except OSError as error:
+                            self._trace("ERREUR", f"Capture de diagnostic impossible : {error}")
+                journal.end_run(status)
+
+    def _begin_run(self, label):
+        journal = getattr(self,"journal",None)
+        if journal is None:
+            return
+        path = journal.start_run(label, self.settings)
+        self.events.put(f"Journal détaillé de cette action : {path}")
+        self._trace("CAPACITÉS", "Pendant l'action : les nouvelles commandes et les modifications sont bloquées ; Arrêter et l'export du journal restent disponibles.")
 
     def reconnect_game(self):
         self.events.put('Jeu déconnecté : reconnexion automatique en cours.')
@@ -1603,22 +1709,22 @@ class BotApp:
 
     def export_log(self):
         destination = filedialog.asksaveasfilename(
-            parent=self.root, title="Enregistrer le journal du bot",
-            initialfile=f"CoCFarmBot-journal-{datetime.now():%Y%m%d-%H%M%S}.txt",
-            defaultextension=".txt", filetypes=[("Fichier texte", "*.txt")])
+            parent=self.root, title="Exporter le diagnostic du bot",
+            initialfile=f"CoCFarmBot-diagnostic-{datetime.now():%Y%m%d-%H%M%S}.zip",
+            defaultextension=".zip", filetypes=[("Archive ZIP", "*.zip")])
         if not destination:
             return
         path = Path(destination)
-        if path.suffix.lower() != ".txt":
-            path = Path(str(path) + ".txt")
+        if path.suffix.lower() != ".zip":
+            path = Path(str(path) + ".zip")
         try:
-            self._trace("EXPORT", f"Copie du journal vers {path}")
-            self.journal.export(path)
+            self._trace("EXPORT", f"Copie du diagnostic vers {path}")
+            self.journal.export_bundle(path)
         except (OSError, ValueError) as exc:
             self._trace("ERREUR", f"Export du journal impossible : {exc}")
             messagebox.showerror("Export impossible", str(exc), parent=self.root)
             return
-        self.write(f"Journal enregistré : {path}. Envoyez ce fichier pour analyser un blocage.")
+        self.write(f"Diagnostic enregistré : {path}. Envoyez ce ZIP pour analyser un blocage.")
 
     def _build(self):
         from dashboard import build
@@ -1641,6 +1747,7 @@ class BotApp:
             return
         title = self.window_title.get()
         self.stop_event.clear()
+        self._begin_run("lecture du jeu")
         def inspect():
             window = WindowDriver.resolve(title)
             if not window: raise RuntimeError("Fenêtre Clash introuvable.")
@@ -1743,20 +1850,28 @@ class BotApp:
         except ValueError: messagebox.showerror("Valeur invalide","Seuils : 0 à 2 500 000 ; marge : 0 à 25 % ; troupes : 0 à 50.");return False
         except OSError as exc: messagebox.showerror("Sauvegarde impossible", str(exc)); return False
     def start_farm(self):
-        if self._busy(): return
+        if self._busy():
+            self._trace("REFUS", "Démarrage du farm impossible : une autre action est en cours.")
+            return
         if not self.persist(): return
         if self.settings.dry_run: self.write("Simulation active : recherche et lecture uniquement, aucune pose ne sera envoyée.")
         else: self.write("Mode réel actif : toutes les troupes disponibles seront posées et vérifiées sur une base retenue.")
-        self.stop_event.clear(); self.worker=threading.Thread(target=self._run_operation,args=(self.farm_loop,),daemon=True); self.worker.start(); self.run_state.set("EN COURS"); self.write("Recherche automatique démarrée.")
+        self.stop_event.clear(); self._begin_run("cycle complet"); self.worker=threading.Thread(target=self._run_operation,args=(self.farm_loop,),daemon=True); self.worker.start(); self.run_state.set("EN COURS"); self.write("Recherche automatique démarrée.")
     def start_walls(self):
-        if self._busy(): return
+        if self._busy():
+            self._trace("REFUS", "Démarrage des remparts impossible : une autre action est en cours.")
+            return
         if not self.persist(): return
-        self.stop_event.clear(); self.worker=threading.Thread(target=self._run_operation,args=(self.wall_loop,),daemon=True); self.worker.start(); self.run_state.set("EN COURS"); self.write("Amélioration des remparts démarrée.")
+        self.stop_event.clear(); self._begin_run("remparts"); self.worker=threading.Thread(target=self._run_operation,args=(self.wall_loop,),daemon=True); self.worker.start(); self.run_state.set("EN COURS"); self.write("Amélioration des remparts démarrée.")
 
     def start_independent(self, action):
-        if self._busy() or not self.persist():
+        if self._busy():
+            self._trace("REFUS", f"Action {action} impossible : une autre action est en cours.")
+            return
+        if not self.persist():
             return
         self.stop_event.clear()
+        self._begin_run(f"action {action}")
         self.run_state.set('EN COURS')
         self.worker = threading.Thread(target=self._run_operation, args=(lambda: self.independent_loop(action),), daemon=True)
         self.worker.start()
@@ -1781,6 +1896,7 @@ class BotApp:
                 self.stop_event.set()
                 self.events.put('Action indépendante terminée.')
     def stop(self):
+        self._trace("ARRÊT", "Demande d'arrêt reçue ; les prochains clics seront bloqués.")
         with self.action_lock:
             self.stop_event.set()
         self.write("Arrêt demandé.")
@@ -1804,13 +1920,17 @@ class BotApp:
     def stable_reserves(self, window):
         """Require two agreeing home-village readings before authorising spending."""
         previous = None
-        for _ in range(5):
+        for attempt in range(5):
             image = self._capture(window)
             values = (read_safe_reserve(image, "gold"), read_safe_reserve(image, "elixir"))
+            self._trace("RÉSERVES", f"Lecture {attempt+1}/5 : or={values[0]}, élixir={values[1]}, précédente={previous}")
             if None not in values and previous is not None and all(abs(a - b) <= 20_000 for a, b in zip(values, previous)):
-                return tuple(min(a, b) for a, b in zip(values, previous))
+                confirmed = tuple(min(a, b) for a, b in zip(values, previous))
+                self._trace("RÉSERVES", f"Réserves confirmées : or={confirmed[0]}, élixir={confirmed[1]}")
+                return confirmed
             previous = values if None not in values else None
             if self._wait(.4): break
+        self._trace("REFUS", "Réserves non confirmées après cinq lectures ; dépense interdite.")
         return None
 
     def collect_village_resources(self, window):
@@ -1851,9 +1971,10 @@ class BotApp:
 
     def stable_wall_group(self, window, resource=None, single=False, price_above=None, expected_price=None):
         previous = None
-        for _ in range(16 if price_above is not None else 8):
+        for attempt in range(16 if price_above is not None else 8):
             controls = wall_group_controls(self._capture(window),single=single,
                                            expected_price=expected_price,expected_resource=resource)
+            self._trace("REMPARTS", f"Contrôles lus {attempt+1} : {controls!r}; ressource={resource}, prix précédent>{price_above}, attendu={expected_price}")
             if controls is not None and resource is not None and resource not in controls["payments"]:
                 controls = None
             if (controls is not None and price_above is not None and
@@ -1863,26 +1984,32 @@ class BotApp:
                 same_prices = {r:p[1] for r,p in controls['payments'].items()} == {r:p[1] for r,p in previous['payments'].items()}
                 same_add = single or all(abs(a-b)<.5 for a,b in zip(controls['add'],previous['add']))
                 if same_prices and same_add:
+                    self._trace("REMPARTS", f"Contrôles stables : {controls!r}")
                     return controls
             previous = controls
             self._wait(.15)
+        self._trace("REFUS", "Boutons ou prix de remparts instables ; aucune confirmation.")
         return None
 
-    def upgrade_walls_to_reserve(self, window, independent=False):
+    def upgrade_walls_to_reserve(self, window, independent=False, max_batches=None):
         """Upgrade available walls while keeping both village reserves at or above 1 M."""
+        self._trace("REMPARTS", f"Début : action seule={independent}, simulation={self.settings.dry_run}, amélioration bâtiments={self.settings.upgrade_recommended}")
         if (not independent and not self.settings.upgrade_wall_between_attacks) or self.settings.dry_run:
+            self._trace("REFUS", "Remparts désactivés par les réglages ou par la simulation.")
             return 0
         if not independent and self.settings.upgrade_recommended:
             from upgrades import stable_builders
             free = stable_builders(self, window)
-            if free is None or free < 1:
-                self.events.put(f'Ouvriers libres={free} : remparts reportés faute d’ouvrier confirmé.')
+            if free != 1:
+                self.events.put(f'Ouvriers libres={free} : remparts reportés jusqu’à ce qu’un seul ouvrier soit libre.')
                 return 0
         upgraded = 0
+        batches = 0
         rejected_rows = set()
         rejected_attempts = 0
         while not self.stop_event.is_set():
             balances = self.stable_reserves(window)
+            self._trace("REMPARTS", f"Nouveau lot : déjà améliorés={upgraded}, réserves={balances}, lignes écartées={sorted(rejected_rows)}")
             if balances is None:
                 self.events.put("Réserves instables ou illisibles : aucune dépense envoyée.")
                 return upgraded
@@ -1893,8 +2020,12 @@ class BotApp:
             menu = self._capture(window)
             if not builders_menu_open(menu) and find_wall_menu_item(menu) is None:
                 self._wall_click(window, layout_values("BUILDERS_BUTTON"), "ouvriers")
+            from upgrades import scroll_builders_to_top
+            scroll_builders_to_top(self,window)
             available = None
-            for _ in range(16):
+            previous_menu = None
+            unchanged_menu = 0
+            for page in range(20):
                 menu = self._capture(window)
                 if rejected_rows:
                     item = next((point for point in find_wall_menu_items(menu)
@@ -1902,15 +2033,22 @@ class BotApp:
                 else:
                     item = find_wall_menu_item(menu)
                 available = read_wall_available(menu, item) if item else None
+                self._trace("REMPARTS", f"Page {page+1}/20 : ligne={item}, quantité={available}")
                 if item and available is None:
                     available = 1  # Select and verify only one wall when xN is unreadable.
                 if available is not None: break
+                if isinstance(menu, Image.Image):
+                    signature = read_text(crop_percent(menu,Roi(38,12,64,64)),scale=2).casefold()
+                    unchanged_menu = unchanged_menu + 1 if signature and signature == previous_menu else 0
+                    if unchanged_menu >= 2:
+                        break
+                    previous_menu = signature
                 # The border and heading can disappear during a scroll. A
                 # bounded wheel action is safe even when menu OCR is uncertain.
                 with self.action_lock:
                     self._check_stopped()
                     self._trace("DÉFILEMENT", "Recherche des remparts : descendre le menu")
-                    if not WindowDriver.scroll_menu(window):
+                    if not WindowDriver.scroll_menu(window,delta=-1200):
                         raise RuntimeError('Défilement des remparts refusé.')
                 if self._wait(.4): break
             if self.stop_event.is_set() or item is None or available is None:
@@ -1925,9 +2063,19 @@ class BotApp:
                 # Never reuse the row retained before reading its quantity.
                 current_menu = self._capture(window)
                 current_item = find_wall_menu_item(current_menu)
-                if current_item is not None and abs(current_item[1] - item[1]) >= 1.5:
-                    current_item = next((point for point in find_wall_menu_items(current_menu)
+                self._trace("REMPARTS", f"Relire avant sélection : ligne précédente={item}, actuelle={current_item}")
+                if current_item is None or abs(current_item[1] - item[1]) >= 1.5:
+                    current_rows = find_wall_menu_items(current_menu)
+                    current_item = next((point for point in current_rows
                                          if abs(point[1] - item[1]) < 1.5), None)
+                    if current_item is None and len(current_rows) == 1:
+                        # The last wheel event may still be moving the list.
+                        # A unique wall row with the same quantity is safe to
+                        # use at its freshly observed position.
+                        fresh_quantity = read_wall_available(current_menu,current_rows[0])
+                        if fresh_quantity == available:
+                            current_item = current_rows[0]
+                            self._trace("REMPARTS", f"Ligne déplacée mais quantité inchangée : {current_item}, x{fresh_quantity}")
                 if current_item is None:
                     self._wait(.4)
                     continue
@@ -1935,7 +2083,9 @@ class BotApp:
                 available = read_wall_available(current_menu, item) or available
                 self._wall_click(window, item, "rempart")
                 wall_image = self._capture(window)
-                if wall_selected(wall_image) or (available == 1 and wall_group_controls(wall_image,single=True) is not None):
+                selected_wall = wall_selected(wall_image)
+                self._trace("REMPARTS", f"Sélection envoyée : ligne={item}, x{available}, sélection reconnue={selected_wall}")
+                if selected_wall or (available == 1 and wall_group_controls(wall_image,single=True) is not None):
                     selected = True
                     break
                 if self.stop_event.is_set(): break
@@ -1961,6 +2111,7 @@ class BotApp:
                     self.events.put("Améliorer plus sans effet confirmé : nouvel essai avant toute dépense.")
                     self._wait(.6)
             controls = self.stable_wall_group(window,single=single)
+            self._trace("REMPARTS", f"Contrôles du groupe : {controls!r}, individuel={single}")
             if controls is None:
                 raise RuntimeError("Boutons du groupe de remparts non confirmés : cycle arrêté avant l’attaque.")
             payments = controls['payments']
@@ -1969,6 +2120,7 @@ class BotApp:
             options = [(wall_batch_size(gold if resource=='or' else elixir,price,available),resource,price)
                        for resource,(_,price) in payments.items()]
             count, resource, unit_cost = max(options, key=lambda option:(option[0],gold if option[1]=='or' else elixir))
+            self._trace("REMPARTS", f"Lots payables={options!r}; choisi={count} x {unit_cost} {resource}; réserves={balances}")
             if count == 0:
                 rejected_rows.add((round(item[1]), available))
                 rejected_attempts += 1
@@ -2008,21 +2160,25 @@ class BotApp:
                 payment = controls['payments'].get(resource) if controls else None
                 observed_total = payment[1] if payment else None
                 observed_count, remainder = divmod(observed_total, unit_cost) if observed_total else (0, 0)
+                self._trace("REMPARTS", f"Après Ajouter : prix={observed_total}, unitaire={unit_cost}, quantité {selected_count}->{observed_count}, reste={remainder}")
                 if remainder or not selected_count < observed_count <= count:
                     raise RuntimeError(f"Ajout de rempart non confirmé : prix lu={observed_total}, prix unitaire={unit_cost}, quantité précédente={selected_count}, maximum payable={count}. Cycle arrêté avant l’attaque.")
                 selected_count = observed_count
             total = selected_count*unit_cost
             fresh = self.stable_reserves(window)
+            self._trace("REMPARTS", f"Avant paiement : lot={selected_count}, total={total} {resource}, réserves relues={fresh}, plancher={WALL_RESERVE}")
             if fresh is None or min(fresh) < WALL_RESERVE or fresh[0 if resource=='or' else 1]-total < WALL_RESERVE:
                 raise RuntimeError("Réserves insuffisantes ou incertaines : aucune dépense envoyée, cycle arrêté avant l’attaque.")
             gold, elixir = fresh
             controls = self.stable_wall_group(window, resource, single=single,expected_price=total)
             payment = controls['payments'].get(resource) if controls else None
+            self._trace("REMPARTS", f"Bouton de paiement final : {payment!r}, total attendu={total}")
             if payment is None or payment[1] != total:
                 raise RuntimeError("Bouton de paiement ou coût modifié : aucune dépense envoyée, cycle arrêté avant l’attaque.")
             self._wall_click(window, payment[0], f"amélioration groupée {resource} identifiée")
             confirmation=self._capture(window)
             matches = single_wall_confirmation_matches(confirmation,total,resource) if single else wall_batch_confirmation_matches(confirmation,total,resource)
+            self._trace("REMPARTS", f"Confirmation affichée : groupe={not single}, coût={total} {resource}, correspondance={matches}")
             if self.stop_event.is_set() or not matches:
                 raise RuntimeError("Montant, rempart ou ressource de la confirmation non vérifié : cycle arrêté avant l’attaque.")
             confirm_button = "WALL_CONFIRM_BUTTON" if single else "WALL_MULTI_CONFIRM_BUTTON"
@@ -2031,14 +2187,18 @@ class BotApp:
             after = self.stable_reserves(window)
             before_spend = gold if resource == "or" else elixir
             after_spend = after[0] if resource == "or" and after else (after[1] if after else None)
+            self._trace("REMPARTS", f"Après paiement : réserves avant={(gold,elixir)}, après={after}, variation attendue={total} {resource}")
             if after_spend is None or abs(before_spend - after_spend - total) > 50_000:
                 raise RuntimeError("Dépense groupée non vérifiée sur les réserves : cycle arrêté avant l’attaque.")
             if after[0] < WALL_RESERVE or after[1] < WALL_RESERVE:
                 raise RuntimeError("Une réserve est passée sous le plancher : cycle arrêté avant l’attaque.")
             upgraded += count
+            batches += 1
             rejected_rows.clear()
             rejected_attempts = 0
             self.events.put(f"{count} rempart(s) amélioré(s) avec {total:,} {resource} ({upgraded} au total).")
+            if max_batches is not None and batches >= max_batches:
+                return upgraded
             if (gold_cost is not None and elixir_cost is not None and available > count and
                     after[0] - gold_cost < WALL_RESERVE and after[1] - elixir_cost < WALL_RESERVE):
                 self.events.put(f"Réserves préservées : or {after[0]:,}, élixir {after[1]:,} ; aucun autre rempart payable.")
@@ -2317,6 +2477,7 @@ class BotApp:
             while not self.stop_event.is_set():
                 window=WindowDriver.resolve(self.settings.window_title)
                 if not window: raise RuntimeError("Fenêtre Clash introuvable.")
+                self._trace("CYCLE", f"Fenêtre sélectionnée : {getattr(window,'title','?')!r}, {getattr(window,'width','?')}x{getattr(window,'height','?')}; simulation={self.settings.dry_run}")
                 stats = getattr(self, "farm_stats", None)
                 if stats and stats.data.get("pending"):
                     if stats.data["pending"]["window_title"] != window.title:
@@ -2328,11 +2489,19 @@ class BotApp:
                         self.events.put("Résultat du combat précédent absent : sa récolte ne peut pas être comptabilisée.")
                         stats.clear_pending()
                 if not self.settings.dry_run:
+                    self._trace("CYCLE", "Étape 1 : collecte des mines et extracteurs")
                     self.collect_village_resources(window)
+                else:
+                    self._trace("CYCLE", "Collecte ignorée : simulation active")
                 if self.settings.upgrade_recommended and not self.settings.dry_run:
+                    self._trace("CYCLE", "Étape 2 : bâtiments par prix décroissant, Hôtel de ville exclu")
                     from upgrades import upgrade_suggested
                     upgrade_suggested(self, window)
+                else:
+                    self._trace("CYCLE", "Bâtiments ignorés : option désactivée ou simulation active")
+                self._trace("CYCLE", "Étape 3 : remparts avec le dernier ouvrier et réserve de 1 M")
                 self.upgrade_walls_to_reserve(window)
+                self._trace("CYCLE", "Étape 4 : recherche d'une base adverse")
                 if self.stop_event.is_set() or not self.open_search(window): return
                 if not self.find_suitable_base(window): return
                 self._check_stopped()

@@ -2,6 +2,8 @@
 
 Application Windows pour Google Play Jeux PC. Elle lit le butin des bases adverses, cherche une base qui atteint les seuils configurés, puis déploie l’armée choisie. Les commandes sont envoyées à la fenêtre du jeu sans déplacer la souris Windows.
 
+**Au village :** le bot parcourt la liste des ouvriers, lance chaque fois le bâtiment payable le plus cher et s'arrête quand il ne reste qu'un ouvrier libre. Il exclut toujours l'Hôtel de ville. Il utilise ensuite l'or et l'élixir restants pour les remparts, en conservant au moins un million de chaque ressource.
+
 ## Démarrer
 
 Télécharger puis lancer [CoCFarmBot.exe depuis la dernière Release GitHub](https://github.com/MathisLo/coc-farm-bot/releases/latest/download/CoCFarmBot.exe) ou, depuis le dossier du projet :
@@ -73,9 +75,10 @@ La reconnaissance des héros exige une barre de vie verte horizontale sous un bo
 - `BUILD.ps1` : création de l’exécutable Windows.
 - `%USERPROFILE%\CoCFarmBot\config-v2.json` : réglages personnels, repris automatiquement depuis les versions précédentes.
 - `%USERPROFILE%\CoCFarmBot\bot.log` : journal détaillé.
+- `%USERPROFILE%\CoCFarmBot\runs\` : un journal distinct pour chaque action lancée ; une capture `.png` du dernier écran est ajoutée si l'action échoue.
 - `%USERPROFILE%\CoCFarmBot\account_snapshot.json` : dernier relevé demandé via **Relever le profil**.
 
-Dans l'onglet **Journal**, cliquez sur **Télécharger le journal (.txt)**, choisissez où enregistrer le fichier, puis joignez ce `.txt` à votre message en cas de blocage. Le bouton reste disponible pendant un cycle. L'export contient les étapes du bot, les réglages utilisés, les lectures d'écran, les clics et leur résultat, les attentes, les valeurs OCR utiles et les erreurs avec leur trace. Il copie le journal jusqu'au moment du clic, même si le bot continue ensuite. Les captures d'écran ne sont pas incluses dans le fichier texte.
+Dans l'onglet **Journal**, cliquez sur **Exporter le diagnostic (.zip)**, puis joignez ce ZIP à votre message en cas de blocage. Le bouton reste disponible pendant un cycle. Chaque action a son propre fichier avec ses réglages, toutes les demandes et réponses OCR, les captures demandées, les clics et défilements, les choix et refus de dépense, les réserves, les ouvriers, les attentes et les erreurs complètes. En cas d'erreur, le ZIP inclut aussi le dernier écran capturé. Un export pendant l'action est une copie à cet instant ; exportez de nouveau après l'arrêt pour obtenir la fin du journal.
 
 Le suivi des fonctionnalités et des validations se trouve dans [Notion](https://app.notion.com/p/3dccca7fe8b78060a5c3ca2aa4b73fa8). Le dépôt GitHub contient les sources et chaque mise à jour publiée fournit un exécutable Windows testé dans les Releases. Les fichiers de construction et les captures de diagnostic restent locaux.
 # Statistiques de récolte
@@ -89,7 +92,11 @@ Les gains sont lus sur le résultat final du combat, avec le bonus de ligue. Les
 Les totaux sont sauvegardés dans `%USERPROFILE%\CoCFarmBot\farm-stats.json` et restaurés au lancement. Même en mode attaque unique, le bot attend le résultat pour le comptabiliser. Si la lecture reste incertaine, le résultat est conservé dans `unread-results` sans ajouter de gains aux totaux, puis le cycle reprend. Un résultat déjà enregistré n'est pas recompté. Un combat quitté manuellement avant sa lecture ne peut pas être reconstitué.
 
 
-Les améliorations conseillées conservent au moins un ouvrier libre et un million d’or et d’élixir. Le bot parcourt toute la liste, recommandations puis autres améliorations. Les remparts automatiques utilisent ensuite les ressources disponibles au-delà de cette réserve dès qu’au moins un ouvrier libre est confirmé, même si plusieurs ouvriers sont libres. L’HDV attend que tous les autres travaux, remparts compris, soient confirmés terminés et qu’aucun ouvrier ne travaille encore.
+Les améliorations de bâtiments utilisent les ressources disponibles sans imposer le plancher d'un million réservé aux remparts. Le bot lit toute la liste, confirme deux fois le prix et la ressource, puis sélectionne le bâtiment payable le plus cher. Il relit l'écran de confirmation et les ouvriers avant l'achat. L'Hôtel de ville est exclu, même si son prix est le plus élevé. Les remparts automatiques commencent lorsque exactement un ouvrier reste libre ; ils conservent au moins un million d'or et d'élixir.
+
+## Validation réelle du 20 septembre 2026
+
+Sur le village français en 1920 × 1080, le bot a lancé l'Aigle artilleur (3 600 000 or), la Catapulte explosive (3 200 000 élixir) et la Bougie incandescente (3 200 000 or). Le nombre d'ouvriers libres est passé de 4 à 1. Il a ensuite amélioré 11 remparts, dépensé 5 400 000 élixir et 1 200 000 or, puis s'est arrêté avec 1 479 253 or et 1 400 000 élixir. Ces montants ont été relus dans le jeu après les achats.
 
 
 ## Validation des corrections du 19 septembre 2026
