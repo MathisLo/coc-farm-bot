@@ -3,13 +3,36 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from PIL import Image
+from PIL import Image, ImageDraw
 import main
 from farm_stats import FarmStats
 from test_regressions import app_without_gui
 
 
 class StatisticsTests(unittest.TestCase):
+    def test_final_reward_without_readable_top_border_is_selected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = app_without_gui()
+            app.farm_stats = FarmStats(Path(directory)/'stats.json')
+            app.farm_stats.begin('account')
+            app._wait = Mock()
+            app._click = Mock(return_value=True)
+            with Image.open(Path(__file__).parent/'testdata/event_final_raised_cards.png') as source, \
+                    Image.open(Path(__file__).parent/'testdata/result_bonus.png') as result:
+                choice = source.copy()
+                drawing = ImageDraw.Draw(choice)
+                for y in (32.7, 33.4):
+                    top = round(choice.height * y / 100)
+                    drawing.rectangle((0, top, choice.width, top + 6), fill=(25, 25, 25))
+                self.assertTrue(main.battle_reward_open(choice))
+                self.assertEqual(main.battle_reward_choice(choice)[0], (30., 60.))
+                app._capture = Mock(side_effect=[choice, result, result, result, Image.new('RGB', (1920, 1080))])
+                with patch.object(main, 'village_home_ready', side_effect=[False, True]):
+                    self.assertTrue(app.wait_for_battle_return('window'))
+            self.assertEqual([call.args[1:] for call in app._click.call_args_list],
+                             [(30., 60.), main.layout_values('RETURN_HOME_BUTTON')])
+            self.assertEqual(app.farm_stats.data['battles'], 1)
+
     def test_raised_final_reward_cards_are_selected_and_counted(self):
         with tempfile.TemporaryDirectory() as directory:
             app = app_without_gui()

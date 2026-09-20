@@ -359,7 +359,8 @@ class DeploymentRegressions(unittest.TestCase):
         app._click = Mock(return_value=True)
         app._wait = Mock()
         app.record_battle_earnings = Mock()
-        with patch.object(main, "village_home_ready", side_effect=[False, False, True]), \
+        with patch.object(main, "battle_reward_open", return_value=False), \
+             patch.object(main, "village_home_ready", side_effect=[False, False, True]), \
              patch.object(main, "battle_result_return_ready", side_effect=[False, True]), \
              patch.object(main, "has_screen_text", return_value=False):
             self.assertTrue(app.wait_for_battle_return(object()))
@@ -368,6 +369,21 @@ class DeploymentRegressions(unittest.TestCase):
                             for call in app._battle_capture.call_args_list))
         app.record_battle_earnings.assert_called_once()
         app._click.assert_called_once()
+
+    def test_victory_behind_reward_does_not_trigger_result_or_return_click(self):
+        app = app_without_gui()
+        frame = Image.new('RGB', (1920, 1080))
+        app._battle_capture = Mock(side_effect=[frame, frame, frame])
+        app._click = Mock(return_value=True)
+        app._wait = Mock()
+        app.record_battle_earnings = Mock()
+        with patch.object(main, 'battle_reward_open', side_effect=[True, False, False]), \
+                patch.object(main, 'village_home_ready', side_effect=[False, True]), \
+                patch.object(main, 'battle_result_return_ready', return_value=True):
+            self.assertTrue(app.wait_for_battle_return(object()))
+        app.record_battle_earnings.assert_called_once()
+        app._click.assert_called_once()
+        self.assertEqual(app._battle_capture.call_count, 3)
 
     def test_reward_checked_while_waiting_after_deployment(self):
         app = app_without_gui()
@@ -596,6 +612,19 @@ class ConnectionRegressions(unittest.TestCase):
 
 
 class DiagnosticLogRegressions(unittest.TestCase):
+    def test_unreadable_final_reward_screen_is_in_diagnostic_zip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            journal = main.DiagnosticJournal(root / 'bot.log')
+            run = journal.start_run('combat', main.Settings())
+            screenshot = journal.save_reward_screen(Image.new('RGB', (20, 20), 'blue'))
+            bundle = root / 'diagnostic.zip'
+            journal.export_bundle(bundle)
+            journal.close()
+            with zipfile.ZipFile(bundle) as archive:
+                self.assertEqual(set(archive.namelist()), {run.name, screenshot.name})
+                self.assertIn('Capture du choix final non reconnu', archive.read(run.name).decode('utf-8'))
+
     def test_each_action_has_an_exportable_log_and_error_screen(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

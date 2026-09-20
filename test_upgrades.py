@@ -61,6 +61,25 @@ class UpgradeTests(unittest.TestCase):
                 app.upgrade_walls_to_reserve('window', independent=True)
         app._wall_click.assert_called_once_with('window', settled_row, 'rempart')
 
+    def test_shifted_wall_row_uses_fresh_stable_quantity_after_ocr_error(self):
+        app = app_without_gui()
+        app._capture = Mock(return_value=object())
+        app._wall_click = Mock()
+        app._wait = Mock(return_value=False)
+        app.stable_reserves = Mock(return_value=(2_283_051, 1_119_875))
+        previous_row = (42.2, 50.85)
+        settled_row = (42.2, 47.51)
+        with patch.object(upgrades, 'scroll_builders_to_top'), \
+                patch.object(main, 'builders_menu_open', return_value=True), \
+                patch.object(main, 'find_wall_menu_item', side_effect=[previous_row, settled_row]), \
+                patch.object(main, 'find_wall_menu_items', return_value=[settled_row]), \
+                patch.object(main, 'read_wall_available', side_effect=[159, 169, 169]), \
+                patch.object(main, 'wall_selected', return_value=True), \
+                patch.object(main, 'find_wall_more_button', return_value=None):
+            with self.assertRaisesRegex(RuntimeError, 'Améliorer plus introuvable'):
+                app.upgrade_walls_to_reserve('window', independent=True)
+        app._wall_click.assert_called_once_with('window', settled_row, 'rempart')
+
     def test_unaffordable_wall_row_falls_through_to_second_row(self):
         with Image.open(Path(__file__).parent/'testdata/builders_selected_menu.png') as base, \
                 Image.open(Path(__file__).parent/'testdata/wall_last_menu.png') as last:

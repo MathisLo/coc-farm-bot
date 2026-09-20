@@ -35,7 +35,7 @@ LOG_PATH = APP_DIR / "bot.log"
 RUNS_DIR = APP_DIR / "runs"
 ACCOUNT_SNAPSHOT_PATH = APP_DIR / "account_snapshot.json"
 STATS_PATH = APP_DIR / "farm-stats.json"
-STORAGE_GENERATION = "v1.0.13-clean-start"
+STORAGE_GENERATION = "v1.0.14-clean-start"
 STORAGE_MARKER = ".storage-generation"
 ASSET_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "assets"
 OCR_TIMEOUT = 8.0
@@ -1455,18 +1455,21 @@ def battle_reward_choice(image: Image.Image):
         if ready:
             layout = (label_top, label_bottom, click_y)
             break
-    if layout is None:
+    # During the opening animation an in-battle card may show text without
+    # its frame. Only the confirmed victory layout may use the label fallback.
+    if layout is None and not has_screen_text(crop_percent(image, layout_roi("SCREEN_ROIS", "battle_reward")), "victoire"):
         return None
-    label_top, label_bottom, click_y = layout
+    layouts = [layout] if layout is not None else [(63, 74, 60.), (52, 66, 53.)]
     tickets = None
-    for x in centers:
-        readings = [read_text(crop_percent(image, Roi(x-7, label_top, x+7, label_bottom)), scale=scale) for scale in (2,1)]
-        for raw in readings:
-            text = "".join(c for c in unicodedata.normalize("NFD", raw.casefold()) if unicodedata.category(c) != "Mn")
-            if re.search(r"\b[o0]r\b|\belixir\b", text):
-                return (x, click_y), raw
-            if re.search(r"\btickets?\b", text):
-                tickets = ((x, click_y), raw)
+    for label_top, label_bottom, click_y in layouts:
+        for x in centers:
+            readings = [read_text(crop_percent(image, Roi(x-7, label_top, x+7, label_bottom)), scale=scale) for scale in (2,1)]
+            for raw in readings:
+                text = "".join(c for c in unicodedata.normalize("NFD", raw.casefold()) if unicodedata.category(c) != "Mn")
+                if re.search(r"\b[o0]r\b|\belixir\b", text):
+                    return (x, click_y), raw
+                if re.search(r"\btickets?\b", text):
+                    tickets = ((x, click_y), raw)
     return tickets  # An unreadable card or a troop never authorises a click.
 
 
@@ -1529,6 +1532,15 @@ class DiagnosticJournal:
             if self._run_file is not None:
                 self._run_file.flush()
 
+    def save_reward_screen(self, image: Image.Image) -> Path | None:
+        with self._lock:
+            if self.run_path is None:
+                return None
+            screenshot = self.run_path.with_name(f"{self.run_path.stem}-reward-{uuid.uuid4().hex[:8]}.png")
+            image.save(screenshot)
+            self.record("RÉCOMPENSE", f"Capture du choix final non reconnu : {screenshot}")
+            return screenshot
+
     def export(self, destination: Path):
         source_path = self.last_run_path or self.path
         if destination.resolve() in (self.path.resolve(), source_path.resolve()):
@@ -1561,6 +1573,8 @@ class DiagnosticJournal:
                 archive.write(source_path,arcname=source_path.name)
                 screenshot = source_path.with_suffix(".png")
                 if screenshot.exists():
+                    archive.write(screenshot,arcname=screenshot.name)
+                for screenshot in sorted(source_path.parent.glob(f"{source_path.stem}-reward-*.png")):
                     archive.write(screenshot,arcname=screenshot.name)
 
     def close(self):
@@ -2149,6 +2163,7 @@ class BotApp:
                 return upgraded
             selected = False
             for _ in range(3):
+                relocated = False
                 # Opening/closing a dialog can reset the menu scroll position.
                 # Never reuse the row retained before reading its quantity.
                 current_menu = self._capture(window)
@@ -2159,18 +2174,27 @@ class BotApp:
                     current_item = next((point for point in current_rows
                                          if abs(point[1] - item[1]) < 1.5), None)
                     if current_item is None and len(current_rows) == 1:
-                        # The last wheel event may still be moving the list.
-                        # A unique wall row with the same quantity is safe to
-                        # use at its freshly observed position.
+                        # The last wheel event may still move the list, and
+                        # OCR can turn x169 into x159. Re-read the sole wall
+                        # row on a second frame before using its new position
+                        # and quantity. Spending is verified separately.
                         fresh_quantity = read_wall_available(current_menu,current_rows[0])
-                        if fresh_quantity == available:
-                            current_item = current_rows[0]
-                            self._trace("REMPARTS", f"Ligne déplacée mais quantité inchangée : {current_item}, x{fresh_quantity}")
+                        if fresh_quantity is not None:
+                            settled_menu = self._capture(window)
+                            settled_rows = find_wall_menu_items(settled_menu)
+                            if (len(settled_rows) == 1 and
+                                    abs(settled_rows[0][1] - current_rows[0][1]) < 1.5 and
+                                    read_wall_available(settled_menu, settled_rows[0]) == fresh_quantity):
+                                current_item = settled_rows[0]
+                                available = fresh_quantity
+                                relocated = True
+                                self._trace("REMPARTS", f"Ligne déplacée et relue deux fois : {current_item}, x{fresh_quantity}")
                 if current_item is None:
                     self._wait(.4)
                     continue
                 item = current_item
-                available = read_wall_available(current_menu, item) or available
+                if not relocated:
+                    available = read_wall_available(current_menu, item) or available
                 self._wall_click(window, item, "rempart")
                 wall_image = self._capture(window)
                 selected_wall = wall_selected(wall_image)
@@ -2388,13 +2412,15 @@ class BotApp:
     def _battle_capture(self, window, allow_unselected_reward=False):
         image = self._capture(window)
         reward_open = battle_reward_open(image)
+        final_reward = reward_open and isinstance(image, Image.Image) and has_screen_text(crop_percent(image, layout_roi("SCREEN_ROIS", "battle_reward")), "victoire")
         if not reward_open:
             self._reward_trace_at = 0
+            self._reward_image_saved = False
         deadline = time.monotonic() + 30
         clicked = False
         chosen_label = None
         while reward_open:
-            if battle_result_return_ready(image):
+            if battle_result_return_ready(image) and not final_reward:
                 break
             if time.monotonic() >= deadline:
                 raise RuntimeError("Récompense de bataille toujours affichée après 30 secondes.")
@@ -2408,6 +2434,13 @@ class BotApp:
                     clicked = True
                     chosen_label = label
                 else:
+                    if final_reward and not getattr(self, "_reward_image_saved", False):
+                        journal = getattr(self, "journal", None)
+                        if journal is not None:
+                            try:
+                                self._reward_image_saved = journal.save_reward_screen(image) is not None
+                            except OSError as exc:
+                                self._trace("RÉCOMPENSE", f"Capture du choix final impossible : {exc}")
                     now = time.monotonic()
                     if getattr(self, "journal", None) is not None and now >= getattr(self, "_reward_trace_at", 0):
                         try:
@@ -2418,7 +2451,7 @@ class BotApp:
                             raw = f"Lecture diagnostique impossible : {exc}"
                         self._trace("RÉCOMPENSE", f"Choix visible sans carte sûre ; texte lu={raw[:300]!r}")
                         self._reward_trace_at = now + 5
-                if choice is None and allow_unselected_reward:
+                if choice is None and allow_unselected_reward and not final_reward:
                     # After the army is deployed, an event offering only
                     # troop cards must not abort the result wait. The outer
                     # battle deadline keeps watching until the result appears.
@@ -2426,7 +2459,8 @@ class BotApp:
             self._wait(.15)
             image = self._capture(window)
             reward_open = battle_reward_open(image)
-        if chosen_label is not None:
+            final_reward = reward_open and isinstance(image, Image.Image) and has_screen_text(crop_percent(image, layout_roi("SCREEN_ROIS", "battle_reward")), "victoire")
+        if chosen_label is not None and not reward_open:
             self.events.put(f"Récompense de l’événement sélectionnée : {chosen_label} ; fermeture du choix confirmée.")
         return image
 
@@ -2500,6 +2534,9 @@ class BotApp:
         self.events.put("Attente de la fin de bataille avant le prochain cycle.")
         while not self.stop_event.is_set() and time.monotonic()<deadline:
             image=self._battle_capture(window, allow_unselected_reward=True)
+            if isinstance(image, Image.Image) and battle_reward_open(image):
+                self._wait(.35)
+                continue
             if village_home_ready(image): return True
             if battle_result_return_ready(image) or has_screen_text(image,"retour au village","victoire","défaite"):
                 self._trace("COMBAT", "Résultat reconnu ; lecture des gains puis retour au village")
