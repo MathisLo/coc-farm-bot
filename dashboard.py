@@ -164,7 +164,7 @@ def build(app):
     check(cycle, 'Enchaîner les attaques', app.chain_attacks)
     check(cycle, 'Améliorations conseillées', app.upgrade_recommended)
     check(cycle, 'Améliorer les remparts', app.upgrade_wall)
-    label(cycle, '1 ouvrier et 1 M de chaque ressource réservés.', color=COLORS['muted'], size=9).pack(anchor='w', pady=(0, 4))
+    label(cycle, 'Au moins 1 ouvrier libre et 1 M de chaque ressource conservés.', color=COLORS['muted'], size=9).pack(anchor='w', pady=(0, 4))
     check(cycle, 'Simulation sans déploiement', app.dry_run)
 
     activity = Panel(content)

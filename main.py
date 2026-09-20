@@ -1040,9 +1040,11 @@ def wall_group_controls(image, single=False):
         if resource is None:
             continue
         price = None
-        for price_roi in (Roi(x-3,y-8.7,x+2.1,y-6.7), Roi(x-2.7,75,x+2.1,77),
-                          Roi(x-3.6,y-9.5,x+2.1,y-6.2), Roi(x-4.9,y-9.5,x+2.1,y-5.9),
-                          Roi(x-5.1,y-9.4,x+2.3,y-6.0)):
+        # Seven-digit prices extend left of the tight crops. Try the full
+        # button label first so 1 200 000 is not accepted as 200 000.
+        for price_roi in (Roi(x-3.6,y-9.5,x+2.1,y-6.2), Roi(x-4.9,y-9.5,x+2.1,y-5.9),
+                          Roi(x-5.1,y-9.4,x+2.3,y-6.0), Roi(x-3,y-8.7,x+2.1,y-6.7),
+                          Roi(x-2.7,75,x+2.1,77)):
             price_crop = crop_percent(image,price_roi)
             price = read_wall_price(price_crop)
             if price is None:
@@ -1668,8 +1670,8 @@ class BotApp:
         if not independent and self.settings.upgrade_recommended:
             from upgrades import stable_builders
             free = stable_builders(self, window)
-            if free != 1:
-                self.events.put(f'Priorité aux bâtiments : ouvriers libres={free}. Ressources conservées ; remparts reportés jusqu’à un seul ouvrier libre.')
+            if free is None or free < 1:
+                self.events.put(f'Ouvriers libres={free} : remparts reportés faute d’ouvrier confirmé.')
                 return 0
         upgraded = 0
         while not self.stop_event.is_set():
@@ -1746,16 +1748,21 @@ class BotApp:
             if count == 0:
                 self.events.put(f"Aucun rempart payable en conservant 1 M : or {gold:,}, élixir {elixir:,}.")
                 return upgraded
-            for selected_count in range(1,count):
+            selected_count = 1
+            while selected_count < count:
                 # Each addition can remove +10 and shift the whole row.
-                # Re-read the buttons and the actual price before another click.
+                # Re-read the buttons and actual price; the selected quantity
+                # can jump when the game groups adjacent wall pieces.
                 self._wall_click(window, controls['add'], "ajouter un rempart identifié")
                 controls = self.stable_wall_group(window, resource, single=single)
                 payment = controls['payments'].get(resource) if controls else None
-                if payment is None or payment[1] != (selected_count+1)*unit_cost:
-                    self.events.put("Ajout de rempart non confirmé : aucun autre clic envoyé.")
+                observed_total = payment[1] if payment else None
+                observed_count, remainder = divmod(observed_total, unit_cost) if observed_total else (0, 0)
+                if remainder or not selected_count < observed_count <= count:
+                    self.events.put(f"Ajout de rempart non confirmé : prix lu={observed_total}, prix unitaire={unit_cost}, quantité précédente={selected_count}, maximum payable={count}. Aucun autre clic envoyé.")
                     return upgraded
-            total = count*unit_cost
+                selected_count = observed_count
+            total = selected_count*unit_cost
             fresh = self.stable_reserves(window)
             if fresh is None or min(fresh) < WALL_RESERVE or fresh[0 if resource=='or' else 1]-total < WALL_RESERVE:
                 self.events.put("Réserves insuffisantes ou incertaines : aucune dépense envoyée.")

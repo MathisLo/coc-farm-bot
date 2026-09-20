@@ -87,7 +87,7 @@ Les gains sont lus sur le résultat final du combat, avec le bonus de ligue. Les
 Les totaux sont sauvegardés dans `%USERPROFILE%\CoCFarmBot\farm-stats.json` et restaurés au lancement. Même en mode attaque unique, le bot attend le résultat pour le comptabiliser. Si la lecture reste incertaine, le résultat est conservé dans `unread-results` sans ajouter de gains aux totaux, puis le cycle reprend. Un résultat déjà enregistré n'est pas recompté. Un combat quitté manuellement avant sa lecture ne peut pas être reconstitué.
 
 
-Les améliorations conseillées conservent au moins un ouvrier libre et un million d’or et d’élixir. Le bot parcourt toute la liste, recommandations puis autres améliorations. Il conserve ses ressources pour les bâtiments tant que plusieurs ouvriers restent libres. Les remparts automatiques attendent qu’il ne reste qu’un ouvrier libre. L’HDV attend que tous les autres travaux, remparts compris, soient confirmés terminés et qu’aucun ouvrier ne travaille encore.
+Les améliorations conseillées conservent au moins un ouvrier libre et un million d’or et d’élixir. Le bot parcourt toute la liste, recommandations puis autres améliorations. Les remparts automatiques utilisent ensuite les ressources disponibles au-delà de cette réserve dès qu’au moins un ouvrier libre est confirmé, même si plusieurs ouvriers sont libres. L’HDV attend que tous les autres travaux, remparts compris, soient confirmés terminés et qu’aucun ouvrier ne travaille encore.
 
 
 ## Validation des corrections du 19 septembre 2026

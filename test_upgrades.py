@@ -49,6 +49,15 @@ class UpgradeTests(unittest.TestCase):
         with Image.open(Path(__file__).parent/'testdata/wall_wrong_army_camp.png') as image:
             self.assertIsNone(main.wall_group_controls(image))
 
+    def test_seven_digit_wall_price_keeps_its_leading_digit(self):
+        with Image.open(Path(__file__).parent/'testdata/wall_price_1200000.png') as strip:
+            image=Image.new('RGB',(1920,1080))
+            image.paste(strip,(400,720))
+            controls=main.wall_group_controls(image)
+            self.assertIsNotNone(controls)
+            self.assertEqual(controls['payments']['or'][1],1200000)
+            self.assertEqual(controls['payments']['élixir'][1],1200000)
+
     def test_wrong_screen_after_one_add_prevents_further_wall_clicks(self):
         app=app_without_gui();app._capture=Mock(return_value=object())
         app._wall_click=Mock();app._wait=Mock()
@@ -103,8 +112,8 @@ class UpgradeTests(unittest.TestCase):
             self.assertTrue(all(not upgrades.is_town_hall(item[0]) for item in items))
             self.assertTrue(any('ressort' in upgrades.normal(item[0]) for item in items))
 
-    def test_buildings_reserve_resources_before_automatic_walls(self):
-        for free in (None,0,2,3,5):
+    def test_automatic_walls_require_a_confirmed_free_builder(self):
+        for free in (None,0):
             app=app_without_gui()
             app.stable_reserves=Mock()
             app._wall_click=Mock()
@@ -113,12 +122,26 @@ class UpgradeTests(unittest.TestCase):
             app.stable_reserves.assert_not_called()
             app._wall_click.assert_not_called()
 
-    def test_last_free_builder_can_work_on_walls(self):
+    def test_automatic_walls_are_considered_with_any_free_builder(self):
+        for free in (1,2,3,5):
+            app=app_without_gui()
+            app.stable_reserves=Mock(return_value=(1000000,1000000))
+            with patch.object(upgrades,'stable_builders',return_value=free):
+                app.upgrade_walls_to_reserve(object())
+            app.stable_reserves.assert_called_once()
+
+    def test_grouped_wall_quantity_jump_uses_verified_price(self):
         app=app_without_gui()
-        app.stable_reserves=Mock(return_value=(1000000,1000000))
-        with patch.object(upgrades,'stable_builders',return_value=1):
-            app.upgrade_walls_to_reserve(object())
-        app.stable_reserves.assert_called_once()
+        app._capture=Mock(return_value=object())
+        app._wall_click=Mock()
+        app._wait=Mock()
+        app.stable_reserves=Mock(side_effect=[(6000000,6000000),(6000000,6000000),(3000000,6000000),(1000000,1000000)])
+        initial={'add':(45.9,80),'remove':(33.6,80),'payments':{'or':((50,80),500000),'élixir':((58.3,80),500000)}}
+        after_add={'add':(41.8,80),'remove':(33.6,80),'payments':{'or':((50,80),3000000)}}
+        app.stable_wall_group=Mock(side_effect=[initial,after_add,after_add])
+        with patch.object(main,'builders_menu_open',return_value=True),patch.object(main,'find_wall_menu_item',return_value=(44,54)),patch.object(main,'read_wall_available',return_value=6),patch.object(main,'wall_selected',return_value=True),patch.object(main,'find_wall_more_button',return_value=(46,85)),patch.object(main,'wall_batch_confirmation_matches',return_value=True):
+            self.assertEqual(app.upgrade_walls_to_reserve('window',independent=True),6)
+        self.assertEqual([c.args[1] for c in app._wall_click.call_args_list],[(44,54),(46,85),(45.9,80),(50,80),main.layout_values('WALL_MULTI_CONFIRM_BUTTON')])
 
     def test_independent_attack_does_not_run_other_actions_or_change_settings(self):
         app=app_without_gui()
