@@ -1366,7 +1366,7 @@ def battle_reward_choice(image: Image.Image):
     centers = (30., 50., 70.)
     # Final victory cards sit lower than the choices shown during combat.
     layout = None
-    for edge_y, label_top, label_bottom, click_y in ((30.5, 52, 66, 53.), (33.4, 63, 74, 60.)):
+    for edge_y, label_top, label_bottom, click_y in ((30.5, 52, 66, 53.), (32.7, 63, 74, 60.), (33.4, 63, 74, 60.)):
         ready = True
         for x in centers:
             edge = crop_percent(image, Roi(x-6, edge_y, x+6, edge_y+.5))
