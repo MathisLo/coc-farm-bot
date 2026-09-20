@@ -934,30 +934,33 @@ def wall_menu_row_matches(image,y):
 
 
 def find_wall_menu_item(image: Image.Image) -> tuple[float, float] | None:
-    if not builders_menu_open(image):
-        return None
+    rows = find_wall_menu_items(image)
+    return rows[0] if rows else None
+
+
+def find_wall_menu_items(image: Image.Image) -> list[tuple[float, float]]:
+    """Return each visible wall row after checking its menu tag and caption."""
     menu_roi = layout_roi("SCREEN_ROIS", "wall_menu")
     menu = crop_percent(image, menu_roi)
+    candidates = []
     for scale in (1,2):
         for word, x, y in read_word_centers(menu.resize((menu.width*scale,menu.height*scale))):
             if word.casefold().startswith(("rempar", "rempamt")) and x < 65:
                 point=(menu_roi.x1 + x * (menu_roi.x2 - menu_roi.x1) / 100,
                        menu_roi.y1 + y * (menu_roi.y2 - menu_roi.y1) / 100)
                 if wall_menu_row_matches(image,point[1]):
-                    return point
-    # A selected wall shifts the camera and the full-screen OCR can lose the
-    # row even though a narrow crop still reads "Rempart x…" clearly.
-    exact_rows = []
-    partial_rows = []
-    for y in range(math.ceil(menu_roi.y1 + 3), math.floor(menu_roi.y2 - 3) + 1, 2):
-        row = read_text(crop_percent(image, Roi(menu_roi.x1, y - 3, menu_roi.x2, y + 3)), scale=2).casefold()
-        if "rempar" in row:
-            if re.search(r"x\s*\d{1,3}\b", row):
-                exact_rows.append(y)
-            else:
-                partial_rows.append(y)
-    rows = [y for y in exact_rows if wall_menu_row_matches(image,y)]
-    return ((menu_roi.x1 + menu_roi.x2) / 2, float(rows[len(rows) // 2])) if rows else None
+                    candidates.append(point)
+    # Full-list OCR can miss a row even when its narrow caption is readable.
+    for y in range(math.ceil(menu_roi.y1 + 5), math.floor(menu_roi.y2 - 2)):
+        if any(abs(y - point[1]) < 1.5 for point in candidates):
+            continue
+        if wall_menu_row_matches(image, y):
+            candidates.append((44.0, float(y)))
+    rows = []
+    for point in sorted(candidates, key=lambda point: point[1]):
+        if not rows or point[1] - rows[-1][1] >= 1.5:
+            rows.append(point)
+    return rows
 
 
 def builders_menu_open(image: Image.Image) -> bool:
@@ -986,8 +989,9 @@ def builders_menu_open(image: Image.Image) -> bool:
 def read_wall_available(image: Image.Image, item: tuple[float, float]) -> int | None:
     x, y = item
     values = []
-    for offset in (0, 2, -2):
-        roi = Roi(max(0, x - 4), max(0, y + offset - 2.5), min(100, x + 9), min(100, y + offset + 2.5))
+    # Keep each read inside one row: adjacent wall entries can have different counts.
+    for height in (1.4, 1.8):
+        roi = Roi(max(0, x - 4), max(0, y - height), min(100, x + 9), min(100, y + height))
         raw = read_text(crop_percent(image, roi), scale=2).casefold().translate(str.maketrans({"l": "1", "i": "1", "g": "6", "s": "5", "o": "0", "b": "8"}))
         match = re.search(r"x\s*(\d{1,3})", raw)
         if match: values.append(int(match.group(1)))
@@ -1875,6 +1879,8 @@ class BotApp:
                 self.events.put(f'Ouvriers libres={free} : remparts reportés faute d’ouvrier confirmé.')
                 return 0
         upgraded = 0
+        rejected_rows = set()
+        rejected_attempts = 0
         while not self.stop_event.is_set():
             balances = self.stable_reserves(window)
             if balances is None:
@@ -1885,35 +1891,48 @@ class BotApp:
                 self.events.put(f"Réserves préservées : or {gold:,}, élixir {elixir:,}.")
                 return upgraded
             menu = self._capture(window)
-            if not builders_menu_open(menu):
+            if not builders_menu_open(menu) and find_wall_menu_item(menu) is None:
                 self._wall_click(window, layout_values("BUILDERS_BUTTON"), "ouvriers")
             available = None
             for _ in range(16):
                 menu = self._capture(window)
-                item = find_wall_menu_item(menu)
+                if rejected_rows:
+                    item = next((point for point in find_wall_menu_items(menu)
+                                 if (round(point[1]), read_wall_available(menu, point) or 1) not in rejected_rows), None)
+                else:
+                    item = find_wall_menu_item(menu)
                 available = read_wall_available(menu, item) if item else None
                 if item and available is None:
                     available = 1  # Select and verify only one wall when xN is unreadable.
                 if available is not None: break
-                if builders_menu_open(menu):
-                    with self.action_lock:
-                        self._check_stopped()
-                        self._trace("DÉFILEMENT", "Recherche des remparts : descendre le menu")
-                        if not WindowDriver.scroll_menu(window):
-                            raise RuntimeError('Défilement des remparts refusé.')
+                # The border and heading can disappear during a scroll. A
+                # bounded wheel action is safe even when menu OCR is uncertain.
+                with self.action_lock:
+                    self._check_stopped()
+                    self._trace("DÉFILEMENT", "Recherche des remparts : descendre le menu")
+                    if not WindowDriver.scroll_menu(window):
+                        raise RuntimeError('Défilement des remparts refusé.')
                 if self._wait(.4): break
             if self.stop_event.is_set() or item is None or available is None:
-                self.events.put("Liste des remparts indisponible ou illisible : arrêt prudent.")
+                if rejected_rows:
+                    self.events.put(f"Aucun autre rempart payable en conservant 1 M : or {gold:,}, élixir {elixir:,}.")
+                else:
+                    self.events.put("Liste des remparts indisponible ou illisible : arrêt prudent.")
                 return upgraded
             selected = False
             for _ in range(3):
                 # Opening/closing a dialog can reset the menu scroll position.
                 # Never reuse the row retained before reading its quantity.
-                current_item = find_wall_menu_item(self._capture(window))
+                current_menu = self._capture(window)
+                current_item = find_wall_menu_item(current_menu)
+                if current_item is not None and abs(current_item[1] - item[1]) >= 1.5:
+                    current_item = next((point for point in find_wall_menu_items(current_menu)
+                                         if abs(point[1] - item[1]) < 1.5), None)
                 if current_item is None:
                     self._wait(.4)
                     continue
                 item = current_item
+                available = read_wall_available(current_menu, item) or available
                 self._wall_click(window, item, "rempart")
                 wall_image = self._capture(window)
                 if wall_selected(wall_image) or (available == 1 and wall_group_controls(wall_image,single=True) is not None):
@@ -1951,8 +1970,13 @@ class BotApp:
                        for resource,(_,price) in payments.items()]
             count, resource, unit_cost = max(options, key=lambda option:(option[0],gold if option[1]=='or' else elixir))
             if count == 0:
-                self.events.put(f"Aucun rempart payable en conservant 1 M : or {gold:,}, élixir {elixir:,}.")
-                return upgraded
+                rejected_rows.add((round(item[1]), available))
+                rejected_attempts += 1
+                if rejected_attempts >= 8:
+                    self.events.put(f"Aucun rempart payable en conservant 1 M : or {gold:,}, élixir {elixir:,}.")
+                    return upgraded
+                self.events.put("Ce groupe de remparts dépasse les réserves ; recherche d'un autre groupe.")
+                continue
             selected_count = 1
             while selected_count < count:
                 # Each addition can remove +10 and shift the whole row.
@@ -2012,6 +2036,8 @@ class BotApp:
             if after[0] < WALL_RESERVE or after[1] < WALL_RESERVE:
                 raise RuntimeError("Une réserve est passée sous le plancher : cycle arrêté avant l’attaque.")
             upgraded += count
+            rejected_rows.clear()
+            rejected_attempts = 0
             self.events.put(f"{count} rempart(s) amélioré(s) avec {total:,} {resource} ({upgraded} au total).")
             if (gold_cost is not None and elixir_cost is not None and available > count and
                     after[0] - gold_cost < WALL_RESERVE and after[1] - elixir_cost < WALL_RESERVE):

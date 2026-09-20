@@ -14,6 +14,62 @@ class UpgradeTests(unittest.TestCase):
             self.assertFalse(main.wall_menu_row_matches(im,61))
             self.assertIsNone(main.find_wall_menu_item(im))
 
+    def test_wall_rows_at_different_positions_keep_separate_quantities(self):
+        with Image.open(Path(__file__).parent/'testdata/builders_selected_menu.png') as base, \
+                Image.open(Path(__file__).parent/'testdata/wall_last_menu.png') as last:
+            for position in (32, 44, 53):
+                with self.subTest(position=position):
+                    image = base.copy()
+                    box = (round(image.width*.38), round(image.height*.585),
+                           round(image.width*.54), round(image.height*.627))
+                    image.paste(last.crop(box), (box[0], round(image.height*(position-2.3)/100)))
+                    rows = main.find_wall_menu_items(image)
+                    self.assertEqual(len(rows), 2)
+                    self.assertAlmostEqual(rows[0][1], position, delta=1)
+                    self.assertEqual([main.read_wall_available(image, row) for row in rows], [1, 74])
+
+    def test_wall_search_keeps_scrolling_when_menu_border_is_unreadable(self):
+        app = app_without_gui()
+        app._capture = Mock(return_value=object())
+        app._wall_click = Mock()
+        app._wait = Mock(return_value=False)
+        app.stable_reserves = Mock(return_value=(2_000_000, 2_000_000))
+        with patch.object(main, 'builders_menu_open', return_value=False), \
+                patch.object(main, 'find_wall_menu_item', return_value=None), \
+                patch.object(main.WindowDriver, 'scroll_menu', return_value=True) as scroll:
+            self.assertEqual(app.upgrade_walls_to_reserve('window', independent=True), 0)
+        self.assertEqual(scroll.call_count, 16)
+        app._wall_click.assert_called_once()
+
+    def test_unaffordable_wall_row_falls_through_to_second_row(self):
+        with Image.open(Path(__file__).parent/'testdata/builders_selected_menu.png') as base, \
+                Image.open(Path(__file__).parent/'testdata/wall_last_menu.png') as last:
+            image = base.copy()
+            box = (round(image.width*.38), round(image.height*.585),
+                   round(image.width*.54), round(image.height*.627))
+            image.paste(last.crop(box), (box[0], round(image.height*.297)))
+        app = app_without_gui()
+        app._capture = Mock(return_value=image)
+        app._wall_click = Mock()
+        app._wait = Mock(return_value=False)
+        app.stable_reserves = Mock(side_effect=[(1_500_000, 1_500_000)]*3 +
+                                    [(1_000_000, 1_500_000), (1_000_000, 1_000_000)])
+        expensive = {'add': None, 'payments': {'or': ((50, 80), 600_000),
+                                               'élixir': ((58, 80), 600_000)}}
+        affordable = {'add': (42, 80), 'payments': {'or': ((50, 80), 500_000),
+                                                  'élixir': ((58, 80), 500_000)}}
+        app.stable_wall_group = Mock(side_effect=[expensive, affordable, affordable])
+        with patch.object(main, 'wall_selected', return_value=True), \
+                patch.object(main, 'find_wall_more_button', return_value=(46, 85)), \
+                patch.object(main, 'wall_multi_mode', return_value=True), \
+                patch.object(main, 'wall_batch_confirmation_matches', return_value=True):
+            self.assertEqual(app.upgrade_walls_to_reserve('window', independent=True), 1)
+        wall_clicks = [call.args[1] for call in app._wall_click.call_args_list
+                       if call.args[2] == 'rempart']
+        self.assertEqual(len(wall_clicks), 2)
+        self.assertAlmostEqual(wall_clicks[0][1], 32, delta=1)
+        self.assertAlmostEqual(wall_clicks[1][1], 61, delta=1)
+
     def test_last_wall_has_an_individual_payment_path(self):
         with Image.open(Path(__file__).parent/'testdata/wall_last_menu.png') as im:
             self.assertIsNotNone(main.find_wall_menu_item(im))
@@ -147,7 +203,7 @@ class UpgradeTests(unittest.TestCase):
         app.stable_reserves=Mock(return_value=(1100000,1100000))
         controls={'add':(45.9,80),'remove':None,'payments':{'or':((50,80),600000),'élixir':((58.3,80),600000)}}
         app.stable_wall_group=Mock(return_value=controls)
-        with patch.object(main,'builders_menu_open',return_value=True),patch.object(main,'find_wall_menu_item',return_value=(44,54)),patch.object(main,'read_wall_available',return_value=265),patch.object(main,'wall_selected',return_value=True),patch.object(main,'find_wall_more_button',return_value=(46,85)),patch.object(main,'wall_multi_mode',side_effect=[False,True]):
+        with patch.object(main,'builders_menu_open',return_value=True),patch.object(main,'find_wall_menu_item',return_value=(44,54)),patch.object(main,'find_wall_menu_items',return_value=[]),patch.object(main,'read_wall_available',return_value=265),patch.object(main,'wall_selected',return_value=True),patch.object(main,'find_wall_more_button',return_value=(46,85)),patch.object(main,'wall_multi_mode',side_effect=[False,True]),patch.object(main.WindowDriver,'scroll_menu',return_value=True):
             self.assertEqual(app.upgrade_walls_to_reserve('window',independent=True),0)
         labels=[c.args[2] for c in app._wall_click.call_args_list]
         self.assertEqual(labels.count('Améliorer plus'),2)
