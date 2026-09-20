@@ -226,7 +226,7 @@ ELECTRODRAGON_PERIMETER_POINTS = [
     (18.0 + 20.0*i/15, 40.0 - 27.0*i/15) for i in range(16)
 ]
 TROOP_COUNT_ROIS = {
-    "Électro-dragon": Roi(23.7, 85.19, 26.3, 89.35),
+    "Électro-dragon": Roi(23.7, 85.19, 28.0, 89.35),
     "Dragon": Roi(17.45, 85.19, 20.05, 89.35),
 }
 TROOP_ICON_ROIS = {
@@ -478,6 +478,17 @@ def read_troop_count(image: Image.Image, label: str) -> int | None:
         match = re.fullmatch(r"[x×]\s*(\d{1,2})", raw.strip())
         if match:
             return int(match.group(1))
+    if label == "Électro-dragon":
+        # The selected card can shift the counter to the right. Its border
+        # obscures x2 in the wide crop, while a crop just inside that border
+        # exposes both glyphs to Windows OCR.
+        inner_roi = Roi(max(0, roi.x1 - .7), max(0, roi.y1 - .2), roi.x2 - .5, roi.y2)
+        if inner_roi.valid():
+            inner = crop_percent(image, inner_roi)
+            raw = read_text(white_text_mask(inner), scale=5).casefold()
+            match = re.fullmatch(r"[x×]\s*(\d{1,2})", raw.strip())
+            if match:
+                return int(match.group(1))
     for shift in (0, .5, 1, -.5, -1):
         for top in (roi.y1, roi.y1 - .46):
             candidate = Roi(max(0, roi.x1 + shift), max(0, top), min(100, roi.x2 + shift), min(100, roi.y2))
@@ -608,6 +619,30 @@ def hero_icon_saturation(image: Image.Image, index: int, shift: float = 0) -> fl
     return ImageStat.Stat(icon).mean[0]
 
 
+def hero_placeholder_slot(image: Image.Image, index: int, shift: float = 0) -> bool:
+    """Recognize the repeated pale dashes at an empty hero-card border."""
+    roi = hero_region("HERO_ICON_ROIS", index, shift)
+    x = min(image.width - 1, round(image.width * (roi.x1 + .5) / 100))
+    top = round(image.height * roi.y1 / 100)
+    bottom = round(image.height * (roi.y2 - 1.1) / 100)
+    pixels = image.convert("RGB").load()
+    runs = []
+    length = 0
+    for y in range(top, bottom):
+        color = pixels[x, y]
+        dash = min(color) > 120 and max(color) - min(color) < 35
+        if dash:
+            length += 1
+        elif length:
+            runs.append(length)
+            length = 0
+    if length:
+        runs.append(length)
+    shortest = max(3, round(image.height * 5 / 1080))
+    longest = max(shortest, round(image.height * 12 / 1080))
+    return sum(shortest <= run <= longest for run in runs) >= 5
+
+
 def hero_region(group, index, shift):
     overrides = getattr(getattr(_operation, "settings", None), "layout_overrides", {})
     roi = layout_roi(group, index)
@@ -632,6 +667,11 @@ def has_screen_text(image: Image.Image, *needles: str) -> bool:
 def has_all_screen_text(image: Image.Image, *needles: str) -> bool:
     text = normalized_screen_text(image)
     return all((token := re.sub(r"[^a-z0-9]", "", unicodedata.normalize("NFKD", needle.casefold()).encode("ascii", "ignore").decode("ascii"))) in text or token[:max(4, len(token)-3)] in text for needle in needles)
+
+
+def battle_result_return_ready(image: Image.Image) -> bool:
+    button = crop_percent(image, Roi(38, 80, 62, 95))
+    return any("rentrer" in read_text(button, scale=scale).casefold() for scale in (2, 3))
 
 
 def village_home_ready(image: Image.Image) -> bool:
@@ -1070,6 +1110,14 @@ def wall_group_controls(image, single=False, expected_price=None, expected_resou
             if resource in payments:
                 return None
             payments[resource] = ((x,y-3),price)
+    if expected_price is not None and expected_resource in payments:
+        point, observed = payments[expected_resource]
+        peer_confirms = any(resource != expected_resource and value[1] == expected_price
+                            for resource, value in payments.items())
+        if peer_confirms and str(observed) == f"{expected_price}1":
+            # A card-edge pixel can be OCR'd as a final 1. The other payment
+            # card and the prior confirmed unit cost must agree first.
+            payments[expected_resource] = (point, expected_price)
     if payments:
         if single:
             return {'add':None, 'remove':None, 'payments':payments}
@@ -1281,7 +1329,13 @@ def read_battle_earnings(image):
         else:
             return None
     bonus_rois = (Roi(72,49.3,79,52.5), Roi(72,54,79,58), Roi(72,59,79,63))
-    bonus = [read_result_amount(crop_percent(image, roi)) for roi in bonus_rois]
+    # The leading + is sometimes read as 4, turning +30 000 into 430 000.
+    # A tighter crop starts inside that sign and can verify the actual digits.
+    bonus_inner_rois = (Roi(73,49.4,79,52), Roi(73,54,79,58), Roi(73,59,79,63))
+    bonus = []
+    for outer, inner in zip(bonus_rois, bonus_inner_rois):
+        inner_value = read_result_amount(crop_percent(image, inner), main_result=True)
+        bonus.append(inner_value if inner_value is not None else read_result_amount(crop_percent(image, outer)))
     if all(value is None for value in bonus) and not has_screen_text(crop_percent(image, Roi(67,42,83,64)), "bonus"):
         bonus = [0, 0, 0]
     if None in bonus:
@@ -1934,14 +1988,16 @@ class BotApp:
             return None
         return None
 
-    def _battle_capture(self, window):
+    def _battle_capture(self, window, allow_unselected_reward=False):
         image = self._capture(window)
-        deadline = time.monotonic() + 12
+        deadline = time.monotonic() + 30
         clicked = False
         chosen_label = None
         while battle_reward_open(image):
+            if battle_result_return_ready(image):
+                break
             if time.monotonic() >= deadline:
-                raise RuntimeError("Récompense de bataille toujours affichée après 12 secondes.")
+                raise RuntimeError("Récompense de bataille toujours affichée après 30 secondes.")
             if not clicked:
                 choice = battle_reward_choice(image)
                 if choice is not None:
@@ -1950,6 +2006,11 @@ class BotApp:
                         raise RuntimeError("Sélection de la récompense refusée.")
                     clicked = True
                     chosen_label = label
+                elif allow_unselected_reward:
+                    # After the army is deployed, an event offering only
+                    # troop cards must not abort the result wait. The outer
+                    # battle deadline keeps watching until the result appears.
+                    return image
             self._wait(.15)
             image = self._capture(window)
         if chosen_label is not None:
@@ -1971,6 +2032,9 @@ class BotApp:
                 if hero_health_visible(before, index, shift):
                     heroes += 1
                     self.events.put(f"Héros {index + 1} déjà posé : barre de vie confirmée.")
+                    continue
+                if hero_placeholder_slot(before, index, shift):
+                    self.events.put(f"Héros {index + 1} absent de la barre d’armée ; case vide ignorée.")
                     continue
                 baseline = hero_icon_saturation(before, index, shift)
                 if baseline < 55:
@@ -2019,9 +2083,9 @@ class BotApp:
         deadline=time.monotonic()+240
         self.events.put("Attente de la fin de bataille avant le prochain cycle.")
         while not self.stop_event.is_set() and time.monotonic()<deadline:
-            image=self._battle_capture(window)
+            image=self._battle_capture(window, allow_unselected_reward=True)
             if village_home_ready(image): return True
-            if has_screen_text(image,"retour au village","victoire","défaite"):
+            if battle_result_return_ready(image) or has_screen_text(image,"retour au village","victoire","défaite"):
                 self.record_battle_earnings(window)
                 self._click(window, *layout_values("RETURN_HOME_BUTTON")); self._wait(4)
             else: self._wait(.35)

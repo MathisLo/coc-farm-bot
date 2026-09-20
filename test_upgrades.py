@@ -95,6 +95,14 @@ class UpgradeTests(unittest.TestCase):
             self.assertIsNotNone(controls)
             self.assertEqual(controls['payments']['élixir'][1],6000000)
 
+    def test_expected_price_removes_ocr_digit_after_elixir_amount(self):
+        with Image.open(Path(__file__).parent/'testdata/wall_elixir_trailing_one.png') as strip:
+            image=Image.new('RGB',(1920,1080))
+            image.paste(strip,(400,720))
+            self.assertEqual(main.wall_group_controls(image)['payments']['élixir'][1],18000001)
+            controls=main.wall_group_controls(image,expected_price=1800000,expected_resource='élixir')
+            self.assertEqual(controls['payments']['élixir'][1],1800000)
+
     def test_wrong_screen_after_one_add_prevents_further_wall_clicks(self):
         app=app_without_gui();app._capture=Mock(return_value=object())
         app._wall_click=Mock();app._wait=Mock()
@@ -166,7 +174,7 @@ class UpgradeTests(unittest.TestCase):
         app._wait = Mock()
         app._battle_capture = Mock(return_value=object())
         app._click = Mock(return_value=True)
-        with patch.object(app, 'deploy_unit', return_value=1) as deploy, patch.object(main, 'hero_layout_shift', return_value=0), patch.object(main, 'hero_icon_saturation', return_value=100), patch.object(main, 'hero_health_visible', side_effect=[False,False,True]*3):
+        with patch.object(app, 'deploy_unit', return_value=1) as deploy, patch.object(main, 'hero_layout_shift', return_value=0), patch.object(main, 'hero_icon_saturation', return_value=100), patch.object(main, 'hero_placeholder_slot', return_value=False), patch.object(main, 'hero_health_visible', side_effect=[False,False,True]*3):
             app.deploy_attack_composition('window')
         line = deploy.call_args_list[0].args[3]
         self.assertEqual(line, deploy.call_args_list[1].args[3])

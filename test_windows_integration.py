@@ -24,6 +24,12 @@ class WindowsIntegrationTests(unittest.TestCase):
         self.assertTrue(main.hero_health_visible(after, 1, -6.25))
         self.assertFalse(main.hero_health_visible(after, 2, -6.25))
 
+    def test_empty_hero_slot_is_not_a_coloured_card(self):
+        image = self.fixture("hero_empty_slot.png", (0, 880))
+        self.assertGreater(main.hero_icon_saturation(image, 2, -6.25), 55)
+        self.assertEqual([main.hero_placeholder_slot(image, i, -6.25) for i in range(3)],
+                         [False, False, True])
+
     def test_event_prefers_gold_or_elixir_over_bonus_troops(self):
         for name, token in (("event_gold.png", "OR"), ("event_elixir.png", "lixi")):
             image = self.fixture(name, (400, 120))
@@ -56,6 +62,19 @@ class WindowsIntegrationTests(unittest.TestCase):
         # Removing the numeral must not turn a standalone x into a count of 1.
         image.paste((0, 0, 0), (505, 910, 532, 956))
         self.assertFalse(main.counter_is_one(main.crop_percent(image, main.Roi(23, 84.5, 27.8, 90))))
+
+    def test_selected_electro_count_does_not_clip_seven(self):
+        image = self.fixture("edrag_selected_x7.png", (250, 900))
+        self.assertEqual(main.read_troop_count(image, "Électro-dragon"), 7)
+
+    def test_selected_electro_count_two_is_read_inside_card_border(self):
+        image = self.fixture("edrag_selected_x2.png", (250, 900))
+        self.assertEqual(main.read_troop_count(image, "Électro-dragon"), 2)
+
+    def test_defeat_result_return_button_is_read(self):
+        image = self.fixture("battle_result_rentrer.png", (700, 780))
+        self.assertTrue(main.battle_result_return_ready(image))
+        self.assertFalse(main.battle_result_return_ready(Image.new("RGB", (1920, 1080))))
 
     def test_wall_ring_moves_more_button_and_price_regions(self):
         image = self.fixture("wall_ring_actions.png", (0, 720))

@@ -60,6 +60,7 @@ class CancellationRegressions(unittest.TestCase):
         with patch.object(app, "deploy_unit", return_value=0), \
              patch.object(main, "hero_layout_shift", return_value=0), \
              patch.object(main, "hero_health_visible", return_value=False), \
+             patch.object(main, "hero_placeholder_slot", return_value=False), \
              patch.object(main, "hero_icon_saturation", side_effect=[100, 0, 0]):
             with self.assertRaisesRegex(RuntimeError, "non confirmée"):
                 app.deploy_attack_composition(object())
@@ -70,6 +71,20 @@ class CancellationRegressions(unittest.TestCase):
         for i in range(len(perimeter)):
             self.assertEqual(clicks[i * 2].args[1:], slot)
         self.assertFalse(any("confirmé à" in str(e) for e in app.events.queue))
+
+    def test_empty_hero_slot_is_skipped_after_available_heroes(self):
+        app = app_without_gui()
+        image = Image.new("RGB", (1920, 1080))
+        with Image.open(Path(__file__).parent / "testdata" / "hero_empty_slot.png") as strip:
+            image.paste(strip, (0, 880))
+        app._battle_capture = Mock(return_value=image)
+        app._click = Mock(return_value=True)
+        with patch.object(app, "deploy_unit", return_value=0), \
+             patch.object(main, "hero_layout_shift", return_value=-6.25), \
+             patch.object(main, "hero_health_visible", side_effect=[True, True, False]):
+            app.deploy_attack_composition(object())
+        app._click.assert_not_called()
+        self.assertTrue(any("case vide ignorée" in event for event in app.events.queue))
 
     def test_rejected_deployment_point_is_not_retried_for_next_troop(self):
         app = app_without_gui()
@@ -89,6 +104,7 @@ class CancellationRegressions(unittest.TestCase):
         app._wait = Mock()
         app._click = Mock()
         with patch.object(main, "battle_reward_open", side_effect=[True, False]), \
+             patch.object(main, "battle_result_return_ready", return_value=False), \
              patch.object(main, "battle_reward_choice", return_value=None):
             self.assertIs(app._battle_capture(object()), final)
         app._wait.assert_called_once_with(.15)
@@ -99,6 +115,7 @@ class CancellationRegressions(unittest.TestCase):
         app._capture = Mock(return_value=object())
         app._wait = Mock(side_effect=main.OperationCancelled)
         with patch.object(main, "battle_reward_open", return_value=True), \
+             patch.object(main, "battle_result_return_ready", return_value=False), \
              patch.object(main, "battle_reward_choice", return_value=None):
             with self.assertRaises(main.OperationCancelled):
                 app._battle_capture(object())
@@ -152,6 +169,7 @@ class CancellationRegressions(unittest.TestCase):
              patch.object(main, "battle_reward_open", return_value=False), \
              patch.object(main, "hero_layout_shift", return_value=0), \
              patch.object(main, "hero_health_visible", return_value=False), \
+             patch.object(main, "hero_placeholder_slot", return_value=False), \
              patch.object(main, "hero_icon_saturation", return_value=100):
             with self.assertRaises(main.OperationCancelled):
                 app.deploy_attack_composition(object())
@@ -301,11 +319,54 @@ class DeploymentRegressions(unittest.TestCase):
         app._wait = Mock()
         app._click = Mock(return_value=True)
         with patch.object(main, "battle_reward_open", side_effect=[True, True, False]), \
+             patch.object(main, "battle_result_return_ready", return_value=False), \
              patch.object(main, "battle_reward_choice", return_value=((70, 53), "Or")) as choose:
             app._battle_capture(object())
         self.assertEqual(app._click.call_count, 1)
         self.assertEqual(choose.call_count, 1)
         self.assertTrue(any("fermeture du choix confirmée" in m for m in app.events.queue))
+
+    def test_result_screen_ends_reward_wait_without_another_click(self):
+        app = app_without_gui()
+        image = Image.new("RGB", (1920, 1080))
+        with Image.open(Path(__file__).parent / "testdata" / "battle_result_rentrer.png") as strip:
+            image.paste(strip, (700, 780))
+        app._capture = Mock(return_value=image)
+        app._click = Mock()
+        with patch.object(main, "battle_reward_open", return_value=True), \
+             patch.object(main, "battle_reward_choice") as choice:
+            self.assertIs(app._battle_capture(object()), image)
+        choice.assert_not_called()
+        app._click.assert_not_called()
+
+    def test_unselectable_reward_can_wait_for_result_after_deployment(self):
+        app = app_without_gui()
+        frame = object()
+        app._capture = Mock(return_value=frame)
+        app._click = Mock()
+        app._wait = Mock()
+        with patch.object(main, "battle_reward_open", return_value=True), \
+             patch.object(main, "battle_result_return_ready", return_value=False), \
+             patch.object(main, "battle_reward_choice", return_value=None):
+            self.assertIs(app._battle_capture(object(), allow_unselected_reward=True), frame)
+        app._click.assert_not_called()
+        app._wait.assert_not_called()
+
+    def test_result_wait_survives_unselectable_reward(self):
+        app = app_without_gui()
+        app._battle_capture = Mock(side_effect=[object(), object(), object()])
+        app._click = Mock(return_value=True)
+        app._wait = Mock()
+        app.record_battle_earnings = Mock()
+        with patch.object(main, "village_home_ready", side_effect=[False, False, True]), \
+             patch.object(main, "battle_result_return_ready", side_effect=[False, True]), \
+             patch.object(main, "has_screen_text", return_value=False):
+            self.assertTrue(app.wait_for_battle_return(object()))
+        self.assertEqual(app._battle_capture.call_count, 3)
+        self.assertTrue(all(call.kwargs == {"allow_unselected_reward": True}
+                            for call in app._battle_capture.call_args_list))
+        app.record_battle_earnings.assert_called_once()
+        app._click.assert_called_once()
 
     def test_reward_checked_while_waiting_after_deployment(self):
         app = app_without_gui()

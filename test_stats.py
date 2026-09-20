@@ -65,6 +65,12 @@ class StatisticsTests(unittest.TestCase):
             with Image.open(Path(__file__).parent/'testdata'/filename) as im:
                 self.assertEqual(main.read_battle_earnings(im),(316672,730999,16130))
 
+    def test_bonus_plus_sign_does_not_become_four_hundred_thousand(self):
+        image = Image.new('RGB', (1920, 1080))
+        with Image.open(Path(__file__).parent/'testdata/result_bonus_plus_as_four.png') as strip:
+            image.paste(strip, (700, 230))
+        self.assertEqual(main.read_battle_earnings(image), (2276548, 2588920, 27849))
+
     def test_persistence_and_duplicate_result(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'stats.json'
