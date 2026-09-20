@@ -21,7 +21,10 @@ try {
     $buildDirectory = Join-Path $PSScriptRoot 'build'
     $stagingDirectory = Join-Path $buildDirectory 'release'
     New-Item -ItemType Directory -Path $buildDirectory -Force | Out-Null
-    $sourceNames = @('main.py', 'calibration.py', 'farm_stats.py', 'dashboard.py', 'upgrades.py', 'requirements.txt', 'assets/collector_gold.png', 'assets/collector_elixir.png')
+    $sourceNames = @('main.py', 'app_meta.py', 'calibration.py', 'farm_stats.py', 'dashboard.py', 'dashboard_layout.py', 'ui_theme.py', 'ui_widgets.py', 'modern_dashboard.py', 'web_dashboard.html', 'upgrades.py', 'requirements.txt', 'assets/collector_gold.png', 'assets/collector_elixir.png')
+    $sourceNames += Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'ui') -File -Recurse | ForEach-Object { $_.FullName.Substring($PSScriptRoot.Length + 1).Replace('\','/') }
+    $sourceNames += Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'assets\kit') -File -Recurse | ForEach-Object { $_.FullName.Substring($PSScriptRoot.Length + 1).Replace('\','/') }
+    $sourceNames = @($sourceNames | Sort-Object -Unique)
     $sourceHashes = [ordered]@{}
     foreach ($sourceName in $sourceNames) {
         $sourceHashes[$sourceName] = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot $sourceName) -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -30,7 +33,11 @@ try {
     [ordered]@{ built_at_utc = [DateTime]::UtcNow.ToString('o'); sources = $sourceHashes } |
         ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $buildInfoPath -Encoding UTF8
 
-    & $projectPython -m PyInstaller --noconfirm --onefile --windowed --name CoCFarmBot --specpath $buildDirectory --workpath $buildDirectory --distpath $stagingDirectory --collect-all winrt --add-data "$buildInfoPath;." --add-data "$(Join-Path $PSScriptRoot 'assets');assets" (Join-Path $PSScriptRoot 'main.py')
+    $versionInfoPath = Join-Path $buildDirectory 'version_info.txt'
+    & $projectPython (Join-Path $PSScriptRoot 'tools\build_version_info.py') $versionInfoPath
+    if ($LASTEXITCODE -ne 0) { throw 'Ressource de version Windows invalide.' }
+    $appIcon = Join-Path $PSScriptRoot 'assets\kit\app\app.ico'
+    & $projectPython -m PyInstaller --noconfirm --onefile --windowed --name CoCFarmBot --specpath $buildDirectory --workpath $buildDirectory --distpath $stagingDirectory --icon $appIcon --version-file $versionInfoPath --collect-all winrt --collect-all webview --add-data "$buildInfoPath;." --add-data "$(Join-Path $PSScriptRoot 'assets');assets" --add-data "$(Join-Path $PSScriptRoot 'ui');ui" --add-data "$(Join-Path $PSScriptRoot 'web_dashboard.html');." (Join-Path $PSScriptRoot 'main.py')
     if ($LASTEXITCODE -ne 0) { throw 'Construction échouée : ancien exécutable conservé.' }
     foreach ($sourceName in $sourceNames) {
         if ((Get-FileHash -LiteralPath (Join-Path $PSScriptRoot $sourceName) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $sourceHashes[$sourceName]) {

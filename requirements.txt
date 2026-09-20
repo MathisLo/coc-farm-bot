@@ -1,5 +1,6 @@
 Pillow==12.3.0
 pyinstaller==6.22.3
+pywebview==6.2.1
 winrt-Windows.Graphics.Imaging==3.2.1
 winrt-Windows.Foundation==3.2.1
 winrt-Windows.Foundation.Collections==3.2.1

@@ -1,5 +1,6 @@
 """Real Windows OCR and Tk checks; no capture or input in Clash of Clans."""
 import tempfile
+from tkinter import ttk
 import threading
 import time
 import unittest
@@ -72,6 +73,21 @@ class WindowsIntegrationTests(unittest.TestCase):
     def test_selected_electro_count_two_is_read_inside_card_border(self):
         image = self.fixture("edrag_selected_x2.png", (250, 900))
         self.assertEqual(main.read_troop_count(image, "Électro-dragon"), 2)
+
+    def test_vm_electro_counter_survives_plain_and_masked_ocr(self):
+        for filename, expected in (("electro_counter_x8_vm.png", 8),
+                                   ("electro_counter_x2_vm.png", 2)):
+            with self.subTest(filename=filename):
+                image = Image.new("RGB", (1765, 993), "black")
+                with Image.open(Path(__file__).parent / "testdata" / filename) as crop:
+                    image.paste(crop, (360, 835))
+                self.assertEqual(main.read_troop_count(image, "Électro-dragon"), expected)
+
+    def test_vm_laboratory_counter_is_read_when_wide_ocr_is_empty(self):
+        image = Image.new("RGB", (1765, 993), "black")
+        with Image.open(Path(__file__).parent / "testdata" / "lab_counter_vm.png") as crop:
+            image.paste(crop, (690, 25))
+        self.assertEqual(main.read_laboratory_ratio(image, ""), "1/1")
 
     def test_defeat_result_return_button_is_read(self):
         image = self.fixture("battle_result_rentrer.png", (700, 780))
@@ -164,6 +180,35 @@ class WindowsIntegrationTests(unittest.TestCase):
                 app.close()
             capture.assert_not_called()
             click.assert_not_called()
+
+    def test_console_controls_fit_at_minimum_window_size(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(main, "APP_DIR", Path(directory) / "CoCFarmBot"), \
+             patch.object(main, "CONFIG_PATH", Path(directory) / "CoCFarmBot" / "config-v2.json"), \
+             patch.object(main, "STATS_PATH", Path(directory) / "CoCFarmBot" / "farm-stats.json"), \
+             patch.object(main, "LOG_PATH", Path(directory) / "CoCFarmBot" / "bot.log"), \
+             patch.object(main.WindowDriver, "list_windows", return_value=[]):
+            app = main.BotApp()
+            try:
+                app.root.geometry("1080x760")
+                app.root.update()
+                loot = app.settings_tabs.nametowidget(app.settings_tabs.tabs()[0])
+                and_rule = next(child for child in loot.winfo_children()
+                                if isinstance(child, ttk.Checkbutton))
+                for widget in (and_rule, app.save_button, app.start_button,
+                               app.stop_button, app.inspect_button, app.calibrate_button):
+                    self.assertTrue(widget.winfo_ismapped(), str(widget))
+                    self.assertGreaterEqual(widget.winfo_height(), 28, str(widget))
+                    self.assertLessEqual(widget.winfo_rooty() + widget.winfo_height(),
+                                         app.root.winfo_rooty() + app.root.winfo_height(), str(widget))
+                app.activity_tabs.select(2)
+                app.root.update()
+                self.assertTrue(app.reset_data_button.winfo_ismapped())
+                self.assertGreaterEqual(app.reset_data_button.winfo_height(), 28)
+                self.assertLessEqual(app.reset_data_button.winfo_rooty() + app.reset_data_button.winfo_height(),
+                                     app.root.winfo_rooty() + app.root.winfo_height())
+            finally:
+                app.close()
 
     def test_reset_button_erases_saved_data_and_closes_app(self):
         with tempfile.TemporaryDirectory() as parent, \

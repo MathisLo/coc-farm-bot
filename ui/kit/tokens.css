@@ -1,0 +1,38 @@
+/* CoC Farm Bot — scope volontaire : ajouter coc-theme à la racine du frontend. */
+.coc-theme {
+  color-scheme: dark;
+  --coc-bg: #07111f;
+  --coc-bg-alt: #0b1526;
+  --coc-surface: #102132;
+  --coc-surface-raised: #172b3d;
+  --coc-surface-hover: #1c354a;
+  --coc-border: #29455d;
+  --coc-border-hover: #48647b;
+  --coc-text: #f5f7fb;
+  --coc-text-secondary: #b7cae2;
+  --coc-text-muted: #91a8c2;
+  --coc-gold: #f6c244;
+  --coc-gold-light: #ffe59a;
+  --coc-purple: #a855f7;
+  --coc-dark-elixir: #6b21a8;
+  --coc-success: #36dbae;
+  --coc-warning: #f2b85a;
+  --coc-danger: #ff8c97;
+  --coc-radius-sm: 6px;
+  --coc-radius-md: 10px;
+  --coc-radius-lg: 14px;
+  --coc-radius-xl: 18px;
+  --coc-shadow-sm: 0 4px 12px #0002;
+  --coc-shadow-md: 0 12px 30px #0004;
+  --coc-fast: 140ms;
+  --coc-normal: 200ms;
+  --coc-panel-time: 280ms;
+  --coc-ease: cubic-bezier(.22, 1, .36, 1);
+  --coc-font: "Segoe UI", Inter, system-ui, sans-serif;
+  --coc-font-mono: "Cascadia Mono", Consolas, monospace;
+  color: var(--coc-text);
+  background: var(--coc-bg);
+  font-family: var(--coc-font);
+  font-size: 14px;
+  line-height: 1.5;
+}

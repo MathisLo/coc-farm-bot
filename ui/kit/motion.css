@@ -1,0 +1,15 @@
+/* Motion is opt-in, limited and disabled when the user requests it. */
+@keyframes coc-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes coc-toast-in { from { opacity: 0; transform: translateX(18px); } to { opacity: 1; transform: translateX(0); } }
+@keyframes coc-spin { to { transform: rotate(360deg); } }
+@keyframes coc-pulse { 0%,100% { opacity: .65; } 50% { opacity: 1; } }
+.coc-enter { animation: coc-in var(--coc-panel-time, 280ms) var(--coc-ease) both; animation-delay: var(--coc-delay, 0ms); }
+.coc-log__line--new { animation: coc-in 150ms ease-out both; }
+.coc-toast { animation: coc-toast-in 200ms var(--coc-ease) both; }
+.coc-spin { animation: coc-spin 800ms linear infinite; }
+/* Apply only while the real backend says the operation is running. */
+.coc-badge[data-state="running"]::before { animation: coc-pulse 2s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+ .coc-theme *, .coc-theme *::before, .coc-theme *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+ .coc-resource:hover, .coc-btn:not(:disabled):hover, .coc-btn:not(:disabled):active { transform: none; }
+}

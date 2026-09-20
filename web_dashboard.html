@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>CoC Farm Bot</title>
+  <link rel="icon" href="assets/kit/app/png/app-64.png" type="image/png">
+  <link rel="stylesheet" href="ui/kit/tokens.css">
+  <link rel="stylesheet" href="ui/kit/components.css">
+  <link rel="stylesheet" href="ui/kit/motion.css">
+  <link rel="stylesheet" href="ui/dashboard.css">
+  <script defer src="ui/kit/motion.js"></script>
+  <script defer src="ui/icons.js"></script>
+  <script defer src="ui/app.js"></script>
+</head>
+<body class="coc-theme">
+<div class="app-shell">
+  <aside class="sidebar" aria-label="Navigation principale">
+    <div class="brand">
+      <img class="brand-icon" src="assets/kit/logo/badge-color-128.png" alt="Logo CoC Farm Bot">
+      <strong>CoC Farm Bot</strong>
+      <span class="version" data-version>—</span>
+    </div>
+    <nav class="nav-list" aria-label="Pages">
+      <button class="nav-link is-active" data-page="console" aria-current="page"><span data-icon="shield"></span><span>Console</span></button>
+      <button class="nav-link" data-page="statistics"><span data-icon="chart"></span><span>Statistiques</span></button>
+      <button class="nav-link" data-page="profiles"><span data-icon="user"></span><span>Profils</span></button>
+      <button class="nav-link" data-page="tools"><span data-icon="wrench"></span><span>Outils</span></button>
+      <button class="nav-link" data-page="parameters"><span data-icon="settings"></span><span>Paramètres</span></button>
+    </nav>
+    <div class="sidebar-signature" aria-hidden="true"><span></span><p>Farm Smarter<br>Play Bigger</p></div>
+    <div class="sidebar-art" aria-hidden="true"></div>
+    <div class="sidebar-foot">COC FARM BOT<small>AUTOMATION FOR LEGENDS</small></div>
+  </aside>
+
+  <main class="app-main">
+    <header class="hero">
+      <div class="hero-shade"></div>
+      <div class="hero-content">
+        <div class="breadcrumb"><span data-icon="hexagon"></span><span>COC FARM BOT</span><span class="slash">/</span><strong id="breadcrumb-page">CONSOLE</strong></div>
+        <div class="hero-title-row">
+          <div class="hero-emblem"><img src="assets/kit/logo/badge-color-64.png" alt=""></div>
+          <div><h1 id="page-title">Pilote de raid</h1><p id="page-subtitle">Automatisez vos raids, maximisez vos ressources</p></div>
+        </div>
+      </div>
+      <div class="hero-state"><span data-icon="swords"></span><span id="battle-summary">Synchronisation…</span><span id="run-state" class="state-badge" data-state="loading">Connexion…</span></div>
+    </header>
+
+    <section class="resource-strip" aria-label="Ressources récoltées">
+      <article class="resource-card gold" data-resource="gold"><span class="resource-icon gold" aria-hidden="true"></span><div class="resource-copy"><span class="resource-label">OR RÉCOLTÉ</span><strong class="resource-value" id="stat-gold">—</strong></div><span class="resource-decoration gold" aria-hidden="true"></span></article>
+      <article class="resource-card elixir" data-resource="elixir"><span class="resource-icon elixir" aria-hidden="true"></span><div class="resource-copy"><span class="resource-label">ÉLIXIR RÉCOLTÉ</span><strong class="resource-value" id="stat-elixir">—</strong></div><span class="resource-decoration elixir" aria-hidden="true"></span></article>
+      <article class="resource-card dark-elixir" data-resource="dark_elixir"><span class="resource-icon dark-elixir" aria-hidden="true"></span><div class="resource-copy"><span class="resource-label">ÉLIXIR NOIR RÉCOLTÉ</span><strong class="resource-value" id="stat-dark_elixir">—</strong></div><span class="resource-decoration dark-elixir" aria-hidden="true"></span></article>
+    </section>
+
+    <div class="page-view is-active" id="page-console">
+      <div class="console-grid">
+        <section class="panel settings-panel" aria-labelledby="settings-title">
+          <div class="panel-heading"><span class="panel-icon"><span data-icon="settings"></span></span><div><h2 id="settings-title">Réglages</h2><p>Fenêtre et critères du prochain raid</p></div></div>
+          <label class="field-label" for="window_title">Fenêtre du jeu</label>
+          <div class="window-picker"><span class="window-game-icon"><img src="assets/kit/app/png/app-32.png" alt=""></span><select id="window_title" data-field="window_title" aria-label="Fenêtre du jeu"><option value="">Recherche des fenêtres…</option></select><span class="select-chevron" data-icon="chevron-down"></span><button class="btn icon-button" data-action="refresh" title="Rechercher les fenêtres Clash" aria-label="Rechercher les fenêtres Clash"><span data-icon="refresh"></span></button></div>
+          <div class="tabs settings-tabs" data-tabs="settings" role="tablist" aria-label="Catégorie des réglages"><span class="tab-indicator"></span><button class="tab is-active" role="tab" aria-selected="true" data-tab="loot">Butin</button><button class="tab" role="tab" aria-selected="false" data-tab="army">Armée</button><button class="tab" role="tab" aria-selected="false" data-tab="cycle">Cycle</button></div>
+          <div class="settings-body">
+            <div class="tab-page is-active" data-panel="loot" role="tabpanel">
+              <div class="two-fields"><label class="field-label">Or minimum<span class="input-shell"><span class="input-resource gold"></span><input data-field="min_gold" id="min_gold" type="number" min="0" max="2500000" step="1" inputmode="numeric"></span></label><label class="field-label">Élixir minimum<span class="input-shell"><span class="input-resource elixir"></span><input data-field="min_elixir" id="min_elixir" type="number" min="0" max="2500000" step="1" inputmode="numeric"></span></label></div>
+              <label class="field-label">Marge (%)<span class="input-shell"><span class="input-prefix">%</span><input data-field="loot_margin" id="loot_margin" type="number" min="0" max="25" step="0.1" inputmode="decimal"></span></label>
+              <label class="check-row"><input data-field="and_rule" id="and_rule" type="checkbox"><span class="check-box"><span data-icon="check"></span></span><span>Exiger les deux ressources</span><span class="help-icon" title="Une base doit atteindre les deux seuils après application de la marge." data-icon="info"></span></label>
+            </div>
+            <div class="tab-page" data-panel="army" role="tabpanel" hidden>
+              <div class="two-fields"><label class="field-label">Électrodragons prévus<span class="input-shell"><input data-field="electrodragon_count" id="electrodragon_count" type="number" min="0" max="50" step="1"></span></label><label class="field-label">Dragons prévus<span class="input-shell"><input data-field="dragon_count" id="dragon_count" type="number" min="0" max="50" step="1"></span></label></div>
+              <label class="field-label">Délai entre poses (ms)<span class="input-shell"><input data-field="delay_between_dragons" id="delay_between_dragons" type="number" min="80" max="2000" step="10"></span></label>
+              <label class="check-row"><input data-field="deploy_heroes" id="deploy_heroes" type="checkbox"><span class="check-box"><span data-icon="check"></span></span><span>Déployer les héros</span></label>
+              <p class="field-help">Le bot vérifie les unités visibles dans la barre de combat avant chaque pose.</p>
+            </div>
+            <div class="tab-page" data-panel="cycle" role="tabpanel" hidden>
+              <label class="check-row"><input data-field="chain_attacks" id="chain_attacks" type="checkbox"><span class="check-box"><span data-icon="check"></span></span><span>Enchaîner les attaques</span></label>
+              <label class="check-row"><input data-field="upgrade_recommended" id="upgrade_recommended" type="checkbox"><span class="check-box"><span data-icon="check"></span></span><span>Améliorer les bâtiments</span></label>
+              <label class="check-row"><input data-field="upgrade_wall" id="upgrade_wall" type="checkbox"><span class="check-box"><span data-icon="check"></span></span><span>Améliorer les remparts</span></label>
+              <label class="check-row"><input data-field="dry_run" id="dry_run" type="checkbox"><span class="check-box"><span data-icon="check"></span></span><span>Simulation sans déploiement</span></label>
+              <p class="field-help">Le bot garde un ouvrier libre pour les bâtiments et 1 M de chaque ressource pour les remparts.</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel activity-panel" aria-labelledby="activity-title">
+          <div class="panel-heading"><span class="panel-icon mint"><span data-icon="activity"></span></span><div><h2 id="activity-title">Suivi en direct</h2><p>Journal, capture et actions ponctuelles</p></div></div>
+          <div class="activity-toolbar"><div class="tabs activity-tabs" data-tabs="activity" role="tablist" aria-label="Suivi en direct"><span class="tab-indicator"></span><button class="tab is-active" role="tab" aria-selected="true" data-tab="journal">Journal</button><button class="tab" role="tab" aria-selected="false" data-tab="preview">Aperçu du jeu</button><button class="tab" role="tab" aria-selected="false" data-tab="actions">Actions</button></div><button class="btn export-button" data-action="export"><span data-icon="file-down"></span><span>Exporter le diagnostic</span></button></div>
+          <div class="activity-caption" id="activity-caption">Événements du cycle</div>
+          <div class="activity-content">
+            <div class="activity-page is-active" data-activity="journal"><div class="journal" id="journal" role="log" aria-live="polite"><div class="empty-journal">Aucun événement pour cette session.</div></div></div>
+            <div class="activity-page" data-activity="preview" hidden><div class="preview-area" id="preview-area"><div class="empty-state"><span data-icon="monitor"></span><strong>Aucune capture</strong><p>Cliquez sur « Lire l’écran » pour afficher le jeu.</p></div></div></div>
+            <div class="activity-page" data-activity="actions" hidden><div class="action-grid"><button class="action-card" data-action="attack"><span data-icon="swords"></span><span><strong>Lancer une attaque</strong><small>Un raid ponctuel avec les réglages actifs</small></span><span data-icon="arrow-right"></span></button><button class="action-card" data-action="buildings"><span data-icon="hammer"></span><span><strong>Améliorer les bâtiments</strong><small>Choisir les améliorations vérifiées</small></span><span data-icon="arrow-right"></span></button><button class="action-card" data-action="walls"><span data-icon="castle"></span><span><strong>Améliorer les remparts</strong><small>Conserver les réserves configurées</small></span><span data-icon="arrow-right"></span></button></div></div>
+          </div>
+          <div class="activity-actions"><button class="btn" data-action="inspect"><span data-icon="monitor"></span>Lire l’écran</button><button class="btn" data-action="profile"><span data-icon="user-round-search"></span>Relever le profil</button><button class="btn calibrate-button" data-action="calibrate"><span data-icon="crosshair"></span>Calibrer les positions</button></div>
+        </section>
+      </div>
+    </div>
+
+    <div class="page-view" id="page-statistics" hidden><div class="secondary-grid statistics-grid"><section class="panel wide-panel"><div class="panel-heading"><span class="panel-icon"><span data-icon="chart"></span></span><div><h2>Statistiques enregistrées</h2><p>Cumuls confirmés après les combats</p></div></div><div class="overview-grid"><div class="overview-tile"><span>Combats comptabilisés</span><strong data-stat="battles">—</strong></div><div class="overview-tile"><span>Or par combat</span><strong data-average="gold">—</strong></div><div class="overview-tile"><span>Élixir par combat</span><strong data-average="elixir">—</strong></div><div class="overview-tile"><span>Élixir noir par combat</span><strong data-average="dark_elixir">—</strong></div></div><p class="note" id="pending-battle" hidden>Un résultat de combat est en attente de lecture.</p><p class="field-help">Les moyennes sont calculées à partir des cumuls sauvegardés. Aucun historique de combats détaillé n’est enregistré.</p></section></div></div>
+
+    <div class="page-view" id="page-profiles" hidden><div class="secondary-grid profiles-grid"><section class="panel wide-panel"><div class="panel-heading"><span class="panel-icon"><span data-icon="user"></span></span><div><h2>Compte actif</h2><p>Dernier relevé du profil Clash ouvert dans le jeu</p></div></div><div id="profile-empty" class="empty-state spacious"><span data-icon="user-round-search"></span><strong>Aucun profil relevé</strong><p>Ouvrez Clash of Clans, puis lancez le relevé du compte actif.</p></div><div id="profile-detail" hidden><div class="profile-heading"><div class="profile-avatar"><img src="assets/kit/app/png/app-64.png" alt=""></div><div><h3 data-profile="account_name">—</h3><span>Relevé le <time data-profile="captured_at">—</time></span></div></div><div class="profile-grid"><div class="overview-tile"><span>Niveau</span><strong data-profile="level">—</strong></div><div class="overview-tile"><span>Or</span><strong data-profile="gold">—</strong></div><div class="overview-tile"><span>Élixir</span><strong data-profile="elixir">—</strong></div><div class="overview-tile"><span>Élixir noir</span><strong data-profile="dark_elixir">—</strong></div><div class="overview-tile"><span>Gemmes</span><strong data-profile="gems">—</strong></div><div class="overview-tile"><span>Ouvriers</span><strong data-profile="builders">—</strong></div><div class="overview-tile"><span>Laboratoire</span><strong data-profile="laboratory_builders">—</strong></div></div></div><div class="panel-end"><button class="btn primary" data-action="profile"><span data-icon="user-round-search"></span>Relever le profil</button></div></section></div></div>
+
+    <div class="page-view" id="page-tools" hidden><div class="secondary-grid tools-grid"><section class="panel wide-panel"><div class="panel-heading"><span class="panel-icon"><span data-icon="wrench"></span></span><div><h2>Outils du bot</h2><p>Lecture, calibrage et diagnostic</p></div></div><div class="tool-grid"><button class="tool-card" data-action="inspect"><span class="tool-icon" data-icon="monitor"></span><strong>Lire l’écran</strong><p>Capturer le jeu et analyser les ressources visibles.</p><span class="tool-link">Lancer <span data-icon="arrow-right"></span></span></button><button class="tool-card" data-action="calibrate"><span class="tool-icon" data-icon="crosshair"></span><strong>Calibrer les positions</strong><p>Ajuster les zones OCR et les points de clic sur une capture.</p><span class="tool-link">Ouvrir <span data-icon="arrow-right"></span></span></button><button class="tool-card" data-action="export"><span class="tool-icon" data-icon="file-down"></span><strong>Exporter le diagnostic</strong><p>Enregistrer le journal et les captures utiles dans un ZIP.</p><span class="tool-link">Exporter <span data-icon="arrow-right"></span></span></button></div><div class="tool-note">Positions personnalisées enregistrées : <strong id="calibration-count">—</strong></div></section></div></div>
+
+    <div class="page-view" id="page-parameters" hidden><div class="secondary-grid parameters-grid"><section class="panel wide-panel"><div class="panel-heading"><span class="panel-icon"><span data-icon="settings"></span></span><div><h2>Configuration active</h2><p>Les valeurs enregistrées pour les prochains cycles</p></div></div><div class="parameter-grid"><div class="parameter-card"><div><span data-icon="coins"></span><h3>Butin</h3></div><p id="summary-loot">—</p><button class="text-button" data-edit-tab="loot">Modifier <span data-icon="arrow-right"></span></button></div><div class="parameter-card"><div><span data-icon="swords"></span><h3>Armée</h3></div><p id="summary-army">—</p><button class="text-button" data-edit-tab="army">Modifier <span data-icon="arrow-right"></span></button></div><div class="parameter-card"><div><span data-icon="repeat"></span><h3>Cycle</h3></div><p id="summary-cycle">—</p><button class="text-button" data-edit-tab="cycle">Modifier <span data-icon="arrow-right"></span></button></div></div><div class="parameters-bottom"><div><span class="eyebrow">APPLICATION</span><strong>CoC Farm Bot <span data-version>—</span></strong><small>Le bot utilise les données conservées sur cette machine.</small></div><button class="btn danger-soft" data-action="reset"><span data-icon="trash"></span>Effacer les données du bot</button></div></section></div></div>
+
+    <footer class="command-bar"><div class="command-status"><span class="status-dot"></span><span id="status-text">Connexion au moteur Python…</span></div><span class="command-divider"></span><div class="command-actions"><button class="btn" data-action="save"><span data-icon="save"></span><span>Enregistrer</span></button><button class="btn" data-action="walls"><span data-icon="castle"></span><span>Remparts</span></button><button class="btn primary" data-action="start"><span data-icon="play"></span><span>Lancer le cycle</span></button><button class="btn stop-button" data-action="stop" disabled><span data-icon="square"></span><span>Arrêter</span></button></div></footer>
+  </main>
+</div>
+
+<dialog class="modal calibration-modal" id="calibration-dialog" aria-labelledby="calibration-title"><div class="modal-heading"><span class="panel-icon"><span data-icon="crosshair"></span></span><div><h2 id="calibration-title">Calibrer les positions</h2><p>Modifiez les points sur une capture, sans envoyer de clic au jeu.</p></div><button class="btn icon-button close-modal" data-close-modal aria-label="Fermer"><span data-icon="x"></span></button></div><div class="calibration-layout"><div class="calibration-preview" id="calibration-preview"><div class="empty-state"><span data-icon="monitor"></span><strong>Capture nécessaire</strong><p>Actualisez la capture ou chargez une image locale.</p></div><div class="calibration-image-wrap" id="calibration-image-wrap" hidden><img id="calibration-image" alt="Capture utilisée pour le calibrage"><svg id="calibration-overlay" viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="Position à calibrer"></svg></div></div><div class="calibration-controls"><label class="field-label" for="calibration-key">Élément à calibrer</label><select id="calibration-key"></select><p class="field-help" id="calibration-instruction">Sélectionnez une zone ou un point.</p><div class="calibration-coordinates" id="calibration-coordinates">—</div><button class="btn" data-action="calibration_capture"><span data-icon="refresh"></span>Actualiser la capture</button><label class="btn file-button"><span data-icon="upload"></span>Charger une capture<input id="calibration-file" type="file" accept="image/png,image/jpeg" hidden></label><button class="btn" id="calibration-reset"><span data-icon="rotate-ccw"></span>Réinitialiser cet élément</button><div class="calibration-bottom"><button class="btn" data-close-modal>Annuler</button><button class="btn primary" id="calibration-save"><span data-icon="save"></span>Enregistrer</button></div></div></div></dialog>
+
+<dialog class="modal confirm-modal" id="reset-dialog" aria-labelledby="reset-title"><div class="modal-heading"><span class="panel-icon warning"><span data-icon="triangle-alert"></span></span><div><h2 id="reset-title">Effacer les données du bot ?</h2><p>Cette action supprime les réglages, statistiques, journaux et captures enregistrés, puis ferme l’application.</p></div></div><p>Les ZIP exportés ailleurs restent à supprimer séparément.</p><div class="confirm-actions"><button class="btn" data-close-modal>Annuler</button><button class="btn danger" id="confirm-reset"><span data-icon="trash"></span>Effacer les données</button></div></dialog>
+<div id="toast-region" class="toast-region" role="status" aria-live="polite"></div>
+</body>
+</html>

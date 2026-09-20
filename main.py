@@ -20,6 +20,7 @@ import traceback
 import unicodedata
 import uuid
 import zipfile
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
@@ -28,6 +29,7 @@ from tkinter import BooleanVar, StringVar, Tk, ttk, filedialog, messagebox
 from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps, ImageStat, ImageTk
 from calibration import CalibrationDialog, validate_overrides
 from farm_stats import FarmStats
+from app_meta import APP_NAME, APP_VERSION
 
 APP_DIR = Path.home() / "CoCFarmBot"
 CONFIG_PATH = APP_DIR / "config-v2.json"
@@ -35,6 +37,8 @@ LOG_PATH = APP_DIR / "bot.log"
 RUNS_DIR = APP_DIR / "runs"
 ACCOUNT_SNAPSHOT_PATH = APP_DIR / "account_snapshot.json"
 STATS_PATH = APP_DIR / "farm-stats.json"
+# Keep the v1.0.14 storage marker so the visual refactor does not erase the
+# user's saved settings, statistics, profiles, or diagnostic history.
 STORAGE_GENERATION = "v1.0.14-clean-start"
 STORAGE_MARKER = ".storage-generation"
 ASSET_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "assets"
@@ -192,6 +196,11 @@ class PreviewEvent:
 @dataclass(frozen=True)
 class StatsEvent:
     totals: dict
+
+
+@dataclass(frozen=True)
+class RunStateEvent:
+    status: str
 
 
 # Zones relatives de l'interface du village Google Play Jeux PC. Elles sont
@@ -528,6 +537,25 @@ def read_troop_count(image: Image.Image, label: str) -> int | None:
                                      min(100, roi.x2 + 1.5), min(100, roi.y2 + 1)))
     if counter_is_one(counter):
         return 1
+    # On some game renders the plain crop is clearer than the white mask.
+    for scale in (2, 4):
+        raw = read_text(counter, scale=scale).casefold()
+        match = re.fullmatch(r"[x×]\s*(\d{1,2})", raw.strip())
+        if match:
+            return int(match.group(1))
+    # A tight crop removes the next card; Windows OCR sometimes adds one
+    # spurious digit before an otherwise clear x8 on this render.
+    tight = Roi(roi.x1 + .9, roi.y1 + .21, roi.x2 - .8, roi.y2 - .95)
+    if tight.valid():
+        raw = read_text(crop_percent(image, tight), scale=4).casefold()
+        match = re.search(r"[x×]\s*(\d{1,2})$", raw.strip())
+        if match:
+            return int(match.group(1))
+        masked = read_text(white_text_mask(crop_percent(image, tight)), scale=3).casefold()
+        # The game's stylised 2 is sometimes reported as z on the mask.
+        match = re.fullmatch(r"[x×]\s*(\d{1,2}|z)", masked.strip())
+        if match:
+            return 2 if match.group(1) == "z" else int(match.group(1))
     for scale in (3, 5):
         raw = read_text(white_text_mask(counter), scale=scale).casefold().translate(str.maketrans({"o": "0", "l": "1", "i": "1"}))
         match = re.fullmatch(r"[x×]\s*(\d{1,2})", raw.strip())
@@ -1304,21 +1332,51 @@ def parse_worker_ratio(text: str) -> str | None:
     return None
 
 
+def read_laboratory_ratio(image: Image.Image, raw: str) -> str | None:
+    ratio = parse_worker_ratio(raw)
+    if ratio or "PROFILE_ROIS.laboratory_builders" in getattr(getattr(_operation, "settings", None), "layout_overrides", {}):
+        return ratio
+    # The tiny 1/1 is skipped on some village backgrounds. Place only its
+    # white glyphs next to a label so Windows OCR can resolve the slash.
+    ink = white_text_mask(crop_percent(image, Roi(39.3, 2.7, 42.7, 6.7)))
+    bounds = ImageOps.invert(ink.convert("L")).getbbox()
+    if not bounds:
+        return None
+    ink = ink.crop(bounds)
+    ink = ink.resize((round(ink.width * 42 / ink.height), 42))
+    context = Image.new("RGB", (400, 90), "white")
+    ImageDraw.Draw(context).text((0, 15), "Lab", font=ImageFont.truetype("C:/Windows/Fonts/arial.ttf", 40), fill="black")
+    context.paste(ink, (90, 18))
+    return parse_worker_ratio(read_text(context, scale=1))
+
+
 def read_account_snapshot(image: Image.Image) -> AccountSnapshot:
     raw = {key: read_text(crop_percent(image, layout_roi("PROFILE_ROIS", key))) for key in PROFILE_ROIS}
-    # On the white worker counter, Windows OCR needs the surrounding top bar.
-    # Its usual `Sts` output maps to 5/5 through parse_worker_ratio().
-    if not raw["builders"]:
-        whole_top = read_text(image, scale=1)
-        match = re.search(r"\b[5Ss][Tt/][5Ss]\b", whole_top)
-        raw["builders"] = match.group(0) if match else ""
+    from upgrades import builder_count
+    builders = builder_count(image, with_total=True)
     return AccountSnapshot(
         account_name=raw["account_name"] or None, level=parse_clash_number(raw["level"]),
-        gold=parse_clash_number(raw["gold"]), elixir=parse_clash_number(raw["elixir"]),
-        dark_elixir=parse_clash_number(raw["dark_elixir"]), gems=parse_clash_number(raw["gems"]),
-        laboratory_builders=parse_worker_ratio(raw["laboratory_builders"]), builders=parse_worker_ratio(raw["builders"]),
+        gold=read_safe_reserve(image, "gold"), elixir=read_safe_reserve(image, "elixir"),
+        dark_elixir=read_resource_number(crop_percent(image, layout_roi("PROFILE_ROIS", "dark_elixir")))[0],
+        gems=parse_clash_number(raw["gems"]),
+        laboratory_builders=read_laboratory_ratio(image, raw["laboratory_builders"]),
+        builders=f"{builders[0]}/{builders[1]}" if builders is not None else None,
         captured_at=time.time(), raw=raw,
     )
+
+
+def read_complete_account_snapshot(image: Image.Image, capture) -> AccountSnapshot:
+    snapshot = read_account_snapshot(image)
+    names = ("account_name", "level", "gold", "elixir", "dark_elixir", "gems",
+             "laboratory_builders", "builders")
+    for _ in range(2):
+        missing = [name for name in names if getattr(snapshot, name) is None]
+        if not missing:
+            break
+        retry = read_account_snapshot(capture())
+        snapshot = replace(snapshot, **{name: getattr(retry, name) for name in missing
+                                         if getattr(retry, name) is not None})
+    return snapshot
 
 
 def read_enemy_loot(image: Image.Image) -> EnemyLoot:
@@ -1486,6 +1544,8 @@ class DiagnosticJournal:
         self.last_run_path = None
         self._run_failed = False
         self._closed = False
+        self.recent = deque(maxlen=180)
+        self.recent_seq = 0
 
     def start_run(self, label: str, settings=None):
         with self._lock:
@@ -1523,9 +1583,19 @@ class DiagnosticJournal:
             thread = threading.current_thread().name
             if kind == "ERREUR":
                 self._run_failed = True
-            for line in str(message).splitlines() or [""]:
+            for index, line in enumerate(str(message).splitlines() or [""]):
                 entry = f"{stamp} [{thread}] {kind} {line}\n"
                 self._file.write(entry)
+                if kind in ("ÉTAPE", "INTERFACE", "ERREUR", "REFUS", "ARRÊT", "FIN", "STATS", "SESSION") and (kind != "ERREUR" or index == 0):
+                    level = ("error" if kind == "ERREUR" else
+                             "warning" if kind in ("REFUS", "ARRÊT") else
+                             "success" if kind == "STATS" or (kind == "FIN" and "terminée" in line) else "info")
+                    visible = ("Une erreur est survenue. Exportez le diagnostic pour le détail." if kind == "ERREUR"
+                               else "Ouverture de l'application." if kind == "SESSION" and "programme=" in line
+                               else "Journal détaillé disponible dans le diagnostic." if kind == "ÉTAPE" and line.startswith("Journal détaillé de cette action :")
+                               else line)
+                    self.recent.append({"time": stamp, "type": kind, "level": level, "message": visible})
+                    self.recent_seq += 1
                 if self._run_file is not None:
                     self._run_file.write(entry)
             self._file.flush()
@@ -1602,7 +1672,7 @@ class DiagnosticEvents(queue.Queue):
 
 
 class BotApp:
-    def __init__(self):
+    def __init__(self, hidden=False):
         cleared_previous_data = prepare_storage(APP_DIR)
         self.journal = DiagnosticJournal(LOG_PATH)
         self.journal.record("SESSION", f"Ouverture du bot ; programme={sys.executable}")
@@ -1618,9 +1688,17 @@ class BotApp:
             self.journal.record("VERSION", "Exécution depuis les sources")
         self.settings = load_settings()
         self.root = Tk()
-        self.root.title("CoC Farm Bot")
-        self.root.geometry("1200x900")
-        self.root.minsize(1040, 860)
+        self.root.title(APP_NAME)
+        try:
+            self.root.iconbitmap(str(ASSET_DIR / "kit" / "app" / "app.ico"))
+        except (OSError, RuntimeError):
+            pass
+        screen_width, screen_height = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        width, height = min(1240, screen_width - 60), min(790, screen_height - 100)
+        self.root.geometry(f"{width}x{height}+{max(0, (screen_width-width)//2)}+30")
+        self.root.minsize(min(1080, width), min(760, height))
+        if hidden:
+            self.root.withdraw()
         self.events = DiagnosticEvents(self.journal)
         self.stop_event = threading.Event()
         self.action_lock = threading.RLock()
@@ -1634,6 +1712,7 @@ class BotApp:
         self.loot_margin = StringVar(value=str(self.settings.loot_margin_percent))
         self.electrodragon_count = StringVar(value=str(self.settings.electrodragon_count))
         self.dragon_count = StringVar(value=str(self.settings.dragon_count))
+        self.delay_between_dragons = StringVar(value=str(self.settings.delay_between_dragons_ms))
         self.and_rule = BooleanVar(value=self.settings.use_and_rule)
         self.dry_run = BooleanVar(value=self.settings.dry_run)
         self.deploy_heroes = BooleanVar(value=self.settings.deploy_heroes)
@@ -1707,7 +1786,7 @@ class BotApp:
         except Exception as exc:
             status = "erreur"
             self._trace("ERREUR", traceback.format_exc())
-            self.events.put(f"Opération arrêtée : {exc}")
+            self.events.put("Opération arrêtée à cause d'une erreur. Exportez le diagnostic pour le détail.")
         finally:
             self._reconnect_pending = False
             journal = getattr(self,"journal",None)
@@ -1721,7 +1800,10 @@ class BotApp:
                             self._trace("CAPTURE ERREUR", f"Dernier écran enregistré : {screenshot}")
                         except OSError as error:
                             self._trace("ERREUR", f"Capture de diagnostic impossible : {error}")
+                if journal._run_failed:
+                    status = "erreur"
                 journal.end_run(status)
+            self.events.put(RunStateEvent(status))
 
     def _begin_run(self, label):
         journal = getattr(self,"journal",None)
@@ -1781,11 +1863,11 @@ class BotApp:
             self.root.after_cancel(callback)
             self._pump_after = None
 
-    def reset_all_data(self):
+    def reset_all_data(self, confirmed=False, show_errors=True):
         if self._busy():
             self.write("Arrêtez l'action en cours avant d'effacer les données du bot.")
             return False
-        if not messagebox.askyesno(
+        if not confirmed and not messagebox.askyesno(
                 "Effacer toutes les données ?",
                 "Tous les réglages, statistiques, journaux et captures enregistrés par le bot seront supprimés. "
                 "L'application se fermera ensuite. Les ZIP exportés hors du dossier du bot restent à supprimer séparément. Continuer ?",
@@ -1801,7 +1883,8 @@ class BotApp:
             self.journal = DiagnosticJournal(LOG_PATH)
             self.events.journal = self.journal
             self._trace("ERREUR", f"Effacement incomplet : {exc}")
-            messagebox.showerror("Effacement incomplet", str(exc), parent=self.root)
+            if show_errors:
+                messagebox.showerror("Effacement incomplet", str(exc), parent=self.root)
             self._pump_after = self.root.after(250, self._pump)
             return False
         self._closed = True
@@ -1862,19 +1945,26 @@ class BotApp:
             self.events.put(PreviewEvent(self._capture(window), window.title, calibrate=True))
         self._start_inspection(capture_for_calibration, allow_calibration=True)
 
+    def capture_for_web_calibration(self):
+        self._start_inspection(lambda window: self.events.put(
+            PreviewEvent(self._capture(window), window.title)))
+
+    def save_calibration(self, overrides, ratio):
+        if self.inspection_worker and self.inspection_worker.is_alive():
+            raise ValueError("Attendre la fin de l'actualisation avant d'enregistrer.")
+        candidate = replace(self.settings, layout_overrides=validate_overrides(LAYOUT_DEFAULTS, overrides),
+                            layout_aspect_ratio=ratio)
+        validate_layout(candidate)
+        save_settings(candidate)
+        self.settings = candidate
+        self.write(f"Calibrage enregistré : {len(overrides)} position(s) personnalisée(s).")
+
     def _show_calibration(self, image):
         if self.calibration_dialog:
             self.calibration_dialog.set_image(image)
             return
         def save(overrides, ratio):
-            # Do not save a moving target while a refresh is still in flight.
-            if self.inspection_worker and self.inspection_worker.is_alive():
-                raise ValueError("Attendre la fin de l’actualisation avant d’enregistrer.")
-            candidate = replace(self.settings, layout_overrides=overrides, layout_aspect_ratio=ratio)
-            validate_layout(candidate)
-            save_settings(candidate)
-            self.settings = candidate
-            self.write(f"Calibrage enregistré : {len(overrides)} position(s) personnalisée(s).")
+            self.save_calibration(overrides, ratio)
         def closed():
             self.calibration_dialog = None
             with self.action_lock:
@@ -1897,7 +1987,7 @@ class BotApp:
         except OperationCancelled: raise
         except Exception as exc:
             self._trace("ERREUR", traceback.format_exc())
-            self.events.put(f"Lecture impossible : {exc}")
+            self.events.put('Lecture impossible. Exportez le diagnostic pour le détail.')
 
     def _show_preview(self, image):
         self.activity_tabs.select(1)
@@ -1914,7 +2004,7 @@ class BotApp:
         try:
             image = self._capture(window)
             self.events.put(PreviewEvent(image, window.title))
-            snapshot = read_account_snapshot(image); APP_DIR.mkdir(parents=True, exist_ok=True)
+            snapshot = read_complete_account_snapshot(image, lambda: self._capture(window)); APP_DIR.mkdir(parents=True, exist_ok=True)
             self._check_stopped()
             ACCOUNT_SNAPSHOT_PATH.write_text(json.dumps(asdict(snapshot), indent=2, ensure_ascii=False), encoding="utf-8")
             values = [
@@ -1929,7 +2019,7 @@ class BotApp:
         except OperationCancelled: raise
         except Exception as exc:
             self._trace("ERREUR", traceback.format_exc())
-            self.events.put(f"Relevé du profil impossible : {exc}")
+            self.events.put('Relevé du profil impossible. Exportez le diagnostic pour le détail.')
 
     def persist(self):
         if self._busy():
@@ -1940,16 +2030,22 @@ class BotApp:
                 min_gold=int(self.min_gold.get().replace(" ", "")), min_elixir=int(self.min_elixir.get().replace(" ", "")),
                 loot_margin_percent=float(self.loot_margin.get().replace(",", ".")),
                 electrodragon_count=int(self.electrodragon_count.get()), dragon_count=int(self.dragon_count.get()),
+                delay_between_dragons_ms=int(self.delay_between_dragons.get()),
                 use_and_rule=self.and_rule.get(), dry_run=self.dry_run.get(), deploy_heroes=self.deploy_heroes.get(),
                 upgrade_wall_between_attacks=self.upgrade_wall.get(), upgrade_recommended=self.upgrade_recommended.get(), chain_attacks=self.chain_attacks.get())
-            if not 0 <= candidate.min_gold <= 2_500_000 or not 0 <= candidate.min_elixir <= 2_500_000 or not 0 <= candidate.loot_margin_percent <= 25 or not 0 <= candidate.electrodragon_count <= 50 or not 0 <= candidate.dragon_count <= 50: raise ValueError
+            if not 0 <= candidate.min_gold <= 2_500_000 or not 0 <= candidate.min_elixir <= 2_500_000 or not 0 <= candidate.loot_margin_percent <= 25 or not 0 <= candidate.electrodragon_count <= 50 or not 0 <= candidate.dragon_count <= 50 or not 80 <= candidate.delay_between_dragons_ms <= 2000: raise ValueError
             save_settings(candidate)
             self.settings = candidate
             self._trace("CONFIG", json.dumps(asdict(candidate), ensure_ascii=False))
             self.write(f"Configuration enregistrée : attaque dès {effective_minimum(candidate.min_gold, candidate.loot_margin_percent):,} or / {effective_minimum(candidate.min_elixir, candidate.loot_margin_percent):,} élixir.")
             return True
-        except ValueError: messagebox.showerror("Valeur invalide","Seuils : 0 à 2 500 000 ; marge : 0 à 25 % ; troupes : 0 à 50.");return False
-        except OSError as exc: messagebox.showerror("Sauvegarde impossible", str(exc)); return False
+        except ValueError:
+            self.write("Réglages invalides : seuils de 0 à 2 500 000, marge de 0 à 25 %, troupes de 0 à 50, délai de 80 à 2 000 ms.")
+            return False
+        except OSError as exc:
+            self._trace("ERREUR", f"Sauvegarde impossible : {exc}")
+            self.write("Sauvegarde impossible. Exportez le diagnostic pour voir le détail.")
+            return False
     def start_farm(self):
         if self._busy():
             self._trace("REFUS", "Démarrage du farm impossible : une autre action est en cours.")
@@ -2013,7 +2109,7 @@ class BotApp:
         except OperationCancelled: self.events.put("Amélioration des remparts interrompue.")
         except Exception as exc:
             self._trace("ERREUR", traceback.format_exc())
-            self.events.put(f"Remparts arrêtés : {exc}")
+            self.events.put("Remparts arrêtés à cause d'une erreur. Exportez le diagnostic pour le détail.")
         finally:
             if not getattr(self,'_reconnect_pending',False):
                 self.stop_event.set(); self.events.put("Amélioration des remparts terminée.")
@@ -2649,7 +2745,8 @@ class BotApp:
                 except RuntimeError as exc:
                     # A failed deployment must not abandon event handling or
                     # the result screen while a real battle is still running.
-                    self.events.put(f"Déploiement interrompu : {exc} Suivi du combat jusqu’au résultat.")
+                    self._trace("ERREUR", traceback.format_exc())
+                    self.events.put("Déploiement interrompu. Suivi du combat jusqu'au résultat ; détail dans le diagnostic.")
                     self.wait_for_battle_return(window)
                     return
                 if not self.wait_for_battle_return(window) or not self.settings.chain_attacks: return
@@ -2657,7 +2754,7 @@ class BotApp:
         except OperationCancelled: self.events.put("Recherche interrompue.")
         except Exception as exc:
             self._trace("ERREUR", traceback.format_exc())
-            self.events.put(f"Recherche arrêtée : {exc}")
+            self.events.put("Recherche arrêtée à cause d'une erreur. Exportez le diagnostic pour le détail.")
         finally:
             if not getattr(self,'_reconnect_pending',False):
                 self.stop_event.set(); self.events.put("Bot arrêté.")
@@ -2731,6 +2828,8 @@ class BotApp:
                     for key, variable in self.stats_vars.items():
                         variable.set(f"{event.totals[key]:,}".replace(",", " "))
                     self.stats_count.set(f"{event.totals['battles']} combat(s) comptabilisé(s) · cumul sauvegardé")
+                elif isinstance(event, RunStateEvent):
+                    self.run_state.set({"erreur": "ERREUR", "interrompue": "ARRÊT", "terminée": "PRÊT"}.get(event.status, "PRÊT"))
                 else:
                     self.write(event, record=False)
         except queue.Empty:pass
@@ -2769,7 +2868,10 @@ def self_test():
 def profile_test():
     window = WindowDriver.resolve("")
     if not window: raise RuntimeError("Fenêtre Clash introuvable pour le test de profil.")
-    snapshot = read_account_snapshot(WindowDriver.capture(window))
+    image = WindowDriver.capture(window)
+    if connection_retry_point(image) is not None:
+        raise RuntimeError("Jeu déconnecté : recharger Clash avant le test de profil.")
+    snapshot = read_complete_account_snapshot(image, lambda: WindowDriver.capture(window))
     required = (snapshot.account_name, snapshot.level, snapshot.gold, snapshot.elixir, snapshot.dark_elixir, snapshot.gems, snapshot.laboratory_builders, snapshot.builders)
     if any(value is None for value in required): raise RuntimeError(f"Relevé incomplet : {asdict(snapshot)}")
     print(json.dumps(asdict(snapshot), ensure_ascii=False))
@@ -2804,4 +2906,5 @@ if __name__ == "__main__":
     elif args.self_test:
         self_test()
     else:
-        BotApp().run()
+        from modern_dashboard import run
+        run()
