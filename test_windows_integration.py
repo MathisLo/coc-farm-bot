@@ -1,6 +1,7 @@
 """Real Windows OCR and Tk checks; no capture or input in Clash of Clans."""
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -94,10 +95,20 @@ class WindowsIntegrationTests(unittest.TestCase):
             root.title("CoC - test de capture uniquement")
             root.geometry("640x360+30+30")
             root.configure(background="#345678")
+            root.attributes('-topmost', True)
             root.update()
             window = main.GameWindow(int(root.wm_frame(), 0), "test", 1, 1)
             geometry = main.WindowDriver.client_geometry(window)
-            image = main.WindowDriver.capture(window)
+            for attempt in range(10):
+                root.lift()
+                root.update()
+                try:
+                    image = main.WindowDriver.capture(window)
+                    break
+                except RuntimeError as exc:
+                    if 'Capture noire' not in str(exc) or attempt == 9:
+                        raise
+                    time.sleep(.1)  # Let Windows paint the new test window.
             self.assertEqual(image.size, (geometry.width, geometry.height))
             self.assertGreater(geometry.outer_height, geometry.height)
             self.assertEqual(image.getpixel((image.width // 2, image.height // 2)), (52, 86, 120))
@@ -121,7 +132,6 @@ class WindowsIntegrationTests(unittest.TestCase):
              patch.object(main, "CONFIG_PATH", Path(directory) / "config.json"), \
              patch.object(main, "STATS_PATH", Path(directory) / "stats.json"), \
              patch.object(main, "LOG_PATH", Path(directory) / "bot.log"), \
-             patch.object(main.logging, "basicConfig"), \
              patch.object(main.WindowDriver, "list_windows", return_value=[]), \
              patch.object(main.WindowDriver, "capture") as capture, \
              patch.object(main.WindowDriver, "click_percent") as click:
@@ -149,7 +159,7 @@ class WindowsIntegrationTests(unittest.TestCase):
                 self.assertIn("1 combat", app.stats_count.get())
                 self.assertFalse(app.start_button.instate(["disabled"]))
             finally:
-                app.root.destroy()
+                app.close()
             capture.assert_not_called()
             click.assert_not_called()
 
@@ -158,7 +168,7 @@ class WindowsIntegrationTests(unittest.TestCase):
              patch.object(main, "APP_DIR", Path(directory)), \
              patch.object(main, "CONFIG_PATH", Path(directory) / "config.json"), \
              patch.object(main, "STATS_PATH", Path(directory) / "stats.json"), \
-             patch.object(main.logging, "basicConfig"), \
+             patch.object(main, "LOG_PATH", Path(directory) / "bot.log"), \
              patch.object(main.WindowDriver, "list_windows", return_value=[]), \
              patch.object(main.WindowDriver, "resolve", return_value=object()):
             app = main.BotApp()
@@ -178,7 +188,88 @@ class WindowsIntegrationTests(unittest.TestCase):
                 self.assertFalse(app.inspection_worker.is_alive())
             finally:
                 app.stop_event.set()
-                app.root.destroy()
+                app.close()
+
+    def test_journal_button_exports_live_actions_and_errors_as_txt(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(main, "APP_DIR", Path(directory)), \
+             patch.object(main, "CONFIG_PATH", Path(directory) / "config.json"), \
+             patch.object(main, "STATS_PATH", Path(directory) / "stats.json"), \
+             patch.object(main, "LOG_PATH", Path(directory) / "bot.log"), \
+             patch.object(main.WindowDriver, "list_windows", return_value=[]), \
+             patch.object(main.WindowDriver, "click_percent", return_value=True):
+            app = main.BotApp()
+            destination = Path(directory) / 'diagnostic.txt'
+            try:
+                app.root.geometry('1040x860')
+                app.root.update()
+                self.assertTrue(app.export_log_button.winfo_ismapped())
+                self.assertLess(app.export_log_button.winfo_rooty() + app.export_log_button.winfo_height(),
+                                app.root.winfo_rooty() + app.root.winfo_height())
+                app.root.withdraw()
+                app.events.put('Étape de diagnostic')
+                self.assertTrue(app._click(SimpleNamespace(title='Fenêtre test'), 30, 60))
+                with patch.object(main.WindowDriver, 'capture', return_value=Image.new('RGB', (1920, 1080), 'white')):
+                    app._capture(SimpleNamespace(title='Fenêtre test'))
+                app._wait(.001)
+                def fail():
+                    raise RuntimeError('blocage exemple')
+                app._run_operation(fail)
+                app.worker = SimpleNamespace(is_alive=lambda: True)
+                app._pump()
+                self.assertFalse(app.export_log_button.instate(['disabled']))
+                with patch.object(main.filedialog, 'asksaveasfilename', return_value=str(destination)):
+                    app.export_log_button.invoke()
+                exported = destination.read_text(encoding='utf-8')
+                self.assertIn('Étape de diagnostic', exported)
+                self.assertIn('CLIC Envoi à 30.00 %, 60.00 %', exported)
+                self.assertIn('CLIC Résultat à 30.00 %, 60.00 % : accepté', exported)
+                self.assertIn('CAPTURE Image reçue : 1920x1080', exported)
+                self.assertIn('ATTENTE 0.00 s', exported)
+                self.assertIn('RuntimeError: blocage exemple', exported)
+                self.assertIn('SESSION Ouverture du bot', exported)
+                self.assertTrue(exported.splitlines()[0].startswith('20'))
+            finally:
+                app.close()
+
+    def test_journal_export_is_a_complete_snapshot_during_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = main.DiagnosticJournal(Path(directory) / 'bot.log')
+            destination = Path(directory) / 'export.txt'
+            started = threading.Event()
+            def write_lines():
+                for index in range(300):
+                    journal.record('ÉTAPE', f'ligne {index} é')
+                    if index == 20:
+                        started.set()
+            writer = threading.Thread(target=write_lines)
+            try:
+                writer.start()
+                self.assertTrue(started.wait(2))
+                journal.export(destination)
+                writer.join(2)
+                exported = destination.read_text(encoding='utf-8')
+                self.assertTrue(exported.endswith('\n'))
+                self.assertIn('ligne 20 é', exported)
+                self.assertTrue(all('ÉTAPE ligne ' in line for line in exported.splitlines()))
+            finally:
+                writer.join(2)
+                journal.close()
+
+    def test_journal_export_converts_old_windows_text_to_utf8(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'bot.log'
+            source.write_bytes('Ancien journal : récolte terminée\n'.encode('cp1252'))
+            journal = main.DiagnosticJournal(source)
+            try:
+                journal.record('ÉTAPE', 'Nouvelle récolte confirmée')
+                destination = Path(directory) / 'export.txt'
+                journal.export(destination)
+                exported = destination.read_text(encoding='utf-8')
+                self.assertIn('Ancien journal : récolte terminée', exported)
+                self.assertIn('ÉTAPE Nouvelle récolte confirmée', exported)
+            finally:
+                journal.close()
 
 
 if __name__ == "__main__":

@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import argparse
+import codecs
 import ctypes
 from ctypes import wintypes
+from datetime import datetime
 import json
-import logging
 import math
 import queue
 import re
@@ -14,11 +15,12 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import unicodedata
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
-from tkinter import BooleanVar, StringVar, Tk, ttk, messagebox
+from tkinter import BooleanVar, StringVar, Tk, ttk, filedialog, messagebox
 
 from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps, ImageStat, ImageTk
 from calibration import CalibrationDialog, validate_overrides
@@ -1392,16 +1394,85 @@ def battle_reward_choice(image: Image.Image):
     return tickets  # An unreadable card or a troop never authorises a click.
 
 
+class DiagnosticJournal:
+    """Append an immediately flushed trace and export a consistent text snapshot."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
+        self._file = path.open("a", encoding="utf-8")
+        self._closed = False
+
+    def record(self, kind: str, message: str):
+        with self._lock:
+            if self._closed:
+                return
+            stamp = datetime.now().astimezone().isoformat(timespec="milliseconds")
+            thread = threading.current_thread().name
+            for line in str(message).splitlines() or [""]:
+                self._file.write(f"{stamp} [{thread}] {kind} {line}\n")
+            self._file.flush()
+
+    def export(self, destination: Path):
+        if destination.resolve() == self.path.resolve():
+            raise ValueError("Le fichier exporté doit être différent du journal actif.")
+        with self._lock:
+            self._file.flush()
+            remaining = self.path.stat().st_size
+        decoder = codecs.getincrementaldecoder("utf-8")("surrogateescape")
+        legacy = {0xdc00 + byte: bytes([byte]).decode("cp1252", errors="replace")
+                  for byte in range(0x80, 0x100)}
+        with self.path.open("rb") as source, destination.open("wb") as output:
+            while remaining:
+                block = source.read(min(1024 * 1024, remaining))
+                if not block:
+                    raise OSError("Lecture du journal interrompue.")
+                remaining -= len(block)
+                output.write(decoder.decode(block, final=not remaining).translate(legacy).encode("utf-8"))
+
+    def close(self):
+        with self._lock:
+            if not self._closed:
+                self._file.close()
+                self._closed = True
+
+
+class DiagnosticEvents(queue.Queue):
+    def __init__(self, journal: DiagnosticJournal):
+        super().__init__()
+        self.journal = journal
+
+    def put(self, item, *args, **kwargs):
+        if isinstance(item, str):
+            self.journal.record("ÉTAPE", item)
+        elif isinstance(item, StatsEvent):
+            self.journal.record("STATS", json.dumps(item.totals, ensure_ascii=False))
+        elif isinstance(item, PreviewEvent):
+            self.journal.record("APERÇU", f"{item.title} {item.image.width}x{item.image.height}")
+        return super().put(item, *args, **kwargs)
+
+
 class BotApp:
     def __init__(self):
         APP_DIR.mkdir(parents=True, exist_ok=True)
-        logging.basicConfig(filename=LOG_PATH, level=logging.INFO, format="%(asctime)s %(message)s", encoding="utf-8")
+        self.journal = DiagnosticJournal(LOG_PATH)
+        self.journal.record("SESSION", f"Ouverture du bot ; programme={sys.executable}")
+        build_info = Path(__file__).with_name("build_info.json")
+        if build_info.exists():
+            try:
+                built = json.loads(build_info.read_text(encoding="utf-8-sig"))
+                self.journal.record("VERSION", f"Compilation={built.get('built_at_utc')}; source={built.get('sources', {}).get('main.py')}")
+            except (OSError, ValueError):
+                self.journal.record("VERSION", "Informations de compilation illisibles")
+        else:
+            self.journal.record("VERSION", "Exécution depuis les sources")
         self.settings = load_settings()
         self.root = Tk()
         self.root.title("CoC Farm Bot")
         self.root.geometry("1200x900")
         self.root.minsize(1040, 860)
-        self.events = queue.Queue()
+        self.events = DiagnosticEvents(self.journal)
         self.stop_event = threading.Event()
         self.action_lock = threading.RLock()
         self.worker = None
@@ -1430,15 +1501,23 @@ class BotApp:
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self._pump()
 
+    def _trace(self, kind, message):
+        journal = getattr(self, "journal", None)
+        if journal is not None:
+            journal.record(kind, message)
+
     def _check_stopped(self):
         if self.stop_event.is_set():
             raise OperationCancelled("Arrêt demandé.")
 
     def _capture(self, window):
         self._check_stopped()
+        self._trace("CAPTURE", f"Lecture demandée : {getattr(window, 'title', '?')}")
         image = WindowDriver.capture(window)
+        self._trace("CAPTURE", f"Image reçue : {image.width}x{image.height}")
         self._check_stopped()
         if connection_retry_point(image) is not None:
+            self._trace("ÉCRAN", "Dialogue de déconnexion détecté")
             self._reconnect_pending = True
             raise ReconnectRequired()
         return image
@@ -1447,9 +1526,13 @@ class BotApp:
         # Stop and click share a lock: after stop() returns no new press is sent.
         with self.action_lock:
             self._check_stopped()
-            return WindowDriver.click_percent(window, x, y)
+            self._trace("CLIC", f"Envoi à {x:.2f} %, {y:.2f} % sur {getattr(window, 'title', '?')}")
+            accepted = WindowDriver.click_percent(window, x, y)
+            self._trace("CLIC", f"Résultat à {x:.2f} %, {y:.2f} % : {'accepté' if accepted else 'refusé'}")
+            return accepted
 
     def _wait(self, seconds):
+        self._trace("ATTENTE", f"{seconds:.2f} s")
         if self.stop_event.wait(seconds):
             raise OperationCancelled("Arrêt demandé.")
         return False
@@ -1469,6 +1552,7 @@ class BotApp:
         except OperationCancelled:
             self.events.put("Opération interrompue.")
         except Exception as exc:
+            self._trace("ERREUR", traceback.format_exc())
             self.events.put(f"Opération arrêtée : {exc}")
         finally:
             self._reconnect_pending = False
@@ -1483,6 +1567,7 @@ class BotApp:
                 self._wait(2)
                 continue
             image = WindowDriver.capture(window)
+            self._trace("CAPTURE", f"Reconnexion : image reçue {image.width}x{image.height}")
             point = connection_retry_point(image)
             if point is not None:
                 stable = 0
@@ -1508,7 +1593,28 @@ class BotApp:
 
     def close(self):
         self.stop()
+        self._trace("SESSION", "Fermeture de l'application")
         self.root.destroy()
+        self.journal.close()
+
+    def export_log(self):
+        destination = filedialog.asksaveasfilename(
+            parent=self.root, title="Enregistrer le journal du bot",
+            initialfile=f"CoCFarmBot-journal-{datetime.now():%Y%m%d-%H%M%S}.txt",
+            defaultextension=".txt", filetypes=[("Fichier texte", "*.txt")])
+        if not destination:
+            return
+        path = Path(destination)
+        if path.suffix.lower() != ".txt":
+            path = Path(str(path) + ".txt")
+        try:
+            self._trace("EXPORT", f"Copie du journal vers {path}")
+            self.journal.export(path)
+        except (OSError, ValueError) as exc:
+            self._trace("ERREUR", f"Export du journal impossible : {exc}")
+            messagebox.showerror("Export impossible", str(exc), parent=self.root)
+            return
+        self.write(f"Journal enregistré : {path}. Envoyez ce fichier pour analyser un blocage.")
 
     def _build(self):
         from dashboard import build
@@ -1577,7 +1683,9 @@ class BotApp:
             else:
                 self.events.put("Capture reçue ; écran non reconnu pour la lecture des ressources.")
         except OperationCancelled: raise
-        except Exception as exc: self.events.put(f"Lecture impossible : {exc}")
+        except Exception as exc:
+            self._trace("ERREUR", traceback.format_exc())
+            self.events.put(f"Lecture impossible : {exc}")
 
     def _show_preview(self, image):
         self.activity_tabs.select(1)
@@ -1607,7 +1715,9 @@ class BotApp:
             ]
             self.events.put(" | ".join(values)); self.events.put(f"Relevé enregistré : {ACCOUNT_SNAPSHOT_PATH}")
         except OperationCancelled: raise
-        except Exception as exc: self.events.put(f"Relevé du profil impossible : {exc}")
+        except Exception as exc:
+            self._trace("ERREUR", traceback.format_exc())
+            self.events.put(f"Relevé du profil impossible : {exc}")
 
     def persist(self):
         if self._busy():
@@ -1623,6 +1733,7 @@ class BotApp:
             if not 0 <= candidate.min_gold <= 2_500_000 or not 0 <= candidate.min_elixir <= 2_500_000 or not 0 <= candidate.loot_margin_percent <= 25 or not 0 <= candidate.electrodragon_count <= 50 or not 0 <= candidate.dragon_count <= 50: raise ValueError
             save_settings(candidate)
             self.settings = candidate
+            self._trace("CONFIG", json.dumps(asdict(candidate), ensure_ascii=False))
             self.write(f"Configuration enregistrée : attaque dès {effective_minimum(candidate.min_gold, candidate.loot_margin_percent):,} or / {effective_minimum(candidate.min_elixir, candidate.loot_margin_percent):,} élixir.")
             return True
         except ValueError: messagebox.showerror("Valeur invalide","Seuils : 0 à 2 500 000 ; marge : 0 à 25 % ; troupes : 0 à 50.");return False
@@ -1679,7 +1790,9 @@ class BotApp:
             self.upgrade_walls_to_reserve(window, independent=True)
         except ReconnectRequired: raise
         except OperationCancelled: self.events.put("Amélioration des remparts interrompue.")
-        except Exception as exc: self.events.put(f"Remparts arrêtés : {exc}")
+        except Exception as exc:
+            self._trace("ERREUR", traceback.format_exc())
+            self.events.put(f"Remparts arrêtés : {exc}")
         finally:
             if not getattr(self,'_reconnect_pending',False):
                 self.stop_event.set(); self.events.put("Amélioration des remparts terminée.")
@@ -1785,6 +1898,7 @@ class BotApp:
                 if builders_menu_open(menu):
                     with self.action_lock:
                         self._check_stopped()
+                        self._trace("DÉFILEMENT", "Recherche des remparts : descendre le menu")
                         if not WindowDriver.scroll_menu(window):
                             raise RuntimeError('Défilement des remparts refusé.')
                 if self._wait(.4): break
@@ -1979,6 +2093,7 @@ class BotApp:
                 for _ in range(4):
                     image = self._battle_capture(window)
                     observed = read_troop_count(image, label)
+                    self._trace("COMPTEUR", f"{label} : {observed}")
                     self._check_stopped()
                     if observed is not None and observed == previous:
                         return observed
@@ -1990,10 +2105,13 @@ class BotApp:
 
     def _battle_capture(self, window, allow_unselected_reward=False):
         image = self._capture(window)
+        reward_open = battle_reward_open(image)
+        if not reward_open:
+            self._reward_trace_at = 0
         deadline = time.monotonic() + 30
         clicked = False
         chosen_label = None
-        while battle_reward_open(image):
+        while reward_open:
             if battle_result_return_ready(image):
                 break
             if time.monotonic() >= deadline:
@@ -2002,17 +2120,30 @@ class BotApp:
                 choice = battle_reward_choice(image)
                 if choice is not None:
                     point, label = choice
+                    self._trace("RÉCOMPENSE", f"Carte choisie : {label!r} à {point}")
                     if not self._click(window, *point):
                         raise RuntimeError("Sélection de la récompense refusée.")
                     clicked = True
                     chosen_label = label
-                elif allow_unselected_reward:
+                else:
+                    now = time.monotonic()
+                    if getattr(self, "journal", None) is not None and now >= getattr(self, "_reward_trace_at", 0):
+                        try:
+                            raw = read_text(crop_percent(image, Roi(23, 25, 77, 78)), scale=1)
+                        except OperationCancelled:
+                            raise
+                        except Exception as exc:
+                            raw = f"Lecture diagnostique impossible : {exc}"
+                        self._trace("RÉCOMPENSE", f"Choix visible sans carte sûre ; texte lu={raw[:300]!r}")
+                        self._reward_trace_at = now + 5
+                if choice is None and allow_unselected_reward:
                     # After the army is deployed, an event offering only
                     # troop cards must not abort the result wait. The outer
                     # battle deadline keeps watching until the result appears.
                     return image
             self._wait(.15)
             image = self._capture(window)
+            reward_open = battle_reward_open(image)
         if chosen_label is not None:
             self.events.put(f"Récompense de l’événement sélectionnée : {chosen_label} ; fermeture du choix confirmée.")
         return image
@@ -2068,11 +2199,13 @@ class BotApp:
 
     def prepare_attack(self, window):
         self._capture(window)
-        for _ in range(16):
+        for step in range(16):
             with self.action_lock:
                 self._check_stopped()
+                self._trace("ZOOM", f"Dézoom {step + 1}/16 demandé")
                 if not WindowDriver.zoom_out_step(window):
                     raise RuntimeError("Commande de dézoom refusée.")
+                self._trace("ZOOM", f"Dézoom {step + 1}/16 envoyé")
             self._wait(.06)
         self._wait(.35)
         self._capture(window)
@@ -2081,14 +2214,20 @@ class BotApp:
     def wait_for_battle_return(self, window):
         """Wait for Clash's result screen, return home, then allow the next cycle."""
         deadline=time.monotonic()+240
+        next_progress = time.monotonic() + 15
         self.events.put("Attente de la fin de bataille avant le prochain cycle.")
         while not self.stop_event.is_set() and time.monotonic()<deadline:
             image=self._battle_capture(window, allow_unselected_reward=True)
             if village_home_ready(image): return True
             if battle_result_return_ready(image) or has_screen_text(image,"retour au village","victoire","défaite"):
+                self._trace("COMBAT", "Résultat reconnu ; lecture des gains puis retour au village")
                 self.record_battle_earnings(window)
                 self._click(window, *layout_values("RETURN_HOME_BUTTON")); self._wait(4)
-            else: self._wait(.35)
+            else:
+                if time.monotonic() >= next_progress:
+                    self._trace("COMBAT", f"Toujours en cours ; reste au plus {deadline-time.monotonic():.0f} s")
+                    next_progress = time.monotonic() + 15
+                self._wait(.35)
         self.events.put("Fin de bataille non confirmée : cycle arrêté sans cliquer Terminer la bataille."); return False
 
     def record_battle_earnings(self, window):
@@ -2100,6 +2239,7 @@ class BotApp:
         for _ in range(5):
             result_image = self._battle_capture(window)
             amounts = read_battle_earnings(result_image)
+            self._trace("BUTIN FINAL", f"Lecture des gains : {amounts}")
             if amounts is not None and amounts == previous:
                 if stats.finish(amounts):
                     self.events.put(StatsEvent(dict(stats.data)))
@@ -2187,7 +2327,9 @@ class BotApp:
                 if not self.wait_for_battle_return(window) or not self.settings.chain_attacks: return
         except ReconnectRequired: raise
         except OperationCancelled: self.events.put("Recherche interrompue.")
-        except Exception as exc: self.events.put(f"Recherche arrêtée : {exc}")
+        except Exception as exc:
+            self._trace("ERREUR", traceback.format_exc())
+            self.events.put(f"Recherche arrêtée : {exc}")
         finally:
             if not getattr(self,'_reconnect_pending',False):
                 self.stop_event.set(); self.events.put("Bot arrêté.")
@@ -2219,6 +2361,7 @@ class BotApp:
                         self._wait(.5)
                         continue
                     loot = read_enemy_loot(image)
+                    self._trace("BUTIN OCR", json.dumps(loot.raw, ensure_ascii=False))
             except TimeoutError:
                 self._check_stopped()
                 self._wait(.1)
@@ -2260,7 +2403,7 @@ class BotApp:
                         variable.set(f"{event.totals[key]:,}".replace(",", " "))
                     self.stats_count.set(f"{event.totals['battles']} combat(s) comptabilisé(s) · cumul sauvegardé")
                 else:
-                    self.write(event)
+                    self.write(event, record=False)
         except queue.Empty:pass
         running=self._busy()
         self.start_button.state(["disabled"] if running else ["!disabled"])
@@ -2272,8 +2415,14 @@ class BotApp:
             button.state(['disabled'] if running else ['!disabled'])
         if not running and self.run_state.get() in ("EN COURS", "LECTURE"): self.run_state.set("PRÊT")
         self.root.after(250,self._pump)
-    def write(self,text):
-        logging.info(text);self.status.set(text);self.log.configure(state="normal");self.log.insert("end",text+"\n");self.log.see("end");self.log.configure(state="disabled")
+    def write(self, text, record=True):
+        if record:
+            self._trace("INTERFACE", text)
+        self.status.set(text)
+        self.log.configure(state="normal")
+        self.log.insert("end", text+"\n")
+        self.log.see("end")
+        self.log.configure(state="disabled")
     def run(self):self.root.mainloop()
 
 

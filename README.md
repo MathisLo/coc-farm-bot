@@ -75,6 +75,8 @@ La reconnaissance des héros exige une barre de vie verte horizontale sous un bo
 - `%USERPROFILE%\CoCFarmBot\bot.log` : journal détaillé.
 - `%USERPROFILE%\CoCFarmBot\account_snapshot.json` : dernier relevé demandé via **Relever le profil**.
 
+Dans l'onglet **Journal**, cliquez sur **Télécharger le journal (.txt)**, choisissez où enregistrer le fichier, puis joignez ce `.txt` à votre message en cas de blocage. Le bouton reste disponible pendant un cycle. L'export contient les étapes du bot, les réglages utilisés, les lectures d'écran, les clics et leur résultat, les attentes, les valeurs OCR utiles et les erreurs avec leur trace. Il copie le journal jusqu'au moment du clic, même si le bot continue ensuite. Les captures d'écran ne sont pas incluses dans le fichier texte.
+
 Le suivi des fonctionnalités et des validations se trouve dans [Notion](https://app.notion.com/p/3dccca7fe8b78060a5c3ca2aa4b73fa8). Le dépôt GitHub contient les sources et chaque mise à jour publiée fournit un exécutable Windows testé dans les Releases. Les fichiers de construction et les captures de diagnostic restent locaux.
 # Statistiques de récolte
 

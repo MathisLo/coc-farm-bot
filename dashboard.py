@@ -191,6 +191,9 @@ def build(app):
     button = ttk.Button(separate, text='Améliorer les remparts', command=app.start_walls, style='Quiet.TButton')
     button.pack(fill='x', pady=5)
     app.independent_buttons.append(button)
+    app.export_log_button = ttk.Button(journal, text='↓  Télécharger le journal (.txt)',
+                                       command=app.export_log, style='Quiet.TButton')
+    app.export_log_button.pack(anchor='e', padx=8, pady=(8, 0))
     app.log = tk.Text(journal, height=6, width=30, state='disabled', wrap='word',
                       bg=COLORS['card'], fg=COLORS['text'], relief='flat', padx=12, pady=16,
                       font=('Cascadia Mono', 10), spacing1=5, spacing3=5)

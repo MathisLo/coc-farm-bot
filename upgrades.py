@@ -166,6 +166,7 @@ def find_payable_upgrade(app, window, free, balances):
         app._capture(window)
         with app.action_lock:
             app._check_stopped()
+            app._trace('DÉFILEMENT', 'Améliorations : retour au début de la liste')
             if not m.WindowDriver.scroll_menu(window,delta=1200):
                 raise RuntimeError('Retour au début de la liste refusé.')
         app._wait(.2)
@@ -187,6 +188,7 @@ def find_payable_upgrade(app, window, free, balances):
         previous = signature
         with app.action_lock:
             app._check_stopped()
+            app._trace('DÉFILEMENT', 'Améliorations : ligne suivante')
             if not m.WindowDriver.scroll_menu(window):
                 raise RuntimeError('Défilement de la liste des améliorations refusé.')
         app._wait(.4)
