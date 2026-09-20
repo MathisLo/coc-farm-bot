@@ -255,6 +255,7 @@ class DeploymentRegressions(unittest.TestCase):
         app = app_without_gui()
         app.settings = main.replace(app.settings, upgrade_recommended=False)
         order = []
+        app.collect_village_resources = Mock()
         app.upgrade_walls_to_reserve = Mock()
         app.open_search = Mock(return_value=True)
         app.find_suitable_base = Mock(return_value=True)
@@ -264,6 +265,24 @@ class DeploymentRegressions(unittest.TestCase):
         with patch.object(main.WindowDriver, "resolve", return_value=object()):
             app.farm_loop()
         self.assertEqual(order, ["zoom", "deploy", "zoom", "deploy"])
+
+    def test_collection_icons_disappear_after_real_village_collection(self):
+        captures = Path(__file__).parent / "testdata"
+        with Image.open(captures / "suggested_menu.png") as before, \
+             Image.open(captures / "wall_group_two_no_ten.png") as after:
+            icons = main.find_collectible_icons(before)
+            self.assertEqual(len(icons), 12)
+            self.assertEqual({kind for kind, *_ in icons}, {"gold", "elixir"})
+            self.assertEqual(main.find_collectible_icons(after), [])
+            self.assertFalse(main.collectible_icon_still_visible(after, "gold", 612, 322))
+
+    def test_collection_does_not_click_through_builder_menu(self):
+        app = app_without_gui()
+        with Image.open(Path(__file__).parent / "testdata" / "suggested_menu.png") as image:
+            app._capture = Mock(return_value=image)
+            app._click = Mock()
+            self.assertEqual(app.collect_village_resources(object()), 0)
+            app._click.assert_not_called()
 
     def test_stop_interrupts_zoom_before_another_wheel_message(self):
         app = app_without_gui()
@@ -291,7 +310,7 @@ class DeploymentRegressions(unittest.TestCase):
     def test_reward_checked_while_waiting_after_deployment(self):
         app = app_without_gui()
         app._battle_capture = Mock(return_value=object())
-        with patch.object(main, "has_all_screen_text", return_value=True):
+        with patch.object(main, "village_home_ready", return_value=True):
             self.assertTrue(app.wait_for_battle_return(object()))
         app._battle_capture.assert_called_once()
 
@@ -488,6 +507,11 @@ class ConnectionRegressions(unittest.TestCase):
             self.assertAlmostEqual(point[0],32.7,delta=.2)
             self.assertAlmostEqual(point[1],56.1,delta=.2)
         self.assertIsNone(main.connection_retry_point(Image.new('RGB',(1920,1080),'white')))
+
+    def test_inactivity_dialog_blocks_village_and_offers_reload(self):
+        with Image.open(Path(__file__).parent/'testdata/inactive_dialog.png') as image:
+            self.assertEqual(main.connection_retry_point(image),(35,56.2))
+            self.assertFalse(main.village_home_ready(image))
 
     def test_connection_unwinds_action_before_restart(self):
         app=app_without_gui()

@@ -21,7 +21,7 @@ try {
     $buildDirectory = Join-Path $PSScriptRoot 'build'
     $stagingDirectory = Join-Path $buildDirectory 'release'
     New-Item -ItemType Directory -Path $buildDirectory -Force | Out-Null
-    $sourceNames = @('main.py', 'calibration.py', 'farm_stats.py', 'dashboard.py', 'upgrades.py', 'requirements.txt')
+    $sourceNames = @('main.py', 'calibration.py', 'farm_stats.py', 'dashboard.py', 'upgrades.py', 'requirements.txt', 'assets/collector_gold.png', 'assets/collector_elixir.png')
     $sourceHashes = [ordered]@{}
     foreach ($sourceName in $sourceNames) {
         $sourceHashes[$sourceName] = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot $sourceName) -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -30,7 +30,7 @@ try {
     [ordered]@{ built_at_utc = [DateTime]::UtcNow.ToString('o'); sources = $sourceHashes } |
         ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $buildInfoPath -Encoding UTF8
 
-    & $projectPython -m PyInstaller --noconfirm --onefile --windowed --name CoCFarmBot --specpath $buildDirectory --workpath $buildDirectory --distpath $stagingDirectory --collect-all winrt --add-data "$buildInfoPath;." (Join-Path $PSScriptRoot 'main.py')
+    & $projectPython -m PyInstaller --noconfirm --onefile --windowed --name CoCFarmBot --specpath $buildDirectory --workpath $buildDirectory --distpath $stagingDirectory --collect-all winrt --add-data "$buildInfoPath;." --add-data "$(Join-Path $PSScriptRoot 'assets');assets" (Join-Path $PSScriptRoot 'main.py')
     if ($LASTEXITCODE -ne 0) { throw 'Construction échouée : ancien exécutable conservé.' }
     foreach ($sourceName in $sourceNames) {
         if ((Get-FileHash -LiteralPath (Join-Path $PSScriptRoot $sourceName) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $sourceHashes[$sourceName]) {

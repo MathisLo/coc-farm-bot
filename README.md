@@ -109,4 +109,6 @@ L’onglet **Actions** permet de lancer seulement les bâtiments, les remparts o
 
 Sur le message Google Play Jeux **Connexion perdue**, le bot clique sur **Réessayer**, attend un écran de jeu confirmé puis reprend l’action depuis un état relu. Il ne répète pas le clic interrompu. **Arrêter** interrompt aussi les tentatives de reconnexion.
 
+Au village, le bot collecte les bulles d’or et d’élixir reconnues sur les mines et extracteurs avant de lancer les autres actions. Il vérifie que chaque bulle disparaît après le clic et reporte la collecte si un menu couvre le village. Le message d’inactivité **Déconnexion suite à une période d’inactivité** déclenche **Recharger le jeu** ; le bot attend ensuite deux captures concordantes avant de reprendre le cycle.
+
 Un résultat de combat illisible est archivé avec son identifiant dans `%USERPROFILE%\CoCFarmBot\unread-results` avant la reprise du cycle. Ses gains ne sont pas inventés ni ajoutés aux statistiques. Les réserves et les confirmations de dépenses, elles, doivent toujours être lisibles pour autoriser un achat.

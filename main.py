@@ -29,6 +29,7 @@ CONFIG_PATH = APP_DIR / "config-v2.json"
 LOG_PATH = APP_DIR / "bot.log"
 ACCOUNT_SNAPSHOT_PATH = APP_DIR / "account_snapshot.json"
 STATS_PATH = APP_DIR / "farm-stats.json"
+ASSET_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "assets"
 OCR_TIMEOUT = 8.0
 BASE_READ_TIMEOUT = 35.0
 _operation = threading.local()
@@ -416,7 +417,7 @@ def read_safe_reserve(image: Image.Image, resource: str) -> int | None:
 
 
 def parse_reserve_number(text: str) -> int | None:
-    corrected = text.translate(str.maketrans({"O": "0", "o": "0", "I": "1", "l": "1", "i": "1", "S": "5", "s": "5", "B": "8", "g": "9", "G": "9", "-": " ", "*": " ", ",": " "}))
+    corrected = text.translate(str.maketrans({"O": "0", "o": "0", "I": "1", "l": "1", "i": "1", "S": "5", "s": "5", "B": "8", "g": "9", "G": "9", "-": " ", "*": " ", ",": " ", "x": " ", "L": " "}))
     match = re.search(r"(?<!\d)(\d{1,2})\s+(\d{3})\s+(\d{3})(?!\d)", corrected)
     if match: return int("".join(match.groups()))
     stripped = corrected.strip(" ,-.")
@@ -633,6 +634,12 @@ def has_all_screen_text(image: Image.Image, *needles: str) -> bool:
     return all((token := re.sub(r"[^a-z0-9]", "", unicodedata.normalize("NFKD", needle.casefold()).encode("ascii", "ignore").decode("ascii"))) in text or token[:max(4, len(token)-3)] in text for needle in needles)
 
 
+def village_home_ready(image: Image.Image) -> bool:
+    return (connection_retry_point(image) is None
+            and has_screen_text(crop_percent(image, Roi(0, 82, 20, 100)), "attaquer")
+            and has_screen_text(crop_percent(image, Roi(85, 82, 100, 100)), "magasin"))
+
+
 @dataclass(frozen=True)
 class GameWindow:
     hwnd: int; title: str; width: int; height: int
@@ -812,17 +819,75 @@ def read_word_centers(image: Image.Image) -> list[tuple[str, float, float]]:
     finally: path.unlink(missing_ok=True)
 
 
+def _collector_reference(resource):
+    with Image.open(ASSET_DIR / f"collector_{resource}.png") as asset:
+        return asset.convert("RGB")
+
+
+def _collector_score(pixels, x, y, samples):
+    return sum(sum(abs(a - b) for a, b in zip(rgb, pixels[x + dx, y + dy]))
+               for dx, dy, rgb in samples) / (len(samples) * 3)
+
+
+def find_collectible_icons(image: Image.Image):
+    """Locate the gold/elixir bubbles over village collectors, excluding dark elixir."""
+    normal = image.convert("RGB").resize((1920, 1080), Image.Resampling.BILINEAR)
+    pixels = normal.load()
+    found = []
+
+    def pale_border(rgb):
+        r, g, b = rgb
+        return 145 < r < 245 and r - 17 < g < r + 26 and 75 < b < r - 17
+
+    for resource in ("gold", "elixir"):
+        reference = _collector_reference(resource).load()
+        samples = [(dx, dy, reference[dx + 14, dy + 14])
+                   for dx in range(-14, 15, 4) for dy in range(-14, 15, 4)]
+        coarse = samples[::4]
+        for y in range(80, 900, 4):
+            for x in range(192, 1720, 4):
+                r, g, b = pixels[x, y]
+                center = (r > 170 and g > 110 and b < 110) if resource == "gold" else (
+                    r > 130 and b > 120 and g < 130 and r > g * 1.35 and b > g * 1.3)
+                if not center:
+                    continue
+                if not (any(pale_border(pixels[x - 18 + shift, y]) for shift in (-4, 0, 4))
+                        and any(pale_border(pixels[x + 18 + shift, y]) for shift in (-4, 0, 4))):
+                    continue
+                if _collector_score(pixels, x, y, coarse) > 80:
+                    continue
+                score, point = min((_collector_score(pixels, x + dx, y + dy, samples), (x + dx, y + dy))
+                                   for dy in range(-4, 5) for dx in range(-4, 5))
+                if score < 34 and not any(kind == resource and abs(point[0] - px) < 25 and abs(point[1] - py) < 25
+                                          for kind, px, py, _ in found):
+                    found.append((resource, *point, score))
+    return sorted(found, key=lambda icon: icon[3])
+
+
+def collectible_icon_still_visible(image, resource, x, y):
+    normal = image.convert("RGB").resize((1920, 1080), Image.Resampling.BILINEAR)
+    reference = _collector_reference(resource)
+    template = reference.load()
+    samples = [(dx, dy, template[dx + 14, dy + 14])
+               for dx in range(-14, 15, 4) for dy in range(-14, 15, 4)]
+    pixels = normal.load()
+    return min(_collector_score(pixels, x + dx, y + dy, samples)
+               for dx in (-2, 0, 2) for dy in (-2, 0, 2)) < 38
+
+
 def wall_menu_row_matches(image,y):
     # The builder menu is translucent: a village label visible through it
     # is not a menu row. Require its green upgrade tag and the row caption.
-    pixels=list(crop_percent(image,Roi(39.3,y-1.4,40.9,y+1.4)).convert("RGB").get_flattened_data())
-    if sum(g>100 and g>r*1.2 and g>b*1.4 for r,g,b in pixels)<len(pixels)*.2:
-        return False
-    crop=crop_percent(image,Roi(41.1,y-1.4,50,y+1.4))
-    for scale in (2,1):
-        text=read_text(crop,scale=scale).casefold().strip(" .,:;!'\"")
-        if text.startswith(("rempar","rempamt")):
-            return True
+    for tag_roi, label_roi in ((Roi(39.3,y-1.4,40.9,y+1.4), Roi(41.1,y-1.4,50,y+1.4)),
+                               (Roi(38.0,y-1.4,39.05,y+1.4), Roi(39.6,y-1.4,50.5,y+1.4))):
+        pixels=list(crop_percent(image,tag_roi).convert("RGB").get_flattened_data())
+        if sum(g>100 and g>r*1.2 and g>b*1.4 for r,g,b in pixels)<len(pixels)*.2:
+            continue
+        crop=crop_percent(image,label_roi)
+        for scale in (2,1):
+            text=read_text(crop,scale=scale).casefold().strip(" .,:;!'\"")
+            if text.startswith(("rempar","rempamt")):
+                return True
     return False
 
 
@@ -857,16 +922,18 @@ def builders_menu_open(image: Image.Image) -> bool:
     # The menu can be scrolled past its heading. Both pale vertical borders
     # remain visible and distinguish its rows from labels in the village.
     rgb=image.convert("RGB")
-    borders=[]
-    for x in (38.65,63.45):
-        hits=0
-        for y in range(15,61):
-            px,py=round(image.width*x/100),round(image.height*y/100)
-            pixels=[rgb.getpixel((max(0,min(image.width-1,px+dx)),py)) for dx in (-1,0,1)]
-            hits+=any(min(p)>140 and max(p)-min(p)<60 for p in pixels)
-        borders.append(hits/46)
-    if min(borders)>.8:
-        return True
+    for xs, ys, brightness, spread in (((38.65,63.45),range(15,61),140,60),
+                                       ((36.85,65.15),range(13,63),130,70)):
+        borders=[]
+        for x in xs:
+            hits=0
+            for y in ys:
+                px,py=round(image.width*x/100),round(image.height*y/100)
+                pixels=[rgb.getpixel((max(0,min(image.width-1,px+dx)),py)) for dx in (-1,0,1)]
+                hits+=any(min(p)>brightness and max(p)-min(p)<spread for p in pixels)
+            borders.append(hits/len(ys))
+        if min(borders)>.8:
+            return True
     for roi in (layout_roi("SCREEN_ROIS", "builders_menu"), layout_roi("SCREEN_ROIS", "wall_menu")):
         text = read_text(crop_percent(image, roi), scale=2).casefold()
         if "disponible" in text or "amélioration" in text or re.search(r"rempar\w*\s*x\s*\d+", text):
@@ -919,8 +986,20 @@ def find_wall_more_button(image: Image.Image):
 
 
 def wall_multi_mode(image: Image.Image) -> bool:
-    text = read_text(white_text_mask(crop_percent(image, layout_roi("SCREEN_ROIS", "wall_actions"))), scale=2).casefold()
-    return "remp" in text and any(token in text for token in ("aj", "aiou", "supp"))
+    crop = white_text_mask(crop_percent(image, layout_roi("SCREEN_ROIS", "wall_actions")))
+    text = ' '.join(read_text(crop, scale=scale).casefold() for scale in (1, 2, 3))
+    return "remp" in text and any(token in text for token in ("aj", "aiou", "supp", "rimer"))
+
+
+def read_wall_price(image):
+    readings = []
+    for variant in (image, white_text_mask(image)):
+        for scale in (2, 3):
+            raw = read_text(variant, scale=scale).strip(" +.,'\"*").replace('O', '0').replace('o', '0')
+            if re.fullmatch(r"\d[\d\s]*", raw):
+                readings.append(int(re.sub(r"\s", "", raw)))
+    agreed = [value for value in set(readings) if value > 0 and readings.count(value) >= 2]
+    return max(agreed) if agreed else None
 
 
 def wall_group_controls(image, single=False):
@@ -942,14 +1021,14 @@ def wall_group_controls(image, single=False):
     for scale in (2,1,3):
         words = read_word_centers(crop.resize((crop.width*scale,crop.height*scale)))
         for text, x, y in words:
-            label = normal(text).replace('0','o').replace('1','l').strip(".,:!(){}?'\"")
+            label = re.sub(r'[^a-z]', '', normal(text).replace('0','o').replace('1','l'))
             x, y = roi.x1+x*.6, roi.y1+y*.06
             target = None
-            if label.endswith(('ajouter','aiouter')):
+            if label.startswith(('ajout','aiout')):
                 target = adds
-            elif label in ('supprimer','supprimea','suppripaer'):
+            elif label.startswith('sup') and ('rim' in label or 'prim' in label):
                 target = removes
-            elif label in ('ameliorer','ameiiorer','amelioaer','ameiioaer'):
+            elif label.startswith(('amelio','ameiio','amelioa','ameiioa')):
                 target = upgrades
             if target is not None and not any(abs(px-x)<.5 for px,py in target):
                 target.append((x,y))
@@ -961,8 +1040,13 @@ def wall_group_controls(image, single=False):
         if resource is None:
             continue
         price = None
-        for price_roi in (Roi(x-3,y-8.7,x+2.1,y-6.7), Roi(x-2.7,75,x+2.1,77), Roi(x-3.6,y-9.5,x+2.1,y-6.2)):
-            price = read_result_amount(crop_percent(image,price_roi),main_result=True)
+        for price_roi in (Roi(x-3,y-8.7,x+2.1,y-6.7), Roi(x-2.7,75,x+2.1,77),
+                          Roi(x-3.6,y-9.5,x+2.1,y-6.2), Roi(x-4.9,y-9.5,x+2.1,y-5.9),
+                          Roi(x-5.1,y-9.4,x+2.3,y-6.0)):
+            price_crop = crop_percent(image,price_roi)
+            price = read_wall_price(price_crop)
+            if price is None:
+                price = read_result_amount(price_crop,main_result=True)
             if price is not None:
                 break
         if price is not None and price > 0:
@@ -1109,6 +1193,10 @@ def connection_retry_point(image):
         return None
     heading=read_text(crop_percent(image,Roi(29,41,71,47)),scale=2).casefold()
     if not re.search(r'connexion\s+perdue',heading):
+        message=read_text(crop_percent(image,Roi(28,46,70,51)),scale=1).casefold()
+        button=read_text(crop_percent(image,Roi(28,54,45,59)),scale=1).casefold()
+        if 'inactivit' in message and 'recharger le jeu' in button:
+            return (35,56.2)
         return None
     for text,x,y in read_word_centers(crop_percent(image,Roi(29,54,71,60))):
         label=''.join(c for c in unicodedata.normalize('NFD',text.casefold()) if unicodedata.category(c)!='Mn')
@@ -1300,7 +1388,7 @@ class BotApp:
             self._reconnect_pending = False
 
     def reconnect_game(self):
-        self.events.put('Connexion perdue : reconnexion automatique en cours.')
+        self.events.put('Jeu déconnecté : reconnexion automatique en cours.')
         stable = 0
         last_attempt = -float('inf')
         while not self.stop_event.is_set():
@@ -1316,9 +1404,9 @@ class BotApp:
                     if not self._click(window,*point):
                         raise RuntimeError('Reconnexion refusée par la fenêtre du jeu.')
                     last_attempt = time.monotonic()
-                    self.events.put('Réessayer envoyé ; attente du jeu.')
+                    self.events.put('Reconnexion envoyée ; attente du jeu.')
                     self._wait(3)
-            elif has_all_screen_text(image,'attaquer','magasin') or has_screen_text(image,'victoire','défaite','fin de la bataille'):
+            elif village_home_ready(image) or has_screen_text(image,'victoire','défaite','fin de la bataille'):
                 stable += 1
                 if stable >= 2:
                     self.events.put('Connexion rétablie : reprise depuis un état relu du jeu.')
@@ -1394,7 +1482,7 @@ class BotApp:
         try:
             image=self._capture(window)
             self.events.put(PreviewEvent(image, window.title))
-            if has_all_screen_text(image, "attaquer", "magasin"):
+            if village_home_ready(image):
                 gold, elixir=read_safe_reserve(image, "gold"), read_safe_reserve(image, "elixir")
                 self.events.put(f"Village : or {gold:,} / élixir {elixir:,}." if gold is not None and elixir is not None else "Village détecté ; réserves illisibles.")
             elif enemy_loot_screen_ready(image):
@@ -1482,7 +1570,7 @@ class BotApp:
                 self.settings = replace(original, chain_attacks=False, upgrade_recommended=False, upgrade_wall_between_attacks=False)
                 self.farm_loop()
             elif action == 'buildings':
-                if not has_all_screen_text(self._capture(window),'attaquer','magasin'):
+                if not village_home_ready(self._capture(window)):
                     raise RuntimeError('Revenir au village pour lancer les bâtiments.')
                 from upgrades import upgrade_suggested
                 upgrade_suggested(self,window)
@@ -1522,13 +1610,45 @@ class BotApp:
             if self._wait(.4): break
         return None
 
+    def collect_village_resources(self, window):
+        """Collect only visually confirmed mine/extractor bubbles in the home village."""
+        def village_clear(image):
+            return village_home_ready(image) and not builders_menu_open(image) and not daily_reward_open(image)
+
+        if not all(village_clear(self._capture(window)) for _ in range(2)):
+            self.events.put("Collecte reportée : village non confirmé.")
+            return 0
+        before = self.stable_reserves(window)
+        icons = find_collectible_icons(self._capture(window))
+        collected = {"gold": 0, "elixir": 0}
+        for resource, x, y, _score in icons:
+            fresh = self._capture(window)
+            if not village_clear(fresh):
+                self.events.put("Collecte interrompue : écran du village modifié.")
+                break
+            if not collectible_icon_still_visible(fresh, resource, x, y):
+                continue
+            if not self._click(window, x * 100 / 1920, y * 100 / 1080):
+                raise RuntimeError("Clic de collecte refusé.")
+            self._wait(.6)
+            after_click = self._capture(window)
+            if collectible_icon_still_visible(after_click, resource, x, y):
+                self.events.put(f"Collecte {resource} non confirmée à {x},{y} : arrêt prudent.")
+                break
+            collected[resource] += 1
+        after = self.stable_reserves(window) if sum(collected.values()) else before
+        if sum(collected.values()):
+            changes = (after[0] - before[0], after[1] - before[1]) if before and after else None
+            self.events.put(f"Collecte des mines/extracteurs : {collected['gold']} action(s) or, {collected['elixir']} action(s) élixir ; variation des réserves : {changes}.")
+        return sum(collected.values())
+
     def _wall_click(self, window, point, label):
         if not self._click(window, *point): raise RuntimeError(f"Clic {label} refusé.")
         self._wait(.45)
 
     def stable_wall_group(self, window, resource=None, single=False):
         previous = None
-        for _ in range(4):
+        for _ in range(8):
             controls = wall_group_controls(self._capture(window),single=single)
             if controls is not None and resource is not None and resource not in controls["payments"]:
                 controls = None
@@ -1841,7 +1961,7 @@ class BotApp:
         self.events.put("Attente de la fin de bataille avant le prochain cycle.")
         while not self.stop_event.is_set() and time.monotonic()<deadline:
             image=self._battle_capture(window)
-            if has_all_screen_text(image,"attaquer","magasin"): return True
+            if village_home_ready(image): return True
             if has_screen_text(image,"retour au village","victoire","défaite"):
                 self.record_battle_earnings(window)
                 self._click(window, *layout_values("RETURN_HOME_BUTTON")); self._wait(4)
@@ -1912,12 +2032,14 @@ class BotApp:
                 if stats and stats.data.get("pending"):
                     if stats.data["pending"]["window_title"] != window.title:
                         raise RuntimeError("Revenir au compte du combat en attente pour comptabiliser son butin.")
-                    if not has_all_screen_text(self._capture(window), "attaquer", "magasin"):
+                    if not village_home_ready(self._capture(window)):
                         if not self.wait_for_battle_return(window): return
                         if not self.settings.chain_attacks: return
                     else:
                         self.events.put("Résultat du combat précédent absent : sa récolte ne peut pas être comptabilisée.")
                         stats.clear_pending()
+                if not self.settings.dry_run:
+                    self.collect_village_resources(window)
                 if self.settings.upgrade_recommended and not self.settings.dry_run:
                     from upgrades import upgrade_suggested
                     upgrade_suggested(self, window)

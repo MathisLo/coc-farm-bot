@@ -38,7 +38,7 @@ class StatisticsTests(unittest.TestCase):
             app._battle_capture=Mock(return_value=frame)
             app._wait=Mock()
             app._click=Mock(return_value=True)
-            with patch.object(main,'read_battle_earnings',return_value=None),patch.object(main,'has_all_screen_text',side_effect=[False,True]),patch.object(main,'has_screen_text',return_value=True):
+            with patch.object(main,'read_battle_earnings',return_value=None),patch.object(main,'village_home_ready',side_effect=[False,True]),patch.object(main,'has_screen_text',return_value=True):
                 self.assertTrue(app.wait_for_battle_return(object()))
             app._click.assert_called_once()
             self.assertIsNone(app.farm_stats.data['pending'])

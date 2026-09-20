@@ -22,6 +22,12 @@ def is_town_hall(title):
     return any(word in label for word in ('hotel', 'hobel', 'ville', 'hdv'))
 
 
+def confirmation_headings(image):
+    m = engine()
+    return [normal(m.read_text(m.crop_percent(image, roi), scale=scale))
+            for roi, scale in ((m.Roi(15,3,85,10),1), (m.Roi(20,4,80,9),2))]
+
+
 def builder_count(image, with_total=False):
     m = engine()
     from PIL import Image, ImageDraw, ImageFont
@@ -119,6 +125,8 @@ def suggested_items(image, include_others=False, include_town_hall=False):
         focused = m.read_text(m.crop_percent(image,m.Roi(41,screen_y-2,54,screen_y+2)),scale=2)
         if focused:
             title = re.sub(r'\s*x\w+\s*$', '', focused)
+        if normal(title).startswith('remp'):
+            continue
         if is_town_hall(title) and not include_town_hall:
             continue
         cost = m.read_result_amount(m.crop_percent(image,m.Roi(55.7,screen_y-2,62.7,screen_y+2)))
@@ -201,7 +209,20 @@ def upgrade_suggested(app, window):
             return completed
         if not m.builders_menu_open(app._capture(window)):
             app._wall_click(window, m.BUILDERS_BUTTON, 'liste des ouvriers')
-        choice = find_payable_upgrade(app,window,free,balances)
+        choice = None
+        for _ in range(3):
+            candidate = find_payable_upgrade(app,window,free,balances)
+            if candidate is None:
+                break
+            # The menu can keep sliding after a wheel message or a completed
+            # upgrade. Re-read the row at its click position before selecting.
+            app._wait(.5)
+            menu = app._capture(window)
+            visible = suggested_items(menu,include_others=True) if m.builders_menu_open(menu) else []
+            if any(abs(row[1]-candidate[1]) < .8 and row[2:] == candidate[2:]
+                   for row in visible):
+                choice = candidate
+                break
         if choice is None:
             app.events.put('Aucun bâtiment payable dans la liste : ressources conservées pour les prochaines améliorations ; HDV reporté tant que les autres ne sont pas terminées.')
             app._wall_click(window, m.BUILDERS_BUTTON, 'fermer la liste des ouvriers')
@@ -220,15 +241,18 @@ def upgrade_suggested(app, window):
             if buttons:
                 break
         if len(buttons) != 1:
-            raise RuntimeError('Bouton de l’amélioration conseillée ambigu.')
+            app.events.put('Bâtiment sélectionné sans bouton Améliorer unique : sélection reportée.')
+            return completed
         app._wall_click(window, buttons[0], 'ouvrir la confirmation')
         dialog = app._capture(window)
-        heading = normal(m.read_text(m.crop_percent(dialog,m.Roi(15,3,85,10)),scale=2))
-        if is_town_hall(heading) and not town_hall:
+        headings = confirmation_headings(dialog)
+        if any(is_town_hall(heading) for heading in headings) and not town_hall:
             app._wall_click(window,(88.4,7.5),'fermer la confirmation HDV interdite')
             raise RuntimeError('HDV exclu des améliorations automatiques : aucune dépense envoyée.')
-        if normal(title) not in heading or 'niveau' not in heading:
-            raise RuntimeError('Confirmation de bâtiment inattendue.')
+        if not any(normal(title) in heading and 'niveau' in heading for heading in headings):
+            app._wall_click(window,(88.4,7.5),'fermer la confirmation inattendue')
+            app.events.put('Confirmation de bâtiment différente de la ligne lue : aucune dépense envoyée.')
+            return completed
         raw = m.read_text(m.crop_percent(dialog,m.Roi(64,85,74,89)),scale=2)
         amount = re.sub(r'\s','',normal(raw).translate(str.maketrans({'s':'5','o':'0'})))
         confirmed_resource = resource_icon(dialog,m.Roi(74.5,85.5,77.5,92))
@@ -251,7 +275,7 @@ def upgrade_suggested(app, window):
                 return completed
         app._wall_click(window,buttons[0],'rouvrir la confirmation')
         final = app._capture(window)
-        if normal(m.read_text(m.crop_percent(final,m.Roi(15,3,85,10)),scale=2)) != heading:
+        if not any(normal(title) in heading and 'niveau' in heading for heading in confirmation_headings(final)):
             raise RuntimeError('La confirmation a changé : arrêt.')
         final_amount = re.sub(r'\s','',normal(m.read_text(m.crop_percent(final,m.Roi(64,85,74,89)),scale=2)).translate(str.maketrans({'s':'5','o':'0'})))
         if final_amount != amount or resource_icon(final,m.Roi(74.5,85.5,77.5,92)) != resource:
