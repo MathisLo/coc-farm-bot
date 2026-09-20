@@ -58,15 +58,101 @@ class UpgradeTests(unittest.TestCase):
             self.assertEqual(controls['payments']['or'][1],1200000)
             self.assertEqual(controls['payments']['élixir'][1],1200000)
 
+    def test_group_controls_survive_unreadable_remove_label(self):
+        with Image.open(Path(__file__).parent/'testdata/wall_remove_ocr_missed.png') as strip:
+            image=Image.new('RGB',(1920,1080))
+            image.paste(strip,(400,720))
+            controls=main.wall_group_controls(image)
+            self.assertIsNotNone(controls)
+            self.assertIsNone(controls['remove'])
+            self.assertEqual(controls['payments']['or'][1],600000)
+            self.assertEqual(controls['payments']['élixir'][1],600000)
+
+    def test_add_one_is_selected_when_ocr_only_reads_disabled_add_ten(self):
+        with Image.open(Path(__file__).parent/'testdata/wall_add_ten_disabled.png') as strip:
+            image=Image.new('RGB',(1920,1080))
+            image.paste(strip,(400,720))
+            controls=main.wall_group_controls(image)
+            self.assertIsNotNone(controls)
+            self.assertAlmostEqual(controls['add'][0],45.95,delta=.3)
+            self.assertEqual(controls['payments']['or'][1],6600000)
+
+    def test_elixir_payment_survives_one_spurious_large_reading(self):
+        with Image.open(Path(__file__).parent/'testdata/wall_elixir_price_vote.png') as strip:
+            image=Image.new('RGB',(1920,1080))
+            image.paste(strip,(400,720))
+            controls=main.wall_group_controls(image)
+            self.assertIsNotNone(controls)
+            self.assertEqual(controls['payments']['or'][1],600000)
+            self.assertEqual(controls['payments']['élixir'][1],600000)
+
+    def test_expected_price_recovers_ocr_six_at_ten_walls(self):
+        with Image.open(Path(__file__).parent/'testdata/wall_elixir_six_million.png') as strip:
+            image=Image.new('RGB',(1920,1080))
+            image.paste(strip,(400,720))
+            self.assertIsNone(main.wall_group_controls(image))
+            controls=main.wall_group_controls(image,expected_price=6000000,expected_resource='élixir')
+            self.assertIsNotNone(controls)
+            self.assertEqual(controls['payments']['élixir'][1],6000000)
+
     def test_wrong_screen_after_one_add_prevents_further_wall_clicks(self):
         app=app_without_gui();app._capture=Mock(return_value=object())
         app._wall_click=Mock();app._wait=Mock()
         app.stable_reserves=Mock(return_value=(6000000,8000000))
         controls={'add':(41.8,80),'remove':(33.6,80),'payments':{'or':((50,80),500000),'élixir':((58.3,80),500000)}}
-        app.stable_wall_group=Mock(side_effect=[controls,None])
-        with patch.object(main,'builders_menu_open',return_value=True),patch.object(main,'find_wall_menu_item',return_value=(44,54)),patch.object(main,'read_wall_available',return_value=7),patch.object(main,'wall_selected',return_value=True),patch.object(main,'find_wall_more_button',return_value=(46,85)):
-            self.assertEqual(app.upgrade_walls_to_reserve('window',independent=True),0)
+        app.stable_wall_group=Mock(side_effect=[controls,None,None])
+        with patch.object(main,'builders_menu_open',return_value=True),patch.object(main,'find_wall_menu_item',return_value=(44,54)),patch.object(main,'read_wall_available',return_value=7),patch.object(main,'wall_selected',return_value=True),patch.object(main,'find_wall_more_button',return_value=(46,85)),patch.object(main,'wall_multi_mode',return_value=True):
+            with self.assertRaisesRegex(RuntimeError,'cycle arrêté avant l’attaque'):
+                app.upgrade_walls_to_reserve('window',independent=True)
         self.assertEqual([c.args[1] for c in app._wall_click.call_args_list],[(44,54),(46,85),(41.8,80)])
+
+    def test_stable_group_waits_for_new_price_after_add(self):
+        app=app_without_gui()
+        app._capture=Mock(return_value=object())
+        app._wait=Mock()
+        old={'add':(45.9,80),'remove':(33.6,80),'payments':{'or':((50,80),600000)}}
+        new={'add':(45.9,80),'remove':(33.6,80),'payments':{'or':((50,80),1200000)}}
+        with patch.object(main,'wall_group_controls',side_effect=[old,old,new,new]):
+            self.assertEqual(app.stable_wall_group('window','or',price_above=600000),new)
+        self.assertEqual(app._capture.call_count,4)
+
+    def test_unchanged_add_price_retries_before_spending(self):
+        app=app_without_gui()
+        app._capture=Mock(return_value=object())
+        app._wall_click=Mock()
+        app._wait=Mock()
+        app.stable_reserves=Mock(side_effect=[(6000000,6000000),(6000000,6000000),(5000000,6000000),(1000000,1000000)])
+        old={'add':(45.9,80),'remove':(33.6,80),'payments':{'or':((50,80),500000),'élixir':((58.3,80),500000)}}
+        new={'add':(45.9,80),'remove':(33.6,80),'payments':{'or':((50,80),1000000),'élixir':((58.3,80),1000000)}}
+        app.stable_wall_group=Mock(side_effect=[old,None,old,new,new])
+        with patch.object(main,'builders_menu_open',return_value=True),patch.object(main,'find_wall_menu_item',return_value=(44,54)),patch.object(main,'read_wall_available',return_value=2),patch.object(main,'wall_selected',return_value=True),patch.object(main,'find_wall_more_button',return_value=(46,85)),patch.object(main,'wall_multi_mode',return_value=True),patch.object(main,'wall_batch_confirmation_matches',return_value=True):
+            self.assertEqual(app.upgrade_walls_to_reserve('window',independent=True),2)
+        labels=[c.args[2] for c in app._wall_click.call_args_list]
+        self.assertEqual(labels.count('ajouter un rempart identifié'),2)
+        self.assertEqual(labels.count('confirmation remparts'),1)
+
+    def test_unresponsive_more_button_is_retried_before_reading_group(self):
+        app=app_without_gui()
+        app._capture=Mock(return_value=object())
+        app._wall_click=Mock()
+        app._wait=Mock()
+        app.stable_reserves=Mock(return_value=(1100000,1100000))
+        controls={'add':(45.9,80),'remove':None,'payments':{'or':((50,80),600000),'élixir':((58.3,80),600000)}}
+        app.stable_wall_group=Mock(return_value=controls)
+        with patch.object(main,'builders_menu_open',return_value=True),patch.object(main,'find_wall_menu_item',return_value=(44,54)),patch.object(main,'read_wall_available',return_value=265),patch.object(main,'wall_selected',return_value=True),patch.object(main,'find_wall_more_button',return_value=(46,85)),patch.object(main,'wall_multi_mode',side_effect=[False,True]):
+            self.assertEqual(app.upgrade_walls_to_reserve('window',independent=True),0)
+        labels=[c.args[2] for c in app._wall_click.call_args_list]
+        self.assertEqual(labels.count('Améliorer plus'),2)
+
+    def test_full_cycle_does_not_attack_after_unconfirmed_walls(self):
+        app=app_without_gui()
+        app.settings=main.replace(app.settings,upgrade_recommended=False)
+        app.collect_village_resources=Mock()
+        app.upgrade_walls_to_reserve=Mock(side_effect=RuntimeError('remparts non confirmés'))
+        app.open_search=Mock()
+        with patch.object(main.WindowDriver,'resolve',return_value=object()):
+            app.farm_loop()
+        app.open_search.assert_not_called()
 
     def test_wall_more_label_on_observed_background(self):
         with Image.open(Path(__file__).parent/'testdata/wall_more_background.png') as image:
@@ -139,7 +225,7 @@ class UpgradeTests(unittest.TestCase):
         initial={'add':(45.9,80),'remove':(33.6,80),'payments':{'or':((50,80),500000),'élixir':((58.3,80),500000)}}
         after_add={'add':(41.8,80),'remove':(33.6,80),'payments':{'or':((50,80),3000000)}}
         app.stable_wall_group=Mock(side_effect=[initial,after_add,after_add])
-        with patch.object(main,'builders_menu_open',return_value=True),patch.object(main,'find_wall_menu_item',return_value=(44,54)),patch.object(main,'read_wall_available',return_value=6),patch.object(main,'wall_selected',return_value=True),patch.object(main,'find_wall_more_button',return_value=(46,85)),patch.object(main,'wall_batch_confirmation_matches',return_value=True):
+        with patch.object(main,'builders_menu_open',return_value=True),patch.object(main,'find_wall_menu_item',return_value=(44,54)),patch.object(main,'read_wall_available',return_value=6),patch.object(main,'wall_selected',return_value=True),patch.object(main,'find_wall_more_button',return_value=(46,85)),patch.object(main,'wall_multi_mode',return_value=True),patch.object(main,'wall_batch_confirmation_matches',return_value=True):
             self.assertEqual(app.upgrade_walls_to_reserve('window',independent=True),6)
         self.assertEqual([c.args[1] for c in app._wall_click.call_args_list],[(44,54),(46,85),(45.9,80),(50,80),main.layout_values('WALL_MULTI_CONFIRM_BUTTON')])
 

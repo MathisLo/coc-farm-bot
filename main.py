@@ -991,18 +991,27 @@ def wall_multi_mode(image: Image.Image) -> bool:
     return "remp" in text and any(token in text for token in ("aj", "aiou", "supp", "rimer"))
 
 
-def read_wall_price(image):
+def wall_price_readings(image, expected=None):
     readings = []
     for variant in (image, white_text_mask(image)):
         for scale in (2, 3):
-            raw = read_text(variant, scale=scale).strip(" +.,'\"*").replace('O', '0').replace('o', '0')
+            raw = read_text(variant, scale=scale).strip(" +.,'\"*[]()").replace('O', '0').replace('o', '0')
             if re.fullmatch(r"\d[\d\s]*", raw):
-                readings.append(int(re.sub(r"\s", "", raw)))
-    agreed = [value for value in set(readings) if value > 0 and readings.count(value) >= 2]
-    return max(agreed) if agreed else None
+                value=int(re.sub(r"\s", "", raw))
+                if 0 < value <= 20_000_000:
+                    readings.append(value)
+            elif expected is not None and re.fullmatch(r"[sS][\d\s]*",raw):
+                # The first 6 in the game's wall-price font is sometimes
+                # read as s. Use this only when the amount after a confirmed
+                # +1 click is already known from the previous unit price.
+                for digit in ('5','6'):
+                    if int(re.sub(r"\s", "", digit+raw[1:])) == expected:
+                        readings.append(expected)
+                        break
+    return readings
 
 
-def wall_group_controls(image, single=False):
+def wall_group_controls(image, single=False, expected_price=None, expected_resource=None):
     """Locate the controls in the current row; never reuse a row offset.
 
     The +10 button disappears for small remaining groups and every other
@@ -1032,35 +1041,56 @@ def wall_group_controls(image, single=False):
                 target = upgrades
             if target is not None and not any(abs(px-x)<.5 for px,py in target):
                 target.append((x,y))
-    if not single and (not adds or len(removes)!=1):
-        return None
     payments = {}
     for x,y in upgrades:
         resource = resource_icon(image,Roi(x+2,y-9.2,x+3.7,y-6.4))
         if resource is None:
             continue
-        price = None
+        readings = []
+        price_crops = []
         # Seven-digit prices extend left of the tight crops. Try the full
         # button label first so 1 200 000 is not accepted as 200 000.
         for price_roi in (Roi(x-3.6,y-9.5,x+2.1,y-6.2), Roi(x-4.9,y-9.5,x+2.1,y-5.9),
                           Roi(x-5.1,y-9.4,x+2.3,y-6.0), Roi(x-3,y-8.7,x+2.1,y-6.7),
                           Roi(x-2.7,75,x+2.1,77)):
             price_crop = crop_percent(image,price_roi)
-            price = read_wall_price(price_crop)
-            if price is None:
+            price_crops.append(price_crop)
+            expected = expected_price if resource == expected_resource else None
+            readings.extend(wall_price_readings(price_crop,expected))
+        agreed = [value for value in set(readings) if readings.count(value) >= 2]
+        price = max(agreed) if agreed else None
+        # A lone larger OCR artifact must not overrule repeated complete
+        # readings (600 000 can coexist with one spurious 6 601 000).
+        if price is None and not readings:
+            for price_crop in price_crops:
                 price = read_result_amount(price_crop,main_result=True)
-            if price is not None:
-                break
+                if price is not None:
+                    break
         if price is not None and price > 0:
             if resource in payments:
                 return None
             payments[resource] = ((x,y-3),price)
     if payments:
-        # When +10 is present, +1 is the rightmost Ajouter button.
         if single:
             return {'add':None, 'remove':None, 'payments':payments}
-        x,y=max(adds)
-        return {'add':(x,y-3), 'remove':(removes[0][0],removes[0][1]-3), 'payments':payments}
+        # The +1 card sits one card left of the gold payment (two left of
+        # elixir). OCR may see only +10, especially when that card is greyed
+        # out; choosing the rightmost OCR hit would then click +10 again.
+        if 'or' in payments:
+            payment_x,payment_y=payments['or'][0]
+            add_x=payment_x-8.2
+        elif 'élixir' in payments:
+            payment_x,payment_y=payments['élixir'][0]
+            add_x=payment_x-16.4
+        else:
+            return None
+        add_y=payment_y-.9
+        plus_pixels=list(crop_percent(image,Roi(add_x-1.5,add_y-3.8,add_x+1.5,add_y+1.2)).convert('RGB').get_flattened_data())
+        active_plus=sum(g>110 and g>r*1.25 and g>b*1.3 for r,g,b in plus_pixels)
+        if active_plus < len(plus_pixels)*.06:
+            return None
+        remove = (removes[0][0],removes[0][1]-3) if len(removes)==1 else None
+        return {'add':(add_x,add_y), 'remove':remove, 'payments':payments}
     return None
 
 
@@ -1648,11 +1678,15 @@ class BotApp:
         if not self._click(window, *point): raise RuntimeError(f"Clic {label} refusé.")
         self._wait(.45)
 
-    def stable_wall_group(self, window, resource=None, single=False):
+    def stable_wall_group(self, window, resource=None, single=False, price_above=None, expected_price=None):
         previous = None
-        for _ in range(8):
-            controls = wall_group_controls(self._capture(window),single=single)
+        for _ in range(16 if price_above is not None else 8):
+            controls = wall_group_controls(self._capture(window),single=single,
+                                           expected_price=expected_price,expected_resource=resource)
             if controls is not None and resource is not None and resource not in controls["payments"]:
+                controls = None
+            if (controls is not None and price_above is not None and
+                    controls['payments'][resource][1] <= price_above):
                 controls = None
             if controls is not None and previous is not None:
                 same_prices = {r:p[1] for r,p in controls['payments'].items()} == {r:p[1] for r,p in previous['payments'].items()}
@@ -1709,8 +1743,8 @@ class BotApp:
                 # Never reuse the row retained before reading its quantity.
                 current_item = find_wall_menu_item(self._capture(window))
                 if current_item is None:
-                    self.events.put("Ligne des remparts non confirmée avant sélection : aucun clic envoyé.")
-                    return upgraded
+                    self._wait(.4)
+                    continue
                 item = current_item
                 self._wall_click(window, item, "rempart")
                 wall_image = self._capture(window)
@@ -1723,22 +1757,25 @@ class BotApp:
                 menu = self._capture(window)
                 item = find_wall_menu_item(menu)
                 if item is None:
-                    self.events.put("Ligne des remparts déplacée ou illisible : aucune répétition du clic.")
-                    return upgraded
+                    self._wait(.4)
             if self.stop_event.is_set() or not selected:
-                self.events.put("Sélection de rempart non confirmée.")
-                return upgraded
+                raise RuntimeError("Sélection de rempart non confirmée : cycle arrêté avant l’attaque.")
             single = available == 1
             if not single:
-                more_button = find_wall_more_button(self._capture(window))
-                if more_button is None:
-                    self.events.put("Bouton Améliorer plus introuvable.")
-                    return upgraded
-                self._wall_click(window, more_button, "Améliorer plus")
+                for attempt in range(3):
+                    more_button = find_wall_more_button(self._capture(window))
+                    if more_button is None:
+                        raise RuntimeError("Bouton Améliorer plus introuvable : cycle arrêté avant l’attaque.")
+                    self._wall_click(window, more_button, "Améliorer plus")
+                    if wall_multi_mode(self._capture(window)):
+                        break
+                    if attempt == 2 or not wall_selected(self._capture(window)):
+                        raise RuntimeError("Ouverture du groupe de remparts non confirmée : cycle arrêté avant l’attaque.")
+                    self.events.put("Améliorer plus sans effet confirmé : nouvel essai avant toute dépense.")
+                    self._wait(.6)
             controls = self.stable_wall_group(window,single=single)
             if controls is None:
-                self.events.put("Boutons du groupe de remparts non confirmés : aucun clic envoyé.")
-                return upgraded
+                raise RuntimeError("Boutons du groupe de remparts non confirmés : cycle arrêté avant l’attaque.")
             payments = controls['payments']
             gold_cost = payments.get('or', (None,None))[1]
             elixir_cost = payments.get('élixir', (None,None))[1]
@@ -1751,34 +1788,51 @@ class BotApp:
             selected_count = 1
             while selected_count < count:
                 # Each addition can remove +10 and shift the whole row.
-                # Re-read the buttons and actual price; the selected quantity
-                # can jump when the game groups adjacent wall pieces.
-                self._wall_click(window, controls['add'], "ajouter un rempart identifié")
-                controls = self.stable_wall_group(window, resource, single=single)
+                # Wait for a price change, not just two stale but matching
+                # frames after the click. A click without effect can be retried
+                # only while the same group and price are still confirmed.
+                previous_total = selected_count*unit_cost
+                for attempt in range(3):
+                    self._wall_click(window, controls['add'], "ajouter un rempart identifié")
+                    changed = self.stable_wall_group(window, resource, single=single,
+                                                     price_above=previous_total,expected_price=previous_total+unit_cost)
+                    if changed is not None:
+                        controls = changed
+                        break
+                    current = self.stable_wall_group(window, resource, single=single)
+                    current_payment = current['payments'].get(resource) if current else None
+                    if current_payment is None:
+                        raise RuntimeError("Groupe de remparts illisible après Ajouter : cycle arrêté avant l’attaque.")
+                    if current_payment[1] != previous_total:
+                        if current_payment[1] > previous_total:
+                            controls = current
+                            break
+                        raise RuntimeError("Prix du groupe incohérent après Ajouter : cycle arrêté avant l’attaque.")
+                    if attempt == 2:
+                        raise RuntimeError("Ajouter un rempart sans effet après trois essais : cycle arrêté avant l’attaque.")
+                    controls = current
+                    self.events.put("Ajouter un rempart sans effet confirmé : nouvel essai avant toute dépense.")
+                    self._wait(.6)
                 payment = controls['payments'].get(resource) if controls else None
                 observed_total = payment[1] if payment else None
                 observed_count, remainder = divmod(observed_total, unit_cost) if observed_total else (0, 0)
                 if remainder or not selected_count < observed_count <= count:
-                    self.events.put(f"Ajout de rempart non confirmé : prix lu={observed_total}, prix unitaire={unit_cost}, quantité précédente={selected_count}, maximum payable={count}. Aucun autre clic envoyé.")
-                    return upgraded
+                    raise RuntimeError(f"Ajout de rempart non confirmé : prix lu={observed_total}, prix unitaire={unit_cost}, quantité précédente={selected_count}, maximum payable={count}. Cycle arrêté avant l’attaque.")
                 selected_count = observed_count
             total = selected_count*unit_cost
             fresh = self.stable_reserves(window)
             if fresh is None or min(fresh) < WALL_RESERVE or fresh[0 if resource=='or' else 1]-total < WALL_RESERVE:
-                self.events.put("Réserves insuffisantes ou incertaines : aucune dépense envoyée.")
-                return upgraded
+                raise RuntimeError("Réserves insuffisantes ou incertaines : aucune dépense envoyée, cycle arrêté avant l’attaque.")
             gold, elixir = fresh
-            controls = self.stable_wall_group(window, resource, single=single)
+            controls = self.stable_wall_group(window, resource, single=single,expected_price=total)
             payment = controls['payments'].get(resource) if controls else None
             if payment is None or payment[1] != total:
-                self.events.put("Bouton de paiement ou coût modifié : aucune dépense envoyée.")
-                return upgraded
+                raise RuntimeError("Bouton de paiement ou coût modifié : aucune dépense envoyée, cycle arrêté avant l’attaque.")
             self._wall_click(window, payment[0], f"amélioration groupée {resource} identifiée")
             confirmation=self._capture(window)
             matches = single_wall_confirmation_matches(confirmation,total,resource) if single else wall_batch_confirmation_matches(confirmation,total,resource)
             if self.stop_event.is_set() or not matches:
-                self.events.put("Montant, rempart ou ressource de la confirmation non vérifié : aucun autre clic envoyé.")
-                return upgraded
+                raise RuntimeError("Montant, rempart ou ressource de la confirmation non vérifié : cycle arrêté avant l’attaque.")
             confirm_button = "WALL_CONFIRM_BUTTON" if single else "WALL_MULTI_CONFIRM_BUTTON"
             self._wall_click(window, layout_values(confirm_button), "confirmation remparts")
             self._wait(.8)
@@ -1786,11 +1840,9 @@ class BotApp:
             before_spend = gold if resource == "or" else elixir
             after_spend = after[0] if resource == "or" and after else (after[1] if after else None)
             if after_spend is None or abs(before_spend - after_spend - total) > 50_000:
-                self.events.put("Dépense groupée non vérifiée sur les réserves : arrêt sans annoncer de remparts améliorés.")
-                return upgraded
+                raise RuntimeError("Dépense groupée non vérifiée sur les réserves : cycle arrêté avant l’attaque.")
             if after[0] < WALL_RESERVE or after[1] < WALL_RESERVE:
-                self.events.put("Une réserve est passée sous le plancher : arrêt immédiat.")
-                return upgraded
+                raise RuntimeError("Une réserve est passée sous le plancher : cycle arrêté avant l’attaque.")
             upgraded += count
             self.events.put(f"{count} rempart(s) amélioré(s) avec {total:,} {resource} ({upgraded} au total).")
             if (gold_cost is not None and elixir_cost is not None and available > count and
