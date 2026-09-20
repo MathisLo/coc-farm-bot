@@ -10,6 +10,7 @@ import io
 import json
 from pathlib import Path
 import queue
+import sys
 import threading
 import traceback
 
@@ -223,9 +224,16 @@ def run():
                     ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
 
     bridge = Bridge()
-    base = Path(__file__).resolve().parent
+    # PyInstaller one-file runs from a temporary extraction directory. Resolve
+    # resources from that directory first so the logo and window icon do not
+    # depend on the current working directory or how the app was opened.
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     page = base / "web_dashboard.html"
     icon = base / "assets" / "kit" / "app" / "app.ico"
+    if not icon.is_file():
+        fallback = Path(__file__).resolve().parent / "assets" / "kit" / "app" / "app.ico"
+        if fallback.is_file():
+            icon = fallback
     work = Rect()
     if not ctypes.windll.user32.SystemParametersInfoW(48, 0, ctypes.byref(work), 0):
         work.left = work.top = 0
@@ -241,7 +249,11 @@ def run():
                           min_size=(min(1080, width), min(710, height)),
                           background_color="#0b1526")
     try:
-        webview.start(gui="edgechromium", private_mode=True, icon=str(icon))
+        webview.start(
+            gui="edgechromium",
+            private_mode=True,
+            icon=str(icon) if icon.is_file() else None,
+        )
     finally:
         if bridge.thread.is_alive():
             try:
