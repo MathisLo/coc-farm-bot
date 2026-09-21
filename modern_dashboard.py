@@ -218,6 +218,7 @@ class Bridge:
 def run():
     import webview
     import ctypes
+    import time
 
     class Rect(ctypes.Structure):
         _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
@@ -234,6 +235,38 @@ def run():
         fallback = Path(__file__).resolve().parent / "assets" / "kit" / "app" / "app.ico"
         if fallback.is_file():
             icon = fallback
+
+    def apply_windows_icon(icon_path):
+        """Apply the packaged icon to the native WebView window.
+
+        pywebview's ``icon`` option is backend-dependent on Windows.  The
+        explicit WM_SETICON call keeps the title bar, taskbar and Alt+Tab
+        entry consistent when EdgeChromium creates the native window later.
+        """
+        if sys.platform != "win32" or not icon_path.is_file():
+            return
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "CoCFarmBot.Desktop"
+            )
+            user32 = ctypes.windll.user32
+            user32.FindWindowW.restype = ctypes.c_void_p
+            user32.LoadImageW.restype = ctypes.c_void_p
+            for _ in range(100):
+                hwnd = user32.FindWindowW(None, APP_NAME)
+                if hwnd:
+                    flags = 0x00000010 | 0x00000040  # LR_LOADFROMFILE | LR_DEFAULTSIZE
+                    big = user32.LoadImageW(None, str(icon_path), 1, 256, 256, flags)
+                    small = user32.LoadImageW(None, str(icon_path), 1, 16, 16, flags)
+                    if big:
+                        user32.SendMessageW(hwnd, 0x0080, 1, big)  # WM_SETICON / ICON_BIG
+                    if small:
+                        user32.SendMessageW(hwnd, 0x0080, 0, small)  # WM_SETICON / ICON_SMALL
+                    return
+                time.sleep(0.1)
+        except (AttributeError, OSError):
+            # The UI remains usable on non-Windows WebView backends.
+            return
     work = Rect()
     if not ctypes.windll.user32.SystemParametersInfoW(48, 0, ctypes.byref(work), 0):
         work.left = work.top = 0
@@ -248,6 +281,8 @@ def run():
                           width=width, height=height, x=x, y=y,
                           min_size=(min(1080, width), min(710, height)),
                           background_color="#0b1526")
+    threading.Thread(target=apply_windows_icon, args=(icon,), daemon=True,
+                     name="ApplyWindowIcon").start()
     try:
         webview.start(
             gui="edgechromium",
