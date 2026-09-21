@@ -758,9 +758,18 @@ def battle_result_return_ready(image: Image.Image) -> bool:
 
 
 def village_home_ready(image: Image.Image) -> bool:
-    return (connection_retry_point(image) is None
-            and has_screen_text(crop_percent(image, Roi(0, 82, 20, 100)), "attaquer")
-            and has_screen_text(crop_percent(image, Roi(85, 82, 100, 100)), "magasin"))
+    if connection_retry_point(image) is not None:
+        return False
+    # The full-screen OCR pass is unreliable on the reduced VM capture. Read
+    # the two fixed village controls independently and accept the same
+    # tolerant prefixes used by has_screen_text.
+    left_roi = crop_percent(image, Roi(0, 82, 20, 100))
+    right_roi = crop_percent(image, Roi(85, 82, 100, 100))
+    left = normalized_screen_text(left_roi)
+    right = normalized_screen_text(right_roi)
+    left_raw = ' '.join(read_text(left_roi, scale=scale).casefold() for scale in (1, 2, 3))
+    right_raw = ' '.join(read_text(right_roi, scale=scale).casefold() for scale in (1, 2, 3))
+    return ("attaquer" in left or "attaqu" in left or "attaqu" in left_raw) and ("magasin" in right or "magasi" in right or "magasi" in right_raw)
 
 
 @dataclass(frozen=True)

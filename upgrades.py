@@ -36,8 +36,12 @@ def title_matches_heading(title, heading):
     if before.endswith('au'):
         before = before[:-2]
     expected = canonical_title(title)
-    return bool(expected and len(before) >= len(expected) and
-                same_building_title(expected, before[-len(expected):]))
+    if not expected:
+        return False
+    if len(before) >= len(expected) and same_building_title(expected, before[-len(expected):]):
+        return True
+    tokens = [token for token in re.findall(r'[a-z0-9]+', normal(title)) if len(token) >= 6]
+    return any(token in before for token in tokens)
 
 
 def is_town_hall(title):
@@ -370,7 +374,7 @@ def perform_direct_upgrade(app, window, title, cost, resource):
     if len(matches) != 1:
         app.events.put('Ligne de l’amélioration directe introuvable après contrôle : aucune dépense envoyée.')
         return None
-    app._wall_click(window,(18,matches[0][1]),'rouvrir l’amélioration directe')
+    app._wall_click(window,(44,matches[0][1]),'rouvrir l’amélioration directe')
     final = app._capture(window)
     button = direct_upgrade_button(final,title,cost,resource)
     app._trace('BÂTIMENTS',f'Bouton direct vérifié : {button!r}, coût={cost} {resource}')
@@ -437,8 +441,21 @@ def upgrade_suggested(app, window, max_upgrades=5):
         app._trace('BÂTIMENTS',f'Sélection : {title!r} à y={y:.2f} %, coût={cost} {resource}')
         if is_town_hall(title) and not allow_town_hall:
             raise RuntimeError('Hôtel de ville exclu des améliorations automatiques.')
-        app._wall_click(window, (18,y), title)
+        app._wall_click(window, (44,y), title)
         selected = app._capture(window)
+        # The builder list remains as a translucent overlay. Close it before
+        # reading the selected building title; otherwise OCR can read the list
+        # row or the building behind it instead of the selected panel.
+        app._wall_click(window, (88.4,7.5), 'fermer la liste après sélection')
+        selected = app._capture(window)
+        selected_heading = ' '.join(normal(engine().read_text(engine().crop_percent(selected, roi), scale=scale))
+                                    for roi, scale in ((engine().Roi(20,68,80,78),1), (engine().Roi(20,66,80,81),2)))
+        selected_compact = canonical_title(selected_heading)
+        expected_tokens = [token for token in re.findall(r'[a-z0-9]+', normal(title)) if len(token) >= 6]
+        if not expected_tokens or not any(token in selected_compact for token in expected_tokens):
+            app.events.put(f'Sélection vérifiée différente de {title} : aucune dépense envoyée.')
+            skipped_titles.add(title)
+            continue
         if direct_upgrade_button(selected,title,cost,resource) is not None:
             checked = perform_direct_upgrade(app,window,title,cost,resource)
             if checked is None:
@@ -452,7 +469,7 @@ def upgrade_suggested(app, window, max_upgrades=5):
         buttons = []
         for scale in (1,2):
             buttons = [(25+x*.51,81+y*.06) for text,x,y in m.read_word_centers(labels.resize((labels.width*scale,labels.height*scale)))
-                       if normal(text).strip('.,:').replace('0','o').replace('1','l') in ('ameliorer','ameiiorer')]
+                       if SequenceMatcher(None, normal(text).strip('.,:').replace('0','o').replace('1','l'), 'ameliorer').ratio() >= .62]
             if buttons:
                 break
         if len(buttons) != 1:
@@ -463,6 +480,12 @@ def upgrade_suggested(app, window, max_upgrades=5):
         app._wall_click(window, buttons[0], 'ouvrir la confirmation')
         dialog = app._capture(window)
         headings = confirmation_headings(dialog)
+        for _ in range(2):
+            if any(title_matches_heading(title, heading) for heading in headings):
+                break
+            app._wait(.45)
+            dialog = app._capture(window)
+            headings = confirmation_headings(dialog)
         app._trace('BÂTIMENTS',f'Titres de confirmation : {headings!r}')
         if any(is_town_hall(heading) for heading in headings) and not allow_town_hall:
             app._wall_click(window,(88.4,7.5),'fermer la confirmation HDV interdite')
