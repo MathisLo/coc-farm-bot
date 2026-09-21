@@ -1386,6 +1386,23 @@ def read_resource_number(image: Image.Image) -> tuple[int | None, str]:
     if valid:
         return max(valid, key=lambda reading: reading[0])
     # Different font sizes/backgrounds can defeat both original OCR passes.
+    # On the live 1323x744 client the gold row is occasionally read as
+    # ``il 447=585`` at scale 2/3 and correctly as ``1 447 585`` at scale 4.
+    # Include the intermediate scales and reject a spurious leading OCR digit
+    # when the candidates differ by an order of magnitude.
+    scaled_values = []
+    for scale in (2, 3, 4):
+        raw = read_text(image, scale=scale)
+        value = parse_clash_number(raw)
+        if value is not None and value <= 20_000_000:
+            scaled_values.append((value, raw))
+    if scaled_values:
+        values = [value for value, _ in scaled_values]
+        if max(values) >= min(values) * 3:
+            return min(scaled_values, key=lambda reading: reading[0])
+        return max(scaled_values, key=lambda reading: reading[0])
+
+    # Different font sizes/backgrounds can defeat all OCR passes.
     values = []
     for variant in (image, white_text_mask(image)):
         for scale in (1,2,4):
