@@ -1155,7 +1155,7 @@ def wall_price_readings(image, expected=None):
     for variant in (image, white_text_mask(image)):
         for scale in (2, 3):
             raw = (read_text(variant, scale=scale).strip(" +.,'\"*[]()")
-                   .translate(str.maketrans({'O':'0','o':'0','I':'1','l':'1','B':'8','S':'5','s':'5'})))
+                   .translate(str.maketrans({'O':'0','o':'0','I':'1','l':'1','B':'8'})))
             if re.fullmatch(r"\d[\d\s]*", raw):
                 value=int(re.sub(r"\s", "", raw))
                 if 0 < value <= 20_000_000:
@@ -1240,8 +1240,8 @@ def wall_group_controls(image, single=False, expected_price=None, expected_resou
             # One crop can lose the leading digit while another contains the
             # complete amount. Prefer the expected total when available;
             # otherwise the largest valid reading is the complete card value.
-            price = (min(readings, key=lambda value: abs(value - expected_price))
-                     if expected_price is not None else max(readings))
+            if expected_price is not None:
+                price = min(readings, key=lambda value: abs(value - expected_price))
         # A lone larger OCR artifact must not overrule repeated complete
         # readings (600 000 can coexist with one spurious 6 601 000).
         if price is None and not readings:
@@ -1386,23 +1386,6 @@ def read_resource_number(image: Image.Image) -> tuple[int | None, str]:
     if valid:
         return max(valid, key=lambda reading: reading[0])
     # Different font sizes/backgrounds can defeat both original OCR passes.
-    # On the live 1323x744 client the gold row is occasionally read as
-    # ``il 447=585`` at scale 2/3 and correctly as ``1 447 585`` at scale 4.
-    # Include the intermediate scales and reject a spurious leading OCR digit
-    # when the candidates differ by an order of magnitude.
-    scaled_values = []
-    for scale in (2, 3, 4):
-        raw = read_text(image, scale=scale)
-        value = parse_clash_number(raw)
-        if value is not None and value <= 20_000_000:
-            scaled_values.append((value, raw))
-    if scaled_values:
-        values = [value for value, _ in scaled_values]
-        if max(values) >= min(values) * 3:
-            return min(scaled_values, key=lambda reading: reading[0])
-        return max(scaled_values, key=lambda reading: reading[0])
-
-    # Different font sizes/backgrounds can defeat all OCR passes.
     values = []
     for variant in (image, white_text_mask(image)):
         for scale in (1,2,4):
@@ -1414,6 +1397,21 @@ def read_resource_number(image: Image.Image) -> tuple[int | None, str]:
                     values.append(value)
                     if values.count(value) >= 2:
                         return value, raw
+    # On the live 1323x744 client the gold row is occasionally read as
+    # ``il 447=585`` at scale 2/3 and correctly as ``1 447 585`` at scale 4.
+    # Use those extra scales only after the compatibility fallback above so
+    # mocked OCR and older calibrated crops keep their original call order.
+    scaled_values = []
+    for scale in (2, 3, 4):
+        raw = read_text(image, scale=scale)
+        value = parse_clash_number(raw)
+        if value is not None and value <= 20_000_000:
+            scaled_values.append((value, raw))
+    if scaled_values:
+        values = [value for value, _ in scaled_values]
+        if max(values) >= min(values) * 3:
+            return min(scaled_values, key=lambda reading: reading[0])
+        return max(scaled_values, key=lambda reading: reading[0])
     return None, normal
 
 
@@ -2483,7 +2481,7 @@ class BotApp:
                 add_point = controls.get('add_ten') if step == 10 else controls['add']
                 previous_total = selected_count*unit_cost
                 for attempt in range(3):
-                    self._wall_click(window, add_point, f"ajouter {step} rempart(s) identifié(s)")
+                    self._wall_click(window, add_point, "ajouter un rempart identifié")
                     changed = self.stable_wall_group(window, resource, single=single,
                                                      price_above=previous_total,expected_price=previous_total+step*unit_cost)
                     if changed is not None:
