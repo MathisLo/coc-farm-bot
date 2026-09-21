@@ -3,6 +3,7 @@ import re
 import unicodedata
 import sys
 from difflib import SequenceMatcher
+from PIL import ImageChops, ImageStat
 
 def engine():
     module = sys.modules.get("main") or sys.modules["__main__"]
@@ -137,6 +138,19 @@ def stable_builders(app, window):
     return None
 
 
+def stable_builder_ratio(app, window):
+    """Read the free/total builder ratio twice before a final upgrade."""
+    previous = None
+    for attempt in range(4):
+        current = builder_count(app._capture(window), with_total=True)
+        app._trace('OUVRIERS', f'Ratio lecture {attempt + 1}/4 : {current}, precedente={previous}')
+        if current is not None and current == previous:
+            return current
+        previous = current
+        app._wait(.25)
+    return None
+
+
 def can_start_upgrade(free, balance, cost):
     return (type(free) is int and free >= 2 and type(balance) is int and
             type(cost) is int and cost > 0 and balance >= cost)
@@ -216,15 +230,17 @@ def town_hall_ready(image):
     ends = [y for text,x,y in words if normal(text).startswith(('autres','aubres'))]
     if len(ends)>1 or not any('suggere' in normal(t) for t,x,y in words):
         return False
-    if ends and any(y>ends[0]+4 for t,x,y in words):
-        return False  # Includes walls, unaffordable rows and unreadable labels.
-    allowed = {'ameliorations','en','cours','disponible','suggerees','autres','aubres','hotel','hobel','de','ville'}
-    labels = [normal(t).strip('!?:.,') for t,x,y in words]
-    if not all(t in allowed or t.isdigit() or not t for t in labels):
-        return False
-    numeric_rows = [y for t,x,y in words if normal(t).strip('!?:.,').isdigit()]
-    if not numeric_rows or max(numeric_rows)-min(numeric_rows)>3:
-        return False
+    if ends:
+        for text, _x, y in words:
+            if y <= ends[0] + 4:
+                continue
+            label = normal(text).strip('!?:.,')
+            compact = label.replace(' ', '')
+            numeric = compact.lstrip('x').replace('.', '')
+            if 'remp' in label or (numeric and numeric.isdigit()):
+                continue
+            return False
+    labels = [normal(t).strip('!?:.,') for t, _x, _y in words]
     return any(t in ('hotel','hobel') for t in labels) and 'ville' in labels
 
 
@@ -247,20 +263,37 @@ def scroll_builders_to_top(app, window):
     raise RuntimeError('Début de la liste des ouvriers non confirmé après défilement.')
 
 
-def find_payable_upgrade(app, window, free, balances):
+def _menu_image_is_stable(previous, current):
+    if previous is None or not hasattr(previous, 'resize') or not hasattr(current, 'resize'):
+        return False
+    try:
+        box = (0.38, 0.12, 0.64, 0.99)
+        def crop(image):
+            width, height = image.size
+            return image.crop((round(width*box[0]), round(height*box[1]), round(width*box[2]), round(height*box[3]))).resize((260,520))
+        difference = ImageChops.difference(crop(previous).convert('RGB'), crop(current).convert('RGB'))
+        return max(ImageStat.Stat(difference).mean) < 2.5
+    except (AttributeError, ValueError):
+        return False
+
+
+def find_payable_upgrade(app, window, free, balances, include_town_hall=False, excluded_titles=None):
     """Inspect the whole list, then relocate the most expensive payable row."""
     m = engine()
     app._trace('BÂTIMENTS',f'Recherche du plus cher : ouvriers={free}, réserves={balances}, HDV exclu')
     scroll_builders_to_top(app,window)
     previous = None
+    previous_image = None
     unchanged = 0
     observations = []
     for page in range(20):
         menu = app._capture(window)
-        items = suggested_items(menu, include_others=True)
+        items = suggested_items(menu, include_others=True, include_town_hall=include_town_hall)
         app._trace('BÂTIMENTS',f'Page {page+1}/20 : lignes={items!r}')
         seen = set()
         for item in items:
+            if excluded_titles and any(same_building_title(item[0], title) for title in excluded_titles):
+                continue
             if not can_start_upgrade(free, balances[0 if item[3]=='or' else 1], item[2]):
                 app._trace('BÂTIMENTS',f'Ligne non payable : {item!r}')
                 continue
@@ -276,9 +309,12 @@ def find_payable_upgrade(app, window, free, balances):
         # Text equality avoids treating animated scenery as further scrolling.
         signature = normal(m.read_text(m.crop_percent(menu,m.Roi(39,12,64,64)),scale=2))
         unchanged = unchanged + 1 if signature and signature == previous else 0
+        if _menu_image_is_stable(previous_image, menu) and page >= 2:
+            unchanged = max(unchanged, 2)
         if unchanged >= 2:
             break
         previous = signature
+        previous_image = menu
         with app.action_lock:
             app._check_stopped()
             app._trace('DÉFILEMENT', 'Améliorations : ligne suivante')
@@ -296,7 +332,9 @@ def find_payable_upgrade(app, window, free, balances):
     scroll_builders_to_top(app,window)
     for page in range(20):
         menu = app._capture(window)
-        for item in suggested_items(menu,include_others=True):
+        for item in suggested_items(menu,include_others=True,include_town_hall=include_town_hall):
+            if excluded_titles and any(same_building_title(item[0], title) for title in excluded_titles):
+                continue
             if same_building_title(item[0], best[0]) and item[2:] == best[2:]:
                 app._trace('BÂTIMENTS',f'Ligne retrouvée page {page+1} : {item!r}')
                 return item
@@ -332,7 +370,7 @@ def perform_direct_upgrade(app, window, title, cost, resource):
     if len(matches) != 1:
         app.events.put('Ligne de l’amélioration directe introuvable après contrôle : aucune dépense envoyée.')
         return None
-    app._wall_click(window,(47,matches[0][1]),'rouvrir l’amélioration directe')
+    app._wall_click(window,(18,matches[0][1]),'rouvrir l’amélioration directe')
     final = app._capture(window)
     button = direct_upgrade_button(final,title,cost,resource)
     app._trace('BÂTIMENTS',f'Bouton direct vérifié : {button!r}, coût={cost} {resource}')
@@ -363,6 +401,7 @@ def upgrade_suggested(app, window, max_upgrades=5):
     if app.settings.dry_run:
         return 0
     completed = 0
+    skipped_titles = set()
     for _ in range(max_upgrades):
         free = stable_builders(app, window)
         app._trace('BÂTIMENTS',f'Début du tour {completed+1} : ouvriers libres={free}')
@@ -377,21 +416,18 @@ def upgrade_suggested(app, window, max_upgrades=5):
         if not m.builders_menu_open(app._capture(window)):
             app._wall_click(window, m.BUILDERS_BUTTON, 'liste des ouvriers')
         choice = None
-        for _ in range(3):
-            candidate = find_payable_upgrade(app,window,free,balances)
-            if candidate is None:
-                break
-            # The menu can keep sliding after a wheel message or a completed
-            # upgrade. Use the position from the fresh capture for the click.
-            app._wait(.5)
+        allow_town_hall = False
+        candidate = find_payable_upgrade(app,window,free,balances,excluded_titles=skipped_titles)
+        if candidate is None:
             menu = app._capture(window)
-            visible = suggested_items(menu,include_others=True)
-            matches = [row for row in visible
-                       if same_building_title(row[0],candidate[0]) and row[2:] == candidate[2:]]
-            app._trace('BÂTIMENTS',f'Après glissement : candidat={candidate!r}, lignes correspondantes={matches!r}')
-            if len(matches) == 1:
-                choice = matches[0]
-                break
+            ratio = builder_count(menu, with_total=True)
+            if ratio and ratio[0] == ratio[1] and town_hall_ready(menu):
+                app.events.put('Toutes les autres améliorations sont terminées : recherche de l’Hôtel de ville autorisée.')
+                candidate = find_payable_upgrade(app,window,free,balances,include_town_hall=True,excluded_titles=skipped_titles)
+                allow_town_hall = bool(candidate and is_town_hall(candidate[0]))
+        if candidate is not None:
+            choice = candidate
+            app._trace('UPGRADE', f'Row ready for selection: {choice!r}')
         if choice is None:
             app.events.put(f'Aucune amélioration payable et confirmée dans la liste ; ouvriers libres={free}, réserves={balances}. Hôtel de ville exclu.')
             if m.builders_menu_open(app._capture(window)):
@@ -399,9 +435,9 @@ def upgrade_suggested(app, window, max_upgrades=5):
             return completed
         title, y, cost, resource = choice
         app._trace('BÂTIMENTS',f'Sélection : {title!r} à y={y:.2f} %, coût={cost} {resource}')
-        if is_town_hall(title):
+        if is_town_hall(title) and not allow_town_hall:
             raise RuntimeError('Hôtel de ville exclu des améliorations automatiques.')
-        app._wall_click(window, (47,y), title)
+        app._wall_click(window, (18,y), title)
         selected = app._capture(window)
         if direct_upgrade_button(selected,title,cost,resource) is not None:
             checked = perform_direct_upgrade(app,window,title,cost,resource)
@@ -421,12 +457,14 @@ def upgrade_suggested(app, window, max_upgrades=5):
                 break
         if len(buttons) != 1:
             app.events.put('Bâtiment sélectionné sans bouton Améliorer unique : sélection reportée.')
-            return completed
+            skipped_titles.add(title)
+            app._wall_click(window,(88.4,7.5),'close selection without upgrade button')
+            continue
         app._wall_click(window, buttons[0], 'ouvrir la confirmation')
         dialog = app._capture(window)
         headings = confirmation_headings(dialog)
         app._trace('BÂTIMENTS',f'Titres de confirmation : {headings!r}')
-        if any(is_town_hall(heading) for heading in headings):
+        if any(is_town_hall(heading) for heading in headings) and not allow_town_hall:
             app._wall_click(window,(88.4,7.5),'fermer la confirmation HDV interdite')
             raise RuntimeError('HDV exclu des améliorations automatiques : aucune dépense envoyée.')
         if not any(title_matches_heading(title,heading) for heading in headings):

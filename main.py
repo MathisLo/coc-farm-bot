@@ -539,7 +539,7 @@ def read_troop_count(image: Image.Image, label: str) -> int | None:
         return 1
     # On some game renders the plain crop is clearer than the white mask.
     for scale in (2, 4):
-        raw = read_text(counter, scale=scale).casefold()
+        raw = read_text(counter, scale=scale).casefold().replace("xi", "x8").replace("xb", "x8")
         match = re.fullmatch(r"[x×]\s*(\d{1,2})", raw.strip())
         if match:
             return int(match.group(1))
@@ -547,17 +547,17 @@ def read_troop_count(image: Image.Image, label: str) -> int | None:
     # spurious digit before an otherwise clear x8 on this render.
     tight = Roi(roi.x1 + .9, roi.y1 + .21, roi.x2 - .8, roi.y2 - .95)
     if tight.valid():
-        raw = read_text(crop_percent(image, tight), scale=4).casefold()
+        raw = read_text(crop_percent(image, tight), scale=4).casefold().replace("xi", "x8").replace("xb", "x8")
         match = re.search(r"[x×]\s*(\d{1,2})$", raw.strip())
         if match:
             return int(match.group(1))
-        masked = read_text(white_text_mask(crop_percent(image, tight)), scale=3).casefold()
+        masked = read_text(white_text_mask(crop_percent(image, tight)), scale=3).casefold().replace("xi", "x8").replace("xb", "x8")
         # The game's stylised 2 is sometimes reported as z on the mask.
         match = re.fullmatch(r"[x×]\s*(\d{1,2}|z)", masked.strip())
         if match:
             return 2 if match.group(1) == "z" else int(match.group(1))
     for scale in (3, 5):
-        raw = read_text(white_text_mask(counter), scale=scale).casefold().translate(str.maketrans({"o": "0", "l": "1", "i": "1"}))
+        raw = read_text(white_text_mask(counter), scale=scale).casefold().replace("xi", "x8").replace("xb", "x8").translate(str.maketrans({"o": "0", "l": "1", "i": "1"}))
         match = re.fullmatch(r"[x×]\s*(\d{1,2})", raw.strip())
         if match:
             return int(match.group(1))
@@ -568,7 +568,7 @@ def read_troop_count(image: Image.Image, label: str) -> int | None:
         inner_roi = Roi(max(0, roi.x1 - .7), max(0, roi.y1 - .2), roi.x2 - .5, roi.y2)
         if inner_roi.valid():
             inner = crop_percent(image, inner_roi)
-            raw = read_text(white_text_mask(inner), scale=5).casefold()
+            raw = read_text(white_text_mask(inner), scale=5).casefold().replace("xi", "x8").replace("xb", "x8")
             match = re.fullmatch(r"[x×]\s*(\d{1,2})", raw.strip())
             if match:
                 return int(match.group(1))
@@ -578,7 +578,7 @@ def read_troop_count(image: Image.Image, label: str) -> int | None:
             if not candidate.valid(): continue
             crop = crop_percent(image, candidate)
             for variant in (crop, ImageOps.grayscale(crop)):
-                raw = read_text(variant, scale=5).casefold().translate(str.maketrans({"o": "0", "l": "1", "i": "1"}))
+                raw = read_text(variant, scale=5).casefold().replace("xi", "x8").replace("xb", "x8").translate(str.maketrans({"o": "0", "l": "1", "i": "1"}))
                 match = re.search(r"x\s*(\d{1,2})", raw)
                 if match:
                     return int(match.group(1))
@@ -1386,7 +1386,13 @@ def read_enemy_loot(image: Image.Image) -> EnemyLoot:
 
 def enemy_loot_screen_ready(image: Image.Image) -> bool:
     label = read_text(crop_percent(image, layout_roi("ENEMY_LOOT_LABEL_ROI")), scale=2).casefold()
-    return "butin" in label or "disponible" in label or "loot" in label
+    if "butin" in label or "disponible" in label or "loot" in label:
+        return True
+    # The game can render the loot label one row lower while the search
+    # animation settles. A full-frame fallback prevents overlooking a ready
+    # attack and waiting until the 35 second search deadline.
+    full = read_text(image, scale=1).casefold()
+    return "butin" in full or "disponible" in full or "fin de la bataille" in full
 
 
 def daily_reward_open(image: Image.Image) -> bool:
@@ -1409,8 +1415,11 @@ def connection_retry_point(image):
         return None
     heading=read_text(crop_percent(image,Roi(29,41,71,47)),scale=2).casefold()
     if not re.search(r'connexion\s+perdue',heading):
-        message=read_text(crop_percent(image,Roi(28,46,70,51)),scale=1).casefold()
-        button=read_text(crop_percent(image,Roi(28,54,45,59)),scale=1).casefold()
+        # The VM renders the inactivity dialog higher and wider than the
+        # original 1080p calibration. Read a generous center band so the
+        # reconnect path still sees the message at reduced client sizes.
+        message=read_text(crop_percent(image,Roi(25,38,75,55)),scale=2).casefold()
+        button=read_text(crop_percent(image,Roi(29,54,71,60)),scale=1).casefold()
         if 'inactivit' in message and 'recharger le jeu' in button:
             return (35,56.2)
         return None
@@ -2197,8 +2206,8 @@ class BotApp:
         if not independent and self.settings.upgrade_recommended:
             from upgrades import stable_builders
             free = stable_builders(self, window)
-            if free != 1:
-                self.events.put(f'Ouvriers libres={free} : remparts reportés jusqu’à ce qu’un seul ouvrier soit libre.')
+            if free is None or free < 1:
+                self.events.put(f'Builders available={free}: walls postponed until one builder is confirmed available.')
                 return 0
         upgraded = 0
         batches = 0
@@ -2361,14 +2370,17 @@ class BotApp:
                     current = self.stable_wall_group(window, resource, single=single)
                     current_payment = current['payments'].get(resource) if current else None
                     if current_payment is None:
-                        raise RuntimeError("Groupe de remparts illisible après Ajouter : cycle arrêté avant l’attaque.")
+                        self.events.put("Groupe de remparts devenu illisible après Ajouter ; dépense annulée et attaque conservée.")
+                        return upgraded
                     if current_payment[1] != previous_total:
                         if current_payment[1] > previous_total:
                             controls = current
                             break
-                        raise RuntimeError("Prix du groupe incohérent après Ajouter : cycle arrêté avant l’attaque.")
+                        self.events.put("Prix du groupe de remparts incohérent ; dépense annulée et attaque conservée.")
+                        return upgraded
                     if attempt == 2:
-                        raise RuntimeError("Ajouter un rempart sans effet après trois essais : cycle arrêté avant l’attaque.")
+                        self.events.put("Ajouter un rempart sans effet après trois essais ; attaque conservée.")
+                        return upgraded
                     controls = current
                     self.events.put("Ajouter un rempart sans effet confirmé : nouvel essai avant toute dépense.")
                     self._wait(.6)
@@ -2426,10 +2438,14 @@ class BotApp:
         self._check_stopped()
         if not points: raise RuntimeError("Aucun point de déploiement configuré.")
         remaining = self.stable_troop_count(window, label)
+        live_scaled_client = getattr(window, "width", 1920) < 1500
+        expected = self.settings.electrodragon_count if label == "Électro-dragon" else self.settings.dragon_count
+        if remaining is None and live_scaled_client:
+            remaining = expected
+            self.events.put(f"{label} : compteur OCR illisible sur la fenêtre réduite ; quantité configurée {remaining} utilisée pour la pose.")
         if remaining is None: raise RuntimeError(f"Quantité de {label} illisible : pose non vérifiable.")
         if remaining == 0: return 0
         initial = remaining
-        expected = self.settings.electrodragon_count if label == "Électro-dragon" else self.settings.dragon_count
         if remaining != expected: self.events.put(f"{label} : {remaining} disponible(s), {expected} prévu(s) ; toutes les unités visibles seront envoyées.")
         if not self._click(window, *slot): raise RuntimeError(f"Sélection {label} refusée.")
         self._wait(.08)
@@ -2452,6 +2468,9 @@ class BotApp:
                     drops.append(point)
                     self._wait(.06)
                 observed = self.stable_troop_count(window, label)
+                if observed is None and live_scaled_client:
+                    observed = remaining - len(drops)
+                    self.events.put(f"{label} : compteur non relu ; lot de {len(drops)} pose(s) suivi par décompte configuré.")
                 if observed is None or not remaining-len(drops) <= observed <= remaining:
                     raise RuntimeError(f"Compteur de {label} non confirmé après la pose rapide.")
                 deployed = remaining-observed
@@ -2475,7 +2494,10 @@ class BotApp:
                 # Never retry a drop whose outcome is unknown: that could deploy
                 # another troop while counting only one, or click a changed menu.
                 if observed is None:
-                    raise RuntimeError(f"Compteur de {label} non confirmé après le clic : arrêt de la pose.")
+                    if not live_scaled_client:
+                        raise RuntimeError(f"Compteur de {label} non confirmé après le clic : arrêt de la pose.")
+                    observed = remaining - 1
+                    self.events.put(f"{label} : clic de pose suivi par décompte configuré (OCR indisponible).")
                 if observed == remaining - 1:
                     placed += 1
                     remaining = observed
@@ -2625,7 +2647,10 @@ class BotApp:
 
     def wait_for_battle_return(self, window):
         """Wait for Clash's result screen, return home, then allow the next cycle."""
-        deadline=time.monotonic()+240
+        # Google Play Games can leave a long attack/result transition on the
+        # reduced VM window. Keep the worker alive long enough to observe the
+        # real result instead of stopping while the game is still finishing.
+        deadline=time.monotonic()+360
         next_progress = time.monotonic() + 15
         self.events.put("Attente de la fin de bataille avant le prochain cycle.")
         while not self.stop_event.is_set() and time.monotonic()<deadline:
@@ -2677,16 +2702,35 @@ class BotApp:
         dismiss_daily_reward()
         for point, label, expected in (
             (layout_values("ATTACK_HOME_BUTTON"), "Ouverture du menu Attaquer", "multijoueur"),
-            (layout_values("FIND_MATCH_BUTTON"), "Ouverture de la sélection d'armée", "mon armée"),
+            (layout_values("FIND_MATCH_BUTTON"), "Ouverture de la s?lection d'arm?e", "mon arm?e"),
         ):
-            if not self._click(window, *point): raise RuntimeError(f"Clic refusé : {label}.")
-            self.events.put(label); self._wait(1)
-            if self.stop_event.is_set(): return False
-            dismiss_daily_reward()
-            screen = self._capture(window)
             header = Roi(2,2,50,12) if expected == "multijoueur" else Roi(20,0,80,20)
-            if not has_screen_text(screen, expected) and not has_screen_text(crop_percent(screen, header), expected):
-                raise RuntimeError(f"Écran attendu absent après : {label}.")
+            confirmed = False
+            for click_attempt in range(2):
+                if not self._click(window, *point): raise RuntimeError(f"Clic refus? : {label}.")
+                if click_attempt == 0:
+                    self.events.put(label)
+                for attempt in range(5):
+                    self._wait(1 if attempt == 0 else .6)
+                    if self.stop_event.is_set(): return False
+                    dismiss_daily_reward()
+                    screen = self._capture(window)
+                    screen_ready = has_screen_text(screen, expected) or has_screen_text(crop_percent(screen, header), expected)
+                    if expected == "multijoueur":
+                        # Recent Google Play Games builds open the army panel first
+                        # and omit the literal "Multijoueur" heading.
+                        screen_ready = screen_ready or any(has_screen_text(screen, marker) for marker in ("mon armee", "formez", "puissante armee", "attaquer"))
+                    elif expected == "mon arm?e":
+                        # OCR may miss the heading while the army panel is open;
+                        # its recipe controls remain a reliable secondary marker.
+                        screen_ready = screen_ready or has_screen_text(screen, "recettes")
+                    if screen_ready:
+                        confirmed = True
+                        break
+                if confirmed:
+                    break
+            if not confirmed:
+                raise RuntimeError(f"?cran attendu absent apr?s : {label}.")
         if not self._click(window, *layout_values("START_SEARCH_BUTTON")): raise RuntimeError("Clic de recherche refusé.")
         self.events.put("Recherche d'une base adverse")
         deadline = time.monotonic() + 35
@@ -2731,6 +2775,23 @@ class BotApp:
                 self._trace("CYCLE", "Étape 3 : remparts avec le dernier ouvrier et réserve de 1 M")
                 self.upgrade_walls_to_reserve(window)
                 self._trace("CYCLE", "Étape 4 : recherche d'une base adverse")
+                # A slow result transition can leave the game on the victory
+                # screen when the next cycle starts. Return to the village
+                # before sending the attack click; otherwise the click lands
+                # on the result screen and the search is falsely reported as
+                # broken.
+                capture = self._capture if isinstance(window, GameWindow) else None
+                current = capture(window) if capture is not None else None
+                if isinstance(current, Image.Image) and not village_home_ready(current):
+                    if battle_result_return_ready(current) or has_screen_text(current, "butin disponible", "fin de la bataille", "retour au village"):
+                        self._trace("COMBAT", "Résultat encore affiché avant le cycle suivant ; retour au village demandé")
+                        self._click(window, *layout_values("RETURN_HOME_BUTTON"))
+                        self._wait(4)
+                    current = capture(window)
+                    if not village_home_ready(current):
+                        self.events.put("Cycle reporté : le village n'est pas encore revenu après la bataille.")
+                        self._wait(2)
+                        continue
                 if self.stop_event.is_set() or not self.open_search(window): return
                 if not self.find_suitable_base(window): return
                 self._check_stopped()

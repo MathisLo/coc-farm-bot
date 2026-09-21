@@ -232,8 +232,7 @@ class UpgradeTests(unittest.TestCase):
         controls={'add':(41.8,80),'remove':(33.6,80),'payments':{'or':((50,80),500000),'élixir':((58.3,80),500000)}}
         app.stable_wall_group=Mock(side_effect=[controls,None,None])
         with patch.object(upgrades,'scroll_builders_to_top'),patch.object(main,'builders_menu_open',return_value=True),patch.object(main,'find_wall_menu_item',return_value=(44,54)),patch.object(main,'read_wall_available',return_value=7),patch.object(main,'wall_selected',return_value=True),patch.object(main,'find_wall_more_button',return_value=(46,85)),patch.object(main,'wall_multi_mode',return_value=True):
-            with self.assertRaisesRegex(RuntimeError,'cycle arrêté avant l’attaque'):
-                app.upgrade_walls_to_reserve('window',independent=True)
+            self.assertEqual(app.upgrade_walls_to_reserve('window',independent=True), 0)
         self.assertEqual([c.args[1] for c in app._wall_click.call_args_list],[(44,54),(46,85),(41.8,80)])
 
     def test_stable_group_waits_for_new_price_after_add(self):
@@ -315,9 +314,8 @@ class UpgradeTests(unittest.TestCase):
         words=[('Améliorations',10,10),('suggérées',40,10),('Hôtel',15,25),('de',30,25),('ville',40,25),('3000000',85,25),('Autres',15,40),('améliorations',45,40)]
         with patch.object(upgrades,'builder_count',return_value=(5,5)),patch.object(main,'read_word_centers',return_value=words):
             self.assertTrue(upgrades.town_hall_ready(image))
-        for extra in ([('Rempart',20,55)],[('illisible',20,55)]):
-            with patch.object(upgrades,'builder_count',return_value=(5,5)),patch.object(main,'read_word_centers',return_value=words+extra):
-                self.assertFalse(upgrades.town_hall_ready(image))
+        with patch.object(upgrades,'builder_count',return_value=(5,5)),patch.object(main,'read_word_centers',return_value=words+[('illisible',20,55)]):
+            self.assertFalse(upgrades.town_hall_ready(image))
         with patch.object(upgrades,'builder_count',return_value=(4,5)),patch.object(main,'read_word_centers',return_value=words):
             self.assertFalse(upgrades.town_hall_ready(image))
 
@@ -369,16 +367,13 @@ class UpgradeTests(unittest.TestCase):
             app.stable_reserves.assert_not_called()
             app._wall_click.assert_not_called()
 
-    def test_automatic_walls_wait_until_only_one_builder_is_free(self):
+    def test_automatic_walls_use_any_confirmed_builder_and_preserve_reserves(self):
         for free in (1,2,3,5):
             app=app_without_gui()
             app.stable_reserves=Mock(return_value=(1000000,1000000))
             with patch.object(upgrades,'stable_builders',return_value=free):
                 app.upgrade_walls_to_reserve(object())
-            if free == 1:
-                app.stable_reserves.assert_called_once()
-            else:
-                app.stable_reserves.assert_not_called()
+            app.stable_reserves.assert_called_once()
 
     def test_grouped_wall_quantity_jump_uses_verified_price(self):
         app=app_without_gui()
@@ -476,6 +471,23 @@ class UpgradeTests(unittest.TestCase):
         for title in ('Hôtel de ville','Hotel de ville','HDV','Hôbel deuille'):
             self.assertTrue(upgrades.is_town_hall(title))
         self.assertFalse(upgrades.is_town_hall('Piège à ressort'))
+
+    def test_town_hall_unlocks_only_when_other_section_contains_walls(self):
+        words = [('Ameliorations', 10, 5), ('suggerees', 30, 5),
+                 ('Hotel', 10, 20), ('de', 20, 20), ('ville', 30, 20),
+                 ('Autres', 10, 40), ('rempart', 10, 50), ('x74', 30, 50),
+                 ('500000', 50, 50)]
+        with patch.object(upgrades, 'builder_count', return_value=(5,5)), \
+             patch.object(main, 'read_word_centers', return_value=words):
+            self.assertTrue(upgrades.town_hall_ready(Image.new('RGB',(100,100))))
+
+    def test_town_hall_stays_locked_when_another_building_remains(self):
+        words = [('Ameliorations', 10, 5), ('suggerees', 30, 5),
+                 ('Hotel', 10, 20), ('de', 20, 20), ('ville', 30, 20),
+                 ('Autres', 10, 40), ('Caserne', 10, 50), ('2800000', 50, 50)]
+        with patch.object(upgrades, 'builder_count', return_value=(5,5)), \
+             patch.object(main, 'read_word_centers', return_value=words):
+            self.assertFalse(upgrades.town_hall_ready(Image.new('RGB',(100,100))))
 
     def test_observed_spring_label_ocr_variant(self):
         self.assertEqual(upgrades.normal('Piège à ressorc'),upgrades.normal('Piège à ressort'))
