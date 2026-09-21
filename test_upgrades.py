@@ -17,6 +17,12 @@ class UpgradeTests(unittest.TestCase):
                 upgrades.scroll_builders_to_top(app, 'window')
             scroll.assert_not_called()
 
+    def test_live_large_wall_panel_accepts_vm_heading_and_payments(self):
+        with Image.open(Path(__file__).parent / "testdata" / "wall_panel_live_1765.png") as im:
+            controls = main.wall_group_controls(im, single=True)
+        self.assertEqual(controls["payments"]["or"][1], 4_000_000)
+        self.assertEqual(controls["payments"][next(k for k in controls["payments"] if k != "or")][1], 4_000_000)
+
     def test_translucent_menu_does_not_select_background_wall_label(self):
         with Image.open(Path(__file__).parent/'testdata/wall_menu_background_false_row.png') as im:
             self.assertTrue(main.builders_menu_open(im))

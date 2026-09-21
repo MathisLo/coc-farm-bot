@@ -1246,7 +1246,11 @@ def wall_group_controls(image, single=False, expected_price=None, expected_resou
                      and find_wall_more_button(image) is not None)
     if single:
         heading = crop_percent(image,Roi(30,68,70,74))
-        if not has_all_screen_text(heading,"rempart","niveau"):
+        heading_text = normalized_screen_text(heading)
+        # The VM font often turns the first vowel into a ``d`` (for example
+        # ``RdMpaRtANiveau``). The fixed heading crop is already specific to
+        # the selected wall panel, so accept that OCR variant as well.
+        if not has_all_screen_text(heading,"rempart","niveau") and not ("mpart" in heading_text and "niv" in heading_text):
             return None
     elif (not wall_multi_mode(image) and find_wall_more_button(image) is None
           and expected_price is None):
