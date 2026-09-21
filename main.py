@@ -2426,7 +2426,8 @@ class BotApp:
                 if item is None:
                     self._wait(.4)
             if self.stop_event.is_set() or not selected:
-                raise RuntimeError("Sélection de rempart non confirmée : cycle arrêté avant l’attaque.")
+                self.events.put("Sélection de rempart instable : remparts reportés au prochain cycle.")
+                return upgraded
             single = available == 1
             if not single:
                 for attempt in range(3):
@@ -2443,7 +2444,8 @@ class BotApp:
             controls = self.stable_wall_group(window,single=single)
             self._trace("REMPARTS", f"Contrôles du groupe : {controls!r}, individuel={single}")
             if controls is None:
-                raise RuntimeError("Boutons du groupe de remparts non confirmés : cycle arrêté avant l’attaque.")
+                self.events.put("Contrôles de rempart instables : remparts reportés au prochain cycle.")
+                return upgraded
             payments = controls['payments']
             gold_cost = payments.get('or', (None,None))[1]
             elixir_cost = payments.get('élixir', (None,None))[1]
