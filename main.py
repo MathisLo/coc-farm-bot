@@ -1218,13 +1218,22 @@ def wall_group_controls(image, single=False, expected_price=None, expected_resou
     button moves. Resource icons distinguish gold/elixir from wall rings.
     """
     from upgrades import normal, resource_icon
+    compact_panel = (not single and not wall_multi_mode(image)
+                     and find_wall_more_button(image) is not None)
     if single:
         heading = crop_percent(image,Roi(30,68,70,74))
         if not has_all_screen_text(heading,"rempart","niveau"):
             return None
-    elif not wall_multi_mode(image):
+    elif not wall_multi_mode(image) and find_wall_more_button(image) is None:
+        # After the first +1/+10 press the game can briefly show the compact
+        # selected-wall panel.  It still contains the two payment cards and a
+        # valid "Améliorer plus" anchor, but the normal batch heading is not
+        # OCR'd.  Keep parsing that panel; payment and reserve checks below
+        # remain mandatory before any spend.
         return None
-    roi = Roi(20,81,80,87)
+    # The compact selected-wall panel sits a few pixels higher than the full
+    # batch panel on the reduced VM capture.
+    roi = Roi(20,76,80,89) if compact_panel else Roi(20,81,80,87)
     crop = crop_percent(image, roi)
     adds, removes, upgrades = [], [], []
     for scale in (2,1,3):
@@ -1254,6 +1263,10 @@ def wall_group_controls(image, single=False, expected_price=None, expected_resou
         if x >= 67:
             continue
         resource = resource_icon(image,Roi(x+2,y-9.2,x+3.7,y-6.4))
+        if compact_panel:
+            # The compact cards share the same background and icon OCR can
+            # classify both as gold. Their fixed order remains stable.
+            resource = 'or' if x < 62 else 'élixir'
         # The small gold coin is frequently lost by OCR when the card is on
         # top of village scenery. The two payment cards have fixed order in
         # this panel, and the upgrade label itself was already detected, so
@@ -1267,15 +1280,31 @@ def wall_group_controls(image, single=False, expected_price=None, expected_resou
         price_crops = []
         # Seven-digit prices extend left of the tight crops. Try the full
         # button label first so 1 200 000 is not accepted as 200 000.
-        for price_roi in (Roi(x-3.6,y-9.5,x+2.1,y-6.2), Roi(x-4.9,y-9.5,x+2.1,y-5.9),
-                          Roi(x-5.1,y-9.4,x+2.3,y-6.0), Roi(x-3,y-8.7,x+2.1,y-6.7),
-                          Roi(x-2.7,75,x+2.1,77)):
+        compact_price_rois = (Roi(x-14,72,x,78), Roi(x-14,71,x+1,79),
+                              Roi(x-12,72.5,x+1,77.5))
+        normal_price_rois = (Roi(x-3.6,y-9.5,x+2.1,y-6.2), Roi(x-4.9,y-9.5,x+2.1,y-5.9),
+                             Roi(x-5.1,y-9.4,x+2.3,y-6.0), Roi(x-3,y-8.7,x+2.1,y-6.7),
+                             Roi(x-2.7,75,x+2.1,77))
+        for price_roi in (compact_price_rois if compact_panel else normal_price_rois):
             price_crop = crop_percent(image,price_roi)
             price_crops.append(price_crop)
             expected = expected_price if resource == expected_resource else None
             readings.extend(wall_price_readings(price_crop,expected))
+            if compact_panel:
+                # The compact card often OCRs the leading group alone on one
+                # pass (600) and the complete amount on another (600 000).
+                # Add the stricter amount reader so the complete repeated
+                # value wins the agreement check.
+                amount = read_result_amount(price_crop, main_result=True)
+                if amount is not None:
+                    readings.append(amount)
         agreed = [value for value in set(readings) if readings.count(value) >= 2]
         price = max(agreed) if agreed else None
+        if compact_panel and readings:
+            # In the compact card the OCR may repeat the truncated leading
+            # group (600) while another crop contains the full amount. Never
+            # treat that fragment as a payable wall price.
+            price = max(readings)
         if price is None and readings:
             # One crop can lose the leading digit while another contains the
             # complete amount. Prefer the expected total when available;
@@ -1311,13 +1340,23 @@ def wall_group_controls(image, single=False, expected_price=None, expected_resou
                 payments['or'] = ((x, y - 3), known_price)
             elif 58 <= x < 67 and 'élixir' not in payments:
                 payments['élixir'] = ((x, y - 3), known_price)
+    if compact_panel and len(payments) >= 2:
+        # Both supported compact cards show the same wall unit price. If one
+        # card loses a leading digit, use the larger confirmed peer amount.
+        unit = max(value[1] for resource, value in payments.items()
+                   if resource in ('or', 'élixir'))
+        for resource in ('or', 'élixir'):
+            if resource in payments:
+                point, _old = payments[resource]
+                payments[resource] = (point, unit)
     if expected_price is not None and expected_resource in payments:
         # Both supported wall cards use the same total. If OCR returned a
         # clearly truncated peer (for example 3 000 000 beside 9 000 000),
         # retain its detected button position but align its amount to the
         # expected total so the final payment lookup remains deterministic.
         for peer in ('or', 'élixir'):
-            if peer in payments and abs(payments[peer][1] - expected_price) <= 6_000_000:
+            if peer in payments and (abs(payments[peer][1] - expected_price) <= 6_000_000
+                                     or expected_price // 1000 <= payments[peer][1] <= expected_price // 10):
                 if payments[peer][1] != expected_price:
                     payments[peer] = (payments[peer][0], expected_price)
         point, observed = payments[expected_resource]
@@ -1342,9 +1381,17 @@ def wall_group_controls(image, single=False, expected_price=None, expected_resou
         else:
             return None
         add_y=payment_y-.9
+        if compact_panel:
+            # In the compact selected-wall panel the label is lower than the
+            # payment cards; use the detected button anchor instead of the
+            # batch-panel offset.
+            more = find_wall_more_button(image)
+            if more is None:
+                return None
+            add_x, add_y = more
         plus_pixels=list(crop_percent(image,Roi(add_x-1.5,add_y-3.8,add_x+1.5,add_y+1.2)).convert('RGB').get_flattened_data())
         active_plus=sum(g>110 and g>r*1.25 and g>b*1.3 for r,g,b in plus_pixels)
-        if active_plus < len(plus_pixels)*.06:
+        if not compact_panel and active_plus < len(plus_pixels)*.06:
             return None
         remove = (removes[0][0],removes[0][1]-3) if len(removes)==1 else None
         # When both add cards are visible, the leftmost one is +10 and the
@@ -1891,7 +1938,23 @@ class BotApp:
     def _capture(self, window):
         self._check_stopped()
         self._trace("CAPTURE", f"Lecture demandée : {getattr(window, 'title', '?')}")
-        image = WindowDriver.capture(window)
+        try:
+            image = WindowDriver.capture(window)
+        except RuntimeError as error:
+            # Google Play Games can briefly recreate or minimize its host
+            # surface while a builder panel closes. Restore and reacquire the
+            # selected window once before treating it as a real failure.
+            if "fermée ou réduite" not in str(error):
+                raise
+            try:
+                USER32.ShowWindow(wintypes.HWND(window.hwnd), 9)
+            except Exception:
+                pass
+            self._wait(.35)
+            refreshed = WindowDriver.resolve(getattr(window, "title", ""))
+            if refreshed is None:
+                raise
+            image = WindowDriver.capture(refreshed)
         self._last_capture = image
         self._trace("CAPTURE", f"Image reçue : {image.width}x{image.height}")
         self._check_stopped()
@@ -1972,7 +2035,15 @@ class BotApp:
             if not window:
                 self._wait(2)
                 continue
-            image = WindowDriver.capture(window)
+            try:
+                image = WindowDriver.capture(window)
+            except RuntimeError as error:
+                # The game surface is commonly black for a short interval
+                # after pressing Reload. Keep reconnecting until a readable
+                # frame is available instead of failing the whole cycle.
+                self._trace("REPRISE", f"Capture indisponible pendant la reconnexion : {error}")
+                self._wait(1)
+                continue
             self._trace("CAPTURE", f"Reconnexion : image reçue {image.width}x{image.height}")
             point = connection_retry_point(image)
             if point is not None:
