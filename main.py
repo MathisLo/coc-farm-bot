@@ -2720,9 +2720,14 @@ class BotApp:
                     drops.append(point)
                     self._wait(.06)
                 observed = self.stable_troop_count(window, label)
-                if observed is None and live_scaled_client:
+                if live_scaled_client and (observed is None or not remaining-len(drops) <= observed <= remaining):
+                    # The compact client can briefly OCR the neighbouring
+                    # troop card (often as zero) while the selected card is
+                    # animating. We already know exactly how many clicks were
+                    # accepted in this burst, so use that deterministic delta
+                    # instead of aborting a live attack or risking retries.
                     observed = remaining - len(drops)
-                    self.events.put(f"{label} : compteur non relu ; lot de {len(drops)} pose(s) suivi par décompte configuré.")
+                    self.events.put(f"{label} : compteur OCR incohérent ; lot de {len(drops)} pose(s) suivi par décompte configuré.")
                 if observed is None or not remaining-len(drops) <= observed <= remaining:
                     raise RuntimeError(f"Compteur de {label} non confirmé après la pose rapide.")
                 deployed = remaining-observed

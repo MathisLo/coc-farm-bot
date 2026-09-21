@@ -53,6 +53,17 @@ class CancellationRegressions(unittest.TestCase):
             app.deploy_unit('window','Électro-dragon',(23,92),[(18,40),(28,26),(38,13)],burst=True)
         self.assertEqual(app._click.call_count,7)
 
+    def test_scaled_client_uses_known_burst_delta_when_ocr_reads_neighbor_card(self):
+        app = app_without_gui()
+        app._wait = Mock()
+        app._battle_capture = Mock(return_value=object())
+        app._click = Mock(return_value=True)
+        app.stable_troop_count = Mock(side_effect=[8, 0, 5, 2, 0])
+        window = type("ScaledWindow", (), {"width": 1412})()
+        points = main.layout_points("ELECTRODRAGON_PERIMETER_POINTS")
+        self.assertEqual(app.deploy_unit(window, "Ã‰lectro-dragon", (23, 92), points, burst=True), 8)
+        self.assertTrue(any("OCR incohérent" in str(event) for event in app.events.queue))
+
     def test_dimmed_hero_is_not_confirmed_and_retry_reselects(self):
         app = app_without_gui()
         app._wait = Mock()
