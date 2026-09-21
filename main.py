@@ -1235,7 +1235,8 @@ def wall_group_controls(image, single=False, expected_price=None, expected_resou
         heading = crop_percent(image,Roi(30,68,70,74))
         if not has_all_screen_text(heading,"rempart","niveau"):
             return None
-    elif not wall_multi_mode(image) and find_wall_more_button(image) is None:
+    elif (not wall_multi_mode(image) and find_wall_more_button(image) is None
+          and expected_price is None):
         # After the first +1/+10 press the game can briefly show the compact
         # selected-wall panel.  It still contains the two payment cards and a
         # valid "Améliorer plus" anchor, but the normal batch heading is not

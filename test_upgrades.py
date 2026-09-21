@@ -199,6 +199,17 @@ class UpgradeTests(unittest.TestCase):
             self.assertAlmostEqual(controls['add'][0],45.95,delta=.3)
             self.assertEqual(controls['payments']['or'][1],6600000)
 
+    def test_expected_price_keeps_panel_when_more_label_is_temporarily_unreadable(self):
+        with Image.open(Path(__file__).parent/'testdata/wall_add_ten_disabled.png') as strip:
+            image=Image.new('RGB',(1920,1080))
+            image.paste(strip,(400,720))
+            with patch.object(main, 'wall_multi_mode', return_value=False), \
+                    patch.object(main, 'find_wall_more_button', return_value=None):
+                self.assertIsNone(main.wall_group_controls(image))
+                controls=main.wall_group_controls(image,expected_price=6600000,expected_resource='or')
+            self.assertIsNotNone(controls)
+            self.assertEqual(controls['payments']['or'][1],6600000)
+
     def test_elixir_payment_survives_one_spurious_large_reading(self):
         with Image.open(Path(__file__).parent/'testdata/wall_elixir_price_vote.png') as strip:
             image=Image.new('RGB',(1920,1080))
