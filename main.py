@@ -2341,7 +2341,21 @@ class BotApp:
                 available = read_wall_available(menu, item) if item else None
                 self._trace("REMPARTS", f"Page {page+1}/20 : ligne={item}, quantité={available}")
                 if item and available is None:
-                    available = 1  # Select and verify only one wall when xN is unreadable.
+                    # OCR can miss the trailing ``x147`` while the builder
+                    # list is settling. Retry the same row before falling
+                    # back to the special last-row x1 case; treating a large
+                    # group as a single wall opens the wrong payment panel.
+                    for _ in range(3):
+                        self._wait(.15)
+                        retry_menu = self._capture(window)
+                        retry_item = next((point for point in find_wall_menu_items(retry_menu)
+                                           if abs(point[1] - item[1]) < 1.5), item)
+                        retry_available = read_wall_available(retry_menu, retry_item)
+                        if retry_available is not None:
+                            item, available = retry_item, retry_available
+                            break
+                    if available is None:
+                        available = 1  # The game omits x1 on the last row.
                 if available is not None: break
                 if isinstance(menu, Image.Image):
                     signature = read_text(crop_percent(menu,Roi(38,12,64,64)),scale=2).casefold()
