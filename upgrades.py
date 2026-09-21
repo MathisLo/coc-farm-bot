@@ -266,7 +266,11 @@ def scroll_builders_to_top(app, window):
     m = engine()
     for attempt in range(20):
         menu = app._capture(window)
-        heading = normal(m.read_text(m.crop_percent(menu,m.Roi(37,11,65,45)),scale=2))
+        # A village with many builders already in progress can push the
+        # suggested section below the old 45% crop. Read the full menu band
+        # before scrolling; otherwise an already-top menu is needlessly
+        # scrolled twenty times and the wall/building pass aborts.
+        heading = normal(m.read_text(m.crop_percent(menu,m.Roi(37,11,65,65)),scale=2))
         app._trace('MENU OUVRIERS',f'Retour en haut {attempt+1}/20 : texte={heading[:500]!r}')
         if 'suggere' in heading and ('disponible' in heading or 'ameliorations' in heading):
             app._trace('MENU OUVRIERS','Début de la liste confirmé.')

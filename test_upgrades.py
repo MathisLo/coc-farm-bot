@@ -8,6 +8,15 @@ import upgrades
 
 
 class UpgradeTests(unittest.TestCase):
+    def test_many_running_builders_do_not_hide_suggested_section(self):
+        with Image.open(Path(__file__).parent/'testdata/new_account_builder_menu.png') as im:
+            app = app_without_gui()
+            app._capture = Mock(return_value=im)
+            app._wait = Mock(return_value=False)
+            with patch.object(main.WindowDriver, 'scroll_menu', return_value=True) as scroll:
+                upgrades.scroll_builders_to_top(app, 'window')
+            scroll.assert_not_called()
+
     def test_translucent_menu_does_not_select_background_wall_label(self):
         with Image.open(Path(__file__).parent/'testdata/wall_menu_background_false_row.png') as im:
             self.assertTrue(main.builders_menu_open(im))
