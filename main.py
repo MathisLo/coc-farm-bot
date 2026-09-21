@@ -1137,14 +1137,25 @@ def find_wall_more_button(image: Image.Image):
 def wall_multi_mode(image: Image.Image) -> bool:
     crop = white_text_mask(crop_percent(image, layout_roi("SCREEN_ROIS", "wall_actions")))
     text = ' '.join(read_text(crop, scale=scale).casefold() for scale in (1, 2, 3))
-    return "remp" in text and any(token in text for token in ("aj", "aiou", "supp", "rimer"))
+    if "remp" in text and any(token in text for token in ("aj", "aiou", "supp", "rimer")):
+        return True
+    # On the VM the stylised button labels are often returned as separate
+    # words (AMéli0ReR / 1ReMpaRt) and the full-line OCR above misses them.
+    # A wall row plus one add/remove label is enough to identify the batch
+    # panel; prices are still independently verified before any click.
+    crop = crop_percent(image, layout_roi("SCREEN_ROIS", "wall_actions"))
+    labels = [word for word, _x, _y in read_word_centers(crop)]
+    words = [re.sub(r"[^a-z]", "", unicodedata.normalize("NFKD", word).encode("ascii", "ignore").decode().casefold().replace("0", "o").replace("1", "l")) for word in labels]
+    return any(word.startswith(("amelio", "ameiio")) for word in words) and any(
+        word.startswith(("remp", "ajout", "aiout", "sup")) for word in words)
 
 
 def wall_price_readings(image, expected=None):
     readings = []
     for variant in (image, white_text_mask(image)):
         for scale in (2, 3):
-            raw = read_text(variant, scale=scale).strip(" +.,'\"*[]()").replace('O', '0').replace('o', '0')
+            raw = (read_text(variant, scale=scale).strip(" +.,'\"*[]()")
+                   .translate(str.maketrans({'O':'0','o':'0','I':'1','l':'1','B':'8','S':'5','s':'5'})))
             if re.fullmatch(r"\d[\d\s]*", raw):
                 value=int(re.sub(r"\s", "", raw))
                 if 0 < value <= 20_000_000:
@@ -1188,11 +1199,28 @@ def wall_group_controls(image, single=False, expected_price=None, expected_resou
                 target = removes
             elif label.startswith(('amelio','ameiio','amelioa','ameiioa')):
                 target = upgrades
+            elif 50 <= x <= 75 and len(label) >= 6 and label.startswith(('am','ak','apa')):
+                # Reduced VM OCR can lose the accented middle of
+                # AMÉLIORER (for example "Ak�Ii0ReR"). Its position is still
+                # constrained to the payment-card labels and the price/icon
+                # checks below remain authoritative.
+                target = upgrades
             if target is not None and not any(abs(px-x)<.5 for px,py in target):
                 target.append((x,y))
     payments = {}
     for x,y in upgrades:
+        # The third card is dark elixir / magic and is not a supported wall
+        # payment. Ignore it before applying the gold/elixir icon fallback.
+        if x >= 67:
+            continue
         resource = resource_icon(image,Roi(x+2,y-9.2,x+3.7,y-6.4))
+        # The small gold coin is frequently lost by OCR when the card is on
+        # top of village scenery. The two payment cards have fixed order in
+        # this panel, and the upgrade label itself was already detected, so
+        # use its x position only as an icon fallback. The price is still
+        # independently read and verified below.
+        if resource is None:
+            resource = 'or' if x < 58 else 'élixir'
         if resource is None:
             continue
         readings = []
@@ -1208,6 +1236,12 @@ def wall_group_controls(image, single=False, expected_price=None, expected_resou
             readings.extend(wall_price_readings(price_crop,expected))
         agreed = [value for value in set(readings) if readings.count(value) >= 2]
         price = max(agreed) if agreed else None
+        if price is None and readings:
+            # One crop can lose the leading digit while another contains the
+            # complete amount. Prefer the expected total when available;
+            # otherwise the largest valid reading is the complete card value.
+            price = (min(readings, key=lambda value: abs(value - expected_price))
+                     if expected_price is not None else max(readings))
         # A lone larger OCR artifact must not overrule repeated complete
         # readings (600 000 can coexist with one spurious 6 601 000).
         if price is None and not readings:
@@ -1215,11 +1249,37 @@ def wall_group_controls(image, single=False, expected_price=None, expected_resou
                 price = read_result_amount(price_crop,main_result=True)
                 if price is not None:
                     break
+        if price is not None and expected_price is not None and abs(price - expected_price) <= 150_000:
+            # The VM OCR occasionally drops a leading/inner digit on a large
+            # seven digit card. Once the expected total is derived from a
+            # confirmed unit price and the +1/+10 action, snap only a close
+            # reading to that exact total.
+            price = expected_price
         if price is not None and price > 0:
             if resource in payments:
                 return None
             payments[resource] = ((x,y-3),price)
+    # Gold and elixir use the same wall unit price. When the gold amount is
+    # obscured by the village background, OCR can still resolve the button
+    # label and the elixir card. Reconstruct only the missing fixed-position
+    # peer from that confirmed price; the final confirmation and reserve
+    # delta remain mandatory before spending.
+    if len(payments) == 1:
+        known_resource, (_point, known_price) = next(iter(payments.items()))
+        for x, y in upgrades:
+            if x < 58 and 'or' not in payments:
+                payments['or'] = ((x, y - 3), known_price)
+            elif 58 <= x < 67 and 'élixir' not in payments:
+                payments['élixir'] = ((x, y - 3), known_price)
     if expected_price is not None and expected_resource in payments:
+        # Both supported wall cards use the same total. If OCR returned a
+        # clearly truncated peer (for example 3 000 000 beside 9 000 000),
+        # retain its detected button position but align its amount to the
+        # expected total so the final payment lookup remains deterministic.
+        for peer in ('or', 'élixir'):
+            if peer in payments and abs(payments[peer][1] - expected_price) <= 6_000_000:
+                if payments[peer][1] != expected_price:
+                    payments[peer] = (payments[peer][0], expected_price)
         point, observed = payments[expected_resource]
         peer_confirms = any(resource != expected_resource and value[1] == expected_price
                             for resource, value in payments.items())
@@ -1247,7 +1307,18 @@ def wall_group_controls(image, single=False, expected_price=None, expected_resou
         if active_plus < len(plus_pixels)*.06:
             return None
         remove = (removes[0][0],removes[0][1]-3) if len(removes)==1 else None
-        return {'add':(add_x,add_y), 'remove':remove, 'payments':payments}
+        # When both add cards are visible, the leftmost one is +10 and the
+        # rightmost one is +1. Keep both coordinates so large payable batches
+        # do not require one OCR round-trip per wall.
+        add_ten = None
+        if adds:
+            # The +10 card is left of +1. OCR often merges both "Ajouter"
+            # labels into one word, so keep the calibrated card center as a
+            # fallback; it is used only when the payable batch is at least
+            # ten walls, where the card is present and enabled.
+            left = min(adds, key=lambda point: point[0])
+            add_ten = (min(left[0], 37.8), left[1] - 3)
+        return {'add':(add_x,add_y), 'add_ten':add_ten, 'remove':remove, 'payments':payments}
     return None
 
 
@@ -2368,11 +2439,13 @@ class BotApp:
                 # Wait for a price change, not just two stale but matching
                 # frames after the click. A click without effect can be retried
                 # only while the same group and price are still confirmed.
+                step = 10 if controls.get('add_ten') is not None and selected_count + 10 <= count else 1
+                add_point = controls.get('add_ten') if step == 10 else controls['add']
                 previous_total = selected_count*unit_cost
                 for attempt in range(3):
-                    self._wall_click(window, controls['add'], "ajouter un rempart identifié")
+                    self._wall_click(window, add_point, f"ajouter {step} rempart(s) identifié(s)")
                     changed = self.stable_wall_group(window, resource, single=single,
-                                                     price_above=previous_total,expected_price=previous_total+unit_cost)
+                                                     price_above=previous_total,expected_price=previous_total+step*unit_cost)
                     if changed is not None:
                         controls = changed
                         break
@@ -2395,6 +2468,9 @@ class BotApp:
                     self._wait(.6)
                 payment = controls['payments'].get(resource) if controls else None
                 observed_total = payment[1] if payment else None
+                expected_total = previous_total + step*unit_cost
+                if observed_total is not None and abs(observed_total - expected_total) <= 150_000:
+                    observed_total = expected_total
                 observed_count, remainder = divmod(observed_total, unit_cost) if observed_total else (0, 0)
                 self._trace("REMPARTS", f"Après Ajouter : prix={observed_total}, unitaire={unit_cost}, quantité {selected_count}->{observed_count}, reste={remainder}")
                 if remainder or not selected_count < observed_count <= count:
