@@ -1676,7 +1676,11 @@ def read_battle_earnings(image):
         return None
     # The current 1765px VM render uses a wider result number; the previous
     # x2=52.5 crop clipped the right half of values such as ``121 102``.
-    rois = (Roi(38,44,61,51), Roi(38,50,61,58), Roi(38,57,61,65))
+    # Keep the tighter crop for the older 1323px captures where the icon sits
+    # closer to the amount and can pollute a wide OCR pass.
+    rois = ((Roi(38,44,61,51), Roi(38,50,61,58), Roi(38,57,61,65))
+            if 1600 <= image.width < 1850 else
+            (Roi(39,43.5,52.5,49), Roi(39,50,52.5,56), Roi(43,57,52.5,62.5)))
     amounts = [read_result_amount(crop_percent(image, roi), main_result=True) for roi in rois]
     # Scenery behind short dark-elixir amounts can erase the leading digits
     # in one crop. Require agreement across distinct crop boundaries.
@@ -1687,7 +1691,7 @@ def read_battle_earnings(image):
     # A defeat with no dark-elixir reward omits the third row entirely on the
     # large VM render. Once gold and elixir are both read, that omitted row is
     # an explicit zero rather than an unreadable result.
-    if amounts[2] is None and image.width >= 1500 and amounts[0] is not None and amounts[1] is not None:
+    if amounts[2] is None and 1600 <= image.width < 1850 and amounts[0] is not None and amounts[1] is not None:
         amounts[2] = 0
     if None in amounts:
         # A zero-loot defeat omits the dark-elixir row and centres two rows.
