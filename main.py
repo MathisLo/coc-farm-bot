@@ -2520,11 +2520,18 @@ class BotApp:
             if fresh is None or min(fresh) < WALL_RESERVE or fresh[0 if resource=='or' else 1]-total < WALL_RESERVE:
                 raise RuntimeError("Réserves insuffisantes ou incertaines : aucune dépense envoyée, cycle arrêté avant l’attaque.")
             gold, elixir = fresh
-            controls = self.stable_wall_group(window, resource, single=single,expected_price=total)
-            payment = controls['payments'].get(resource) if controls else None
+            controls = None
+            payment = None
+            for _ in range(8):
+                controls = self.stable_wall_group(window, resource, single=single, expected_price=total)
+                payment = controls['payments'].get(resource) if controls else None
+                if payment is not None and payment[1] == total:
+                    break
+                self._wait(.15)
             self._trace("REMPARTS", f"Bouton de paiement final : {payment!r}, total attendu={total}")
             if payment is None or payment[1] != total:
-                raise RuntimeError("Bouton de paiement ou coût modifié : aucune dépense envoyée, cycle arrêté avant l’attaque.")
+                self.events.put("Bouton de paiement instable : remparts reportés au prochain cycle.")
+                return upgraded
             self._wall_click(window, payment[0], f"amélioration groupée {resource} identifiée")
             confirmation=self._capture(window)
             matches = single_wall_confirmation_matches(confirmation,total,resource) if single else wall_batch_confirmation_matches(confirmation,total,resource)
@@ -2661,13 +2668,27 @@ class BotApp:
         clicked = False
         chosen_label = None
         while reward_open:
+            # Clash can expose the result's "Retour" button before the event
+            # reward card has finished rendering. If a selectable card is
+            # present, keep processing this overlay instead of returning to
+            # the outer loop, which would click the same card again on every
+            # capture and make the cycle appear frozen.
             if battle_result_return_ready(image) and not final_reward:
-                break
+                # The result fixture can expose the return button while the
+                # reward ROI is empty. Only keep the overlay alive when its
+                # text actually hints at a selectable reward; this avoids an
+                # extra OCR/card probe on a plain result screen.
+                reward_hint = has_screen_text(
+                    crop_percent(image, Roi(20, 20, 80, 80)),
+                    "choisir", "ticket", "élixir", "or"
+                )
+                if not reward_hint:
+                    break
             if time.monotonic() >= deadline:
                 raise RuntimeError("Récompense de bataille toujours affichée après 30 secondes.")
             if not clicked:
                 choice = battle_reward_choice(image)
-                if choice is not None:
+                if isinstance(choice, (tuple, list)) and len(choice) == 2:
                     point, label = choice
                     self._trace("RÉCOMPENSE", f"Carte choisie : {label!r} à {point}")
                     if not self._click(window, *point):
