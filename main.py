@@ -752,6 +752,46 @@ def has_all_screen_text(image: Image.Image, *needles: str) -> bool:
     return all((token := re.sub(r"[^a-z0-9]", "", unicodedata.normalize("NFKD", needle.casefold()).encode("ascii", "ignore").decode("ascii"))) in text or token[:max(4, len(token)-3)] in text for needle in needles)
 
 
+def _normalized_ocr_value(raw: str) -> str:
+    """Normalize OCR text without requiring a reliable full-frame pass."""
+    return re.sub(
+        r"[^a-z0-9]", "",
+        unicodedata.normalize("NFKD", raw.casefold()).encode("ascii", "ignore").decode("ascii"),
+    )
+
+
+def battle_hud_visible(image: Image.Image) -> bool:
+    """Recognize an active attack from fixed HUD bands.
+
+    At the reduced VM size the full-frame OCR can return an empty string even
+    while the game clearly shows the battle HUD.  The bottom-left terminate
+    button and bottom-right damage label are much more stable anchors.  The
+    top timer is a third independent signal and prevents treating a normal
+    enemy loot screen as an active battle.
+    """
+    if not isinstance(image, Image.Image):
+        return False
+    full = normalized_screen_text(image)
+    if any(token in full for token in ("terminerlabataille", "degatsgeneraux", "troupesdeployees")):
+        return True
+    bands = (
+        (Roi(0, 74, 28, 100), (1, 2)),
+        (Roi(70, 70, 100, 100), (1, 2)),
+        (Roi(35, 0, 72, 18), (1, 2)),
+    )
+    normalized = []
+    for roi, scales in bands:
+        crop = crop_percent(image, roi)
+        raw = " ".join(read_text(crop, scale=scale) for scale in scales)
+        normalized.append(_normalized_ocr_value(raw))
+    left, right, top = normalized
+    if "terminer" in left and "bataille" in left:
+        return True
+    if "degats" in right and "gener" in right:
+        return True
+    return "fin" in top and "bataille" in top
+
+
 def battle_result_return_ready(image: Image.Image) -> bool:
     button = crop_percent(image, Roi(38, 80, 62, 95))
     return any("rentrer" in read_text(button, scale=scale).casefold() for scale in (2, 3))
@@ -1484,8 +1524,7 @@ def enemy_loot_screen_ready(image: Image.Image) -> bool:
     # previous result while a new fight is still running. Never treat that
     # screen as matchmaking; doing so can leave the cycle waiting for a
     # nonexistent Suivant button until it aborts.
-    active_battle = normalized_screen_text(image)
-    if any(token in active_battle for token in ("findelabataille", "degatsgeneraux", "troupesdeployees")):
+    if battle_hud_visible(image):
         return False
     label = read_text(crop_percent(image, layout_roi("ENEMY_LOOT_LABEL_ROI")), scale=2).casefold()
     if "butin" in label or "disponible" in label or "loot" in label:
@@ -2776,7 +2815,10 @@ class BotApp:
         self.events.put(f"Déploiement vérifié : {electro} électro-dragons, {dragons} dragons, {heroes} héros.")
 
     def prepare_attack(self, window):
-        self._capture(window)
+        initial = self._capture(window)
+        if battle_hud_visible(initial):
+            self.events.put("Combat déjà ouvert : déploiement repris directement.")
+            return
         for step in range(16):
             with self.action_lock:
                 self._check_stopped()
@@ -2970,6 +3012,9 @@ class BotApp:
             if time.monotonic() >= deadline:
                 # Never confuse a running fight or a dialog with matchmaking.
                 fresh = self._capture(window)
+                if battle_hud_visible(fresh):
+                    self.events.put("Combat déjà lancé : reprise du déploiement.")
+                    return True
                 if enemy_loot_screen_ready(fresh) and has_screen_text(crop_percent(fresh, Roi(85,69,100,83)), "suivant"):
                     archive = APP_DIR / "unread-enemies"
                     archive.mkdir(parents=True, exist_ok=True)
@@ -2984,6 +3029,9 @@ class BotApp:
             try:
                 with ocr_deadline(deadline):
                     image = self._capture(window)
+                    if battle_hud_visible(image):
+                        self.events.put("Combat déjà lancé : reprise du déploiement.")
+                        return True
                     if not enemy_loot_screen_ready(image):
                         if daily_reward_open(image):
                             raise RuntimeError("Récompense quotidienne affichée pendant le choix de base.")
