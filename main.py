@@ -793,8 +793,19 @@ def battle_hud_visible(image: Image.Image) -> bool:
 
 
 def battle_result_return_ready(image: Image.Image) -> bool:
-    button = crop_percent(image, Roi(38, 80, 62, 95))
-    return any("rentrer" in read_text(button, scale=scale).casefold() for scale in (2, 3))
+    # The reduced VM can render the green result button a little higher and
+    # OCR may read “Rentrer” as a short fragment. Read a wider band and accept
+    # the stable return/enter labels used by the result screen.
+    for roi in (Roi(32, 74, 68, 99), Roi(38, 80, 62, 95), Roi(25, 70, 75, 100)):
+        button = crop_percent(image, roi)
+        text = " ".join(read_text(button, scale=scale).casefold() for scale in (1, 2, 3))
+        normalized = _normalized_ocr_value(text)
+        if any(token in normalized for token in ("rentrer", "retour", "continuer")):
+            return True
+    # Result headings are independent of the button OCR. The click remains
+    # gated by the fixed result-screen button coordinate in wait_for_battle_return.
+    heading = _normalized_ocr_value(read_text(crop_percent(image, Roi(30, 16, 72, 34)), scale=2))
+    return "victoire" in heading or "defaite" in heading
 
 
 def village_home_ready(image: Image.Image) -> bool:
