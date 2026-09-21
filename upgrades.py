@@ -264,6 +264,7 @@ def town_hall_ready(image):
 def scroll_builders_to_top(app, window):
     """Scroll until the suggested-upgrades heading is actually visible."""
     m = engine()
+    previous_menu = None
     for attempt in range(20):
         menu = app._capture(window)
         # A village with many builders already in progress can push the
@@ -275,6 +276,14 @@ def scroll_builders_to_top(app, window):
         if 'suggere' in heading and ('disponible' in heading or 'ameliorations' in heading):
             app._trace('MENU OUVRIERS','Début de la liste confirmé.')
             return
+        # The live VM can omit the suggested heading for one OCR pass even
+        # after the menu reached the top. Require a stable frame and the
+        # fixed in-progress/available header before accepting that state.
+        if (previous_menu is not None and _menu_image_is_stable(previous_menu, menu)
+                and 'ameliorations en cours' in heading and 'disponible' in heading):
+            app._trace('MENU OUVRIERS','DÃ©but de la liste confirmÃ© par image stable.')
+            return
+        previous_menu = menu
         with app.action_lock:
             app._check_stopped()
             app._trace('DÉFILEMENT', 'Améliorations : retour vérifié au début de la liste')

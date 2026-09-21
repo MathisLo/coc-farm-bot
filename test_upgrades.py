@@ -17,6 +17,16 @@ class UpgradeTests(unittest.TestCase):
                 upgrades.scroll_builders_to_top(app, 'window')
             scroll.assert_not_called()
 
+    def test_live_menu_accepts_stable_top_without_suggested_heading(self):
+        with Image.open(Path(__file__).parent/'testdata/new_account_builder_menu.png') as im:
+            app = app_without_gui()
+            app._capture = Mock(side_effect=[im, im])
+            app._wait = Mock(return_value=False)
+            with patch.object(main, 'read_text', return_value='Ameliorations en cours : Disponible'), \
+                 patch.object(main.WindowDriver, 'scroll_menu', return_value=True) as scroll:
+                upgrades.scroll_builders_to_top(app, 'window')
+            scroll.assert_called_once()
+
     def test_live_large_wall_panel_accepts_vm_heading_and_payments(self):
         with Image.open(Path(__file__).parent / "testdata" / "wall_panel_live_1765.png") as im:
             controls = main.wall_group_controls(im, single=True)
