@@ -1456,7 +1456,18 @@ def wall_batch_confirmation_matches(image: Image.Image, total: int, resource: st
     amount = re.search(r"pour\s*([\d\s]+)", text)
     payment = "lixir" if resource == "élixir" else "or"
     ok = read_text(crop_percent(image, layout_roi("SCREEN_ROIS", "wall_confirmation_ok")), scale=2).casefold()
-    return bool("rempart" in text and amount and parse_clash_number(amount.group(1)) == total and payment in text[amount.end():] and "ok" in ok)
+    ok_visible = "ok" in ok or _green_confirmation_button_visible(image)
+    return bool("rempart" in text and amount and parse_clash_number(amount.group(1)) == total and payment in text[amount.end():] and ok_visible)
+
+
+def _green_confirmation_button_visible(image: Image.Image) -> bool:
+    """Accept the fixed green OK button when stylised OCR returns no text."""
+    crop = crop_percent(image, layout_roi("SCREEN_ROIS", "wall_confirmation_ok")).convert("RGB")
+    pixels = list(crop.getdata())
+    if not pixels:
+        return False
+    green = sum(g > 130 and g > r * 1.12 and g > b * 1.05 for r, g, b in pixels)
+    return green / len(pixels) >= 0.25
 
 
 def read_number(image: Image.Image) -> int | None:

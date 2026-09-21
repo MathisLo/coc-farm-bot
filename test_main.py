@@ -45,6 +45,13 @@ class FarmLogicTests(unittest.TestCase):
         with patch.object(main, "read_text", side_effect=["Améliorer les remparts pour 9000000 élixir ?", "OK"]):
             self.assertFalse(main.wall_batch_confirmation_matches(image, 9_000_000, "or"))
 
+    def test_group_confirmation_accepts_visible_green_ok_when_ocr_is_empty(self):
+        image = Image.new("RGB", (1920, 1080), (20, 20, 20))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((round(1920 * .50), round(1080 * .57), round(1920 * .66), round(1080 * .67)), fill=(150, 230, 60))
+        with patch.object(main, "read_text", side_effect=["Ameliorer les remparts pour 9000000 élixir ?", ""]):
+            self.assertTrue(main.wall_batch_confirmation_matches(image, 9_000_000, "élixir"))
+
     def test_troop_is_counted_only_after_counter_drops(self):
         app = object.__new__(main.BotApp)
         app.settings = SimpleNamespace(electrodragon_count=2, dragon_count=0, delay_between_dragons_ms=0)
