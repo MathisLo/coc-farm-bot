@@ -2730,11 +2730,13 @@ class BotApp:
         if not points: raise RuntimeError("Aucun point de déploiement configuré.")
         remaining = self.stable_troop_count(window, label)
         live_scaled_client = getattr(window, "width", 1920) < 1500
+        live_sized_client = hasattr(window, "width") and getattr(window, "width", 0) >= 1500
         expected = self.settings.electrodragon_count if label == "Électro-dragon" else self.settings.dragon_count
         count_recovered_from_impossible_ocr = False
-        if remaining is None and live_scaled_client:
+        if remaining is None and (live_scaled_client or live_sized_client):
+            count_recovered_from_impossible_ocr = True
             remaining = expected
-            self.events.put(f"{label} : compteur OCR illisible sur la fenêtre réduite ; quantité configurée {remaining} utilisée pour la pose.")
+            self.events.put(f"{label} : compteur OCR illisible sur la fenêtre live ; quantité configurée {remaining} utilisée pour la pose.")
         if remaining is not None and expected and remaining > max(expected + 20, expected * 4):
             count_recovered_from_impossible_ocr = True
             self.events.put(f"{label} : compteur OCR incohérent ({remaining}) ; quantité configurée {expected} utilisée pour la pose.")

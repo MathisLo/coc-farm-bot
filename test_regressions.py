@@ -74,6 +74,16 @@ class CancellationRegressions(unittest.TestCase):
         self.assertEqual(app.deploy_unit(window, "Dragon", (23, 92), [(18, 40)], burst=True), 1)
         self.assertTrue(any("quantité configurée" in str(event) for event in app.events.queue))
 
+    def test_wide_live_client_uses_configured_count_when_counter_is_empty(self):
+        app = app_without_gui()
+        app._wait = Mock()
+        app._battle_capture = Mock(return_value=object())
+        app._click = Mock(return_value=True)
+        app.stable_troop_count = Mock(side_effect=[None, 0])
+        window = type("WideWindow", (), {"width": 1765})()
+        self.assertEqual(app.deploy_unit(window, "Dragon", (23, 92), [(18, 40)], burst=True), 1)
+        self.assertTrue(any("fenêtre live" in str(event) for event in app.events.queue))
+
     def test_dimmed_hero_is_not_confirmed_and_retry_reselects(self):
         app = app_without_gui()
         app._wait = Mock()
