@@ -222,7 +222,10 @@ ELECTRODRAGON_SLOT = (23.2, 92.5)
 DRAGON_SLOT = (17.0, 92.5)
 HERO_SLOTS = ((36.7, 92.5), (42.5, 92.5), (48.0, 92.5))
 HERO_DROP_POINTS = ((15.0, 40.0), (85.0, 40.0), (15.0, 49.0))
-BUILDERS_BUTTON = (49.0, 4.5)
+# The regular builder counter is left of the laboratory counter on the
+# current Google Play Games render. 49% lands on the laboratory panel and
+# makes the upgrade scan see troops/spells instead of buildings.
+BUILDERS_BUTTON = (46.4, 4.3)
 WALL_LIST_ITEM = (47.5, 54.0)
 WALL_GOLD_UPGRADE_BUTTON = (58.3, 76.5)
 WALL_ELIXIR_UPGRADE_BUTTON = (67.5, 76.5)
@@ -1084,6 +1087,16 @@ def wall_menu_row_matches(image,y):
             text=read_text(crop,scale=scale).casefold().strip(" .,:;!'\"")
             if text.startswith(("rempar","rempamt")):
                 return True
+    # Newer builder menus omit the green "new" diamond on wall rows. In that
+    # case require both the wall caption and a numeric payment in the same
+    # horizontal band, which rejects translucent village labels behind the
+    # menu.
+    caption = read_text(crop_percent(image, Roi(38.0,y-1.6,49.5,y+1.6)), scale=2)
+    normalized = caption.casefold().strip(" .,:;!'\"")
+    if normalized.startswith(("rempar", "rempamt")):
+        payment = read_text(crop_percent(image, Roi(48.0,y-1.8,64.5,y+1.8)), scale=2)
+        if re.search(r"\d\s*\d{2,}", payment.replace(".", " ")):
+            return True
     return False
 
 
