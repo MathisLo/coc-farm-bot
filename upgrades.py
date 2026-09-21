@@ -78,6 +78,19 @@ def direct_upgrade_button(image, title, cost, resource):
 
 def builder_count(image, with_total=False):
     m = engine()
+    # Google Play Games uses a different top-bar layout below 1500 px: the
+    # village builder counter is at x≈41%, while the old 1920 px crop lands on
+    # the hero counter (4/5). Prefer the live VM crop and only accept a
+    # two-builder ratio here.
+    if getattr(image, 'width', 1920) < 1500:
+        live_crop = m.crop_percent(image, m.Roi(39.3, 2.7, 42.7, 6.7))
+        for variant, scale in ((m.white_text_mask(live_crop), 3), (live_crop, 2), (live_crop, 3)):
+            raw = m.read_text(variant, scale=scale)
+            ratio = m.parse_worker_ratio(raw)
+            if ratio:
+                free, total = map(int, ratio.split('/'))
+                if 0 <= free <= total <= 3:
+                    return (free, total) if with_total else free
     from PIL import Image, ImageDraw, ImageFont
     # Remove the enclosing horizontal rules, then add neutral OCR context.
     # Windows OCR otherwise treats this tiny isolated fraction as decoration.
