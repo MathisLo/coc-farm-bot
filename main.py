@@ -2878,6 +2878,11 @@ class BotApp:
         self.events.put(f'Butin final illisible : capture conservée dans {archived}. Gains non ajoutés aux statistiques ; reprise du cycle.')
 
     def open_search(self, window):
+        initial = self._capture(window)
+        if battle_hud_visible(initial):
+            self.events.put("Combat déjà ouvert : reprise du cycle.")
+            return True
+
         def dismiss_daily_reward():
             image = self._capture(window)
             if daily_reward_open(image):
@@ -2901,6 +2906,9 @@ class BotApp:
                     if self.stop_event.is_set(): return False
                     dismiss_daily_reward()
                     screen = self._capture(window)
+                    if battle_hud_visible(screen):
+                        self.events.put("Combat déjà lancé : reprise du déploiement.")
+                        return True
                     screen_ready = has_screen_text(screen, expected) or has_screen_text(crop_percent(screen, header), expected)
                     if expected == "multijoueur":
                         # Recent Google Play Games builds open the army panel first
@@ -2923,6 +2931,9 @@ class BotApp:
         while not self.stop_event.is_set() and time.monotonic() < deadline:
             self._wait(1)
             image = self._capture(window)
+            if battle_hud_visible(image):
+                self.events.put("Combat déjà lancé : reprise du déploiement.")
+                return True
             if enemy_loot_screen_ready(image): return True
             if daily_reward_open(image):
                 dismiss_daily_reward()
