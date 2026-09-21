@@ -1682,8 +1682,43 @@ def read_result_amount(image, main_result=False):
     return None
 
 
+def read_bonus_amount(image):
+    """Read a result bonus while tolerating the OCR's false leading ``4``.
+
+    On the wide VM the plus sign is sometimes merged with the first digit,
+    turning ``+171500`` into ``4171500``.  Keep both candidates and require
+    agreement across OCR variants before accepting one.
+    """
+    readings = []
+    stripped_leading_four = []
+    for scale in (1, 2, 3):
+        raw = read_text(image, scale=scale).strip(" +.,'\"*")
+        raw = raw.translate(str.maketrans({"O": "0", "o": "0", "Ç": "4", "ç": "4"}))
+        digits = re.sub(r"\D", "", raw)
+        if not digits or (len(digits) > 1 and digits.startswith("0")):
+            continue
+        readings.append(int(digits))
+        if digits.startswith("4") and len(digits) >= 4:
+            candidate = digits[1:]
+            if not (len(candidate) > 1 and candidate.startswith("0")):
+                stripped_leading_four.append(int(candidate))
+                readings.append(int(candidate))
+    for value in set(stripped_leading_four):
+        if stripped_leading_four.count(value) >= 2 and value <= 20_000_000:
+            return value
+    for value in set(readings):
+        if readings.count(value) >= 2 and value <= 20_000_000:
+            return value
+    return None
+
+
 def read_battle_earnings(image):
-    if not has_screen_text(crop_percent(image, Roi(40,24,59,33)), "victoire", "défaite"):
+    result_heading = False
+    for roi in (Roi(40,24,59,33), Roi(10,0,50,22)):
+        if any(has_screen_text(crop_percent(image, roi), "victoire", "défaite") for _ in range(2)):
+            result_heading = True
+            break
+    if not result_heading and image.width >= 1200:
         return None
     # The current 1765px VM render uses a wider result number; the previous
     # x2=52.5 crop clipped the right half of values such as ``121 102``.
@@ -1691,14 +1726,22 @@ def read_battle_earnings(image):
     # closer to the amount and can pollute a wide OCR pass.
     rois = ((Roi(38,44,61,51), Roi(38,50,61,58), Roi(38,57,61,65))
             if 1600 <= image.width < 1850 else
+            (Roi(5,48,42,60), Roi(5,63,42,75), Roi(5,77,42,89))
+            if image.width < 1200 else
             (Roi(39,43.5,52.5,49), Roi(39,50,52.5,56), Roi(43,57,52.5,62.5)))
-    amounts = [read_result_amount(crop_percent(image, roi), main_result=True) for roi in rois]
+    def stable_result_amount(roi):
+        readings = [read_result_amount(crop_percent(image, roi), main_result=True) for _ in range(8)]
+        agreed = [value for value in set(readings) if value is not None and readings.count(value) >= 2]
+        return agreed[0] if agreed else next((value for value in readings if value is not None), None)
+    amounts = [stable_result_amount(roi) if image.width < 1200 else
+               read_result_amount(crop_percent(image, roi), main_result=True) for roi in rois]
     # Scenery behind short dark-elixir amounts can erase the leading digits
     # in one crop. Require agreement across distinct crop boundaries.
-    dark_readings = [read_result_amount(crop_percent(image,Roi(x,57.3,52.5,61.3)),main_result=True)
-                     for x in (41,42,43,44)]
-    dark_agreed = [value for value in set(dark_readings) if value is not None and dark_readings.count(value)>=2]
-    amounts[2] = dark_agreed[0] if len(dark_agreed)==1 else None
+    if image.width >= 1200:
+        dark_readings = [read_result_amount(crop_percent(image,Roi(x,57.3,52.5,61.3)),main_result=True)
+                         for x in (41,42,43,44)]
+        dark_agreed = [value for value in set(dark_readings) if value is not None and dark_readings.count(value)>=2]
+        amounts[2] = dark_agreed[0] if len(dark_agreed)==1 else None
     # A defeat with no dark-elixir reward omits the third row entirely on the
     # large VM render. Once gold and elixir are both read, that omitted row is
     # an explicit zero rather than an unreadable result.
@@ -1712,14 +1755,29 @@ def read_battle_earnings(image):
             amounts = [0, 0, 0]
         else:
             return None
-    bonus_rois = (Roi(72,49.3,79,52.5), Roi(72,54,79,58), Roi(72,59,79,63))
+    bonus_rois = ((Roi(72,49.3,79,52.5), Roi(72,54,79,58), Roi(72,59,79,63))
+                  if image.width >= 1200 else
+                  (Roi(78,62,97,70), Roi(78,70,97,78), Roi(78,82,97,90)))
     # The leading + is sometimes read as 4, turning +30 000 into 430 000.
     # A tighter crop starts inside that sign and can verify the actual digits.
-    bonus_inner_rois = (Roi(73,49.4,79,52), Roi(73,54,79,58), Roi(73,59,79,63))
+    bonus_inner_rois = ((Roi(73,49.4,79,52), Roi(73,54,79,58), Roi(73,59,79,63))
+                        if image.width >= 1200 else bonus_rois)
+    bonus_wide_fallback_rois = (Roi(70,48,80,53), Roi(70,53,80,59), Roi(70,58,80,64))
+    bonus_compact_fallback_rois = (Roi(78,62,97,70), Roi(78,70,97,78), Roi(78,82,97,90))
     bonus = []
-    for outer, inner in zip(bonus_rois, bonus_inner_rois):
-        inner_value = read_result_amount(crop_percent(image, inner), main_result=True)
-        bonus.append(inner_value if inner_value is not None else read_result_amount(crop_percent(image, outer)))
+    for index, (outer, inner) in enumerate(zip(bonus_rois, bonus_inner_rois)):
+        inner_value = read_bonus_amount(crop_percent(image, inner))
+        if inner_value is None:
+            inner_value = read_result_amount(crop_percent(image, inner), main_result=True)
+        if inner_value is None:
+            inner_value = read_bonus_amount(crop_percent(image, outer))
+        if inner_value is None:
+            inner_value = read_result_amount(crop_percent(image, outer), main_result=True)
+        if inner_value is None and image.width < 1200:
+            inner_value = read_result_amount(crop_percent(image, bonus_compact_fallback_rois[index]), main_result=True)
+        if inner_value is None and 1600 <= image.width < 1850:
+            inner_value = read_result_amount(crop_percent(image, bonus_wide_fallback_rois[index]), main_result=True)
+        bonus.append(inner_value)
     if all(value is None for value in bonus) and not has_screen_text(crop_percent(image, Roi(67,42,83,64)), "bonus"):
         bonus = [0, 0, 0]
     if None in bonus:
