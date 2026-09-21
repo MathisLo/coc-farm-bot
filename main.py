@@ -1482,6 +1482,13 @@ def read_enemy_loot(image: Image.Image) -> EnemyLoot:
 
 
 def enemy_loot_screen_ready(image: Image.Image) -> bool:
+    # The battle HUD can retain the "Butin disponible" label from the
+    # previous result while a new fight is still running. Never treat that
+    # screen as matchmaking; doing so can leave the cycle waiting for a
+    # nonexistent Suivant button until it aborts.
+    active_battle = normalized_screen_text(image)
+    if any(token in active_battle for token in ("findelabataille", "degatsgeneraux", "troupesdeployees")):
+        return False
     label = read_text(crop_percent(image, layout_roi("ENEMY_LOOT_LABEL_ROI")), scale=2).casefold()
     if "butin" in label or "disponible" in label or "loot" in label:
         return True
