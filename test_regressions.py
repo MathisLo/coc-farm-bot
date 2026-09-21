@@ -64,6 +64,16 @@ class CancellationRegressions(unittest.TestCase):
         self.assertEqual(app.deploy_unit(window, "Ã‰lectro-dragon", (23, 92), points, burst=True), 8)
         self.assertTrue(any("OCR incohérent" in str(event) for event in app.events.queue))
 
+    def test_wide_client_normalizes_impossible_neighbor_troop_count(self):
+        app = app_without_gui()
+        app._wait = Mock()
+        app._battle_capture = Mock(return_value=object())
+        app._click = Mock(return_value=True)
+        app.stable_troop_count = Mock(side_effect=[80, 0])
+        window = type("WideWindow", (), {"width": 1765})()
+        self.assertEqual(app.deploy_unit(window, "Dragon", (23, 92), [(18, 40)], burst=True), 1)
+        self.assertTrue(any("quantité configurée" in str(event) for event in app.events.queue))
+
     def test_dimmed_hero_is_not_confirmed_and_retry_reselects(self):
         app = app_without_gui()
         app._wait = Mock()

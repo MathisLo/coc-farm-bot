@@ -2731,9 +2731,14 @@ class BotApp:
         remaining = self.stable_troop_count(window, label)
         live_scaled_client = getattr(window, "width", 1920) < 1500
         expected = self.settings.electrodragon_count if label == "Électro-dragon" else self.settings.dragon_count
+        count_recovered_from_impossible_ocr = False
         if remaining is None and live_scaled_client:
             remaining = expected
             self.events.put(f"{label} : compteur OCR illisible sur la fenêtre réduite ; quantité configurée {remaining} utilisée pour la pose.")
+        if remaining is not None and expected and remaining > max(expected + 20, expected * 4):
+            count_recovered_from_impossible_ocr = True
+            self.events.put(f"{label} : compteur OCR incohérent ({remaining}) ; quantité configurée {expected} utilisée pour la pose.")
+            remaining = expected
         if remaining is None: raise RuntimeError(f"Quantité de {label} illisible : pose non vérifiable.")
         if remaining == 0: return 0
         initial = remaining
@@ -2759,7 +2764,7 @@ class BotApp:
                     drops.append(point)
                     self._wait(.06)
                 observed = self.stable_troop_count(window, label)
-                if live_scaled_client and (observed is None or not remaining-len(drops) <= observed <= remaining):
+                if (live_scaled_client or count_recovered_from_impossible_ocr) and (observed is None or not remaining-len(drops) <= observed <= remaining):
                     # The compact client can briefly OCR the neighbouring
                     # troop card (often as zero) while the selected card is
                     # animating. We already know exactly how many clicks were
