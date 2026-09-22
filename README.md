@@ -1,4 +1,4 @@
-# CoC Farm Bot v2.0.0
+# CoC Farm Bot v2.0.5
 
 Application Windows pour Google Play Jeux PC. Elle lit le butin des bases adverses, cherche une base qui atteint les seuils configurÃ©s, puis dÃ©ploie lâ€™armÃ©e choisie. Les commandes sont envoyÃ©es Ã  la fenÃªtre du jeu sans dÃ©placer la souris Windows.
 
@@ -87,7 +87,7 @@ La reconnaissance des hÃ©ros exige une barre de vie verte horizontale sous un 
 
 Dans l'onglet **Journal**, cliquez sur **Exporter le diagnostic**, puis joignez ce ZIP Ã  votre message en cas de blocage. Le bouton reste disponible pendant un cycle. Chaque action a son propre fichier avec ses rÃ©glages, toutes les demandes et rÃ©ponses OCR, les captures demandÃ©es, les clics et dÃ©filements, les choix et refus de dÃ©pense, les rÃ©serves, les ouvriers, les attentes et les erreurs complÃ¨tes. En cas d'erreur, le ZIP inclut aussi le dernier Ã©cran capturÃ©. Si une rÃ©compense finale est illisible, le ZIP contient Ã©galement cet Ã©cran. Un export pendant l'action est une copie Ã  cet instant ; exportez de nouveau aprÃ¨s l'arrÃªt pour obtenir la fin du journal.
 
-La version v2.0.0 conserve les données déjà créées par la génération de stockage précédente.
+La version v2.0.5 conserve les données déjà créées par la génération de stockage précédente.
 
 Le suivi des fonctionnalitÃ©s et des validations se trouve dans [Notion](https://app.notion.com/p/3dccca7fe8b78060a5c3ca2aa4b73fa8). Le dÃ©pÃ´t GitHub contient les sources et chaque mise Ã  jour publiÃ©e fournit un exÃ©cutable Windows testÃ© dans les Releases. Les fichiers de construction et les captures de diagnostic restent locaux.
 # Statistiques de rÃ©colte
