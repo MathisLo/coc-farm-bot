@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from PIL import Image
+from PIL import Image, ImageDraw
 import main
 
 
@@ -32,6 +32,35 @@ class WindowsIntegrationTests(unittest.TestCase):
         self.assertGreater(main.hero_icon_saturation(image, 2, -6.25), 55)
         self.assertEqual([main.hero_placeholder_slot(image, i, -6.25) for i in range(3)],
                          [False, False, True])
+
+    def test_fourth_hero_card_is_detected_without_treating_background_as_hero(self):
+        for filename, expected in (("hero_unplaced.png", [True, True, True, False]),
+                                   ("hero_empty_slot.png", [True, False, False, False])):
+            image = self.fixture(filename, (0, 880))
+            self.assertEqual([main.hero_card_present(image, i, -6.25) for i in range(4)], expected)
+
+    def test_rage_card_location_is_independent_of_order_and_hero_row_shift(self):
+        for shift, center in ((-6.25, 53.6), (0, 59.85), (0, 30.45),
+                             (None, 53.6), (None, 30.45)):
+            image = Image.new("RGB", (1920, 1080))
+            card = Image.new("RGB", (110, 150), (42, 60, 120))
+            draw = ImageDraw.Draw(card)
+            draw.rounded_rectangle((29, 40, 81, 137), radius=18, fill=(132, 20, 218))
+            draw.rounded_rectangle((35, 20, 75, 47), radius=7, fill=(192, 139, 83))
+            left = round(image.width * center / 100 - card.width / 2)
+            image.paste(card, (left, 900))
+            self.assertEqual(main.rage_card_center(image, shift), center)
+
+    def test_live_compact_rage_counter_uses_actual_card_center(self):
+        for filename, expected in (("live_compact_battle_bar.png", 5),
+                                   ("live_compact_battle_bar_rage_two.png", 2)):
+            image = Image.new("RGB", (1765, 993))
+            with Image.open(Path(__file__).parent / "testdata" / filename) as bar:
+                image.paste(bar, (0, 830))
+            center = main.rage_card_center(image, -6.25)
+            self.assertGreater(center, 56)
+            self.assertLess(center, 58)
+            self.assertEqual(main.read_rage_count(image, center), expected)
 
     def test_event_prefers_gold_or_elixir_over_bonus_troops(self):
         for name, token in (("event_gold.png", "OR"), ("event_elixir.png", "lixi")):
@@ -65,6 +94,31 @@ class WindowsIntegrationTests(unittest.TestCase):
         # Removing the numeral must not turn a standalone x into a count of 1.
         image.paste((0, 0, 0), (505, 910, 532, 956))
         self.assertFalse(main.counter_is_one(main.crop_percent(image, main.Roi(23, 84.5, 27.8, 90))))
+
+    def test_troop_card_order_and_counts_are_detected_after_swap(self):
+        image = self.fixture("hero_unplaced.png", (0, 880))
+        self.assertEqual(main.troop_slot_offset(image, "Dragon"), 0)
+        self.assertEqual(main.troop_slot_offset(image, main.ELECTRODRAGON_LABEL), 0)
+        left, right = (280, 0, 399, 1080), (399, 0, 518, 1080)
+        first, second = image.crop(left), image.crop(right)
+        image.paste(second, (left[0], 0))
+        image.paste(first, (right[0], 0))
+        self.assertAlmostEqual(main.troop_slot_offset(image, main.ELECTRODRAGON_LABEL), -6.2)
+        self.assertAlmostEqual(main.troop_slot_offset(image, "Dragon"), 6.2)
+        self.assertEqual(main.read_troop_count(image, main.ELECTRODRAGON_LABEL), 8)
+        self.assertEqual(main.read_troop_count(image, "Dragon"), 1)
+
+    def test_troop_cards_are_located_across_the_bar_past_hero_colours(self):
+        image = self.fixture("hero_unplaced.png", (0, 880))
+        dragon = image.crop((280, 880, 399, 1080))
+        electro = image.crop((399, 880, 518, 1080))
+        image.paste((0, 0, 0), (280, 880, 518, 1080))
+        image.paste(dragon, (280 + round(6 * 6.2 * 19.2), 880))
+        image.paste(electro, (399 + round(7 * 6.2 * 19.2), 880))
+        self.assertAlmostEqual(main.troop_slot_offset(image, "Dragon"), 37.2)
+        self.assertAlmostEqual(main.troop_slot_offset(image, main.ELECTRODRAGON_LABEL), 43.4)
+        self.assertEqual(main.read_troop_count(image, "Dragon"), 1)
+        self.assertEqual(main.read_troop_count(image, main.ELECTRODRAGON_LABEL), 8)
 
     def test_selected_electro_count_does_not_clip_seven(self):
         image = self.fixture("edrag_selected_x7.png", (250, 900))

@@ -151,6 +151,7 @@ class UpgradeTests(unittest.TestCase):
                 patch.object(main, 'find_wall_menu_item', return_value=(42.2, 53.35)), \
                 patch.object(main, 'find_wall_menu_items', return_value=[(42.2, 53.9)]), \
                 patch.object(main, 'read_wall_available', return_value=190), \
+                patch.object(main, 'read_wall_menu_price', return_value=600_000), \
                 patch.object(main, 'wall_selected', return_value=True), \
                 patch.object(main, 'find_wall_more_button', return_value=(46, 85)), \
                 patch.object(main, 'wall_multi_mode', return_value=True), \
@@ -163,7 +164,9 @@ class UpgradeTests(unittest.TestCase):
 
     def test_last_wall_has_an_individual_payment_path(self):
         with Image.open(Path(__file__).parent/'testdata/wall_last_menu.png') as im:
-            self.assertIsNotNone(main.find_wall_menu_item(im))
+            row = main.find_wall_menu_item(im)
+            self.assertIsNotNone(row)
+            self.assertEqual(main.read_wall_menu_price(im, row), 500_000)
         with Image.open(Path(__file__).parent/'testdata/wall_last_selected.png') as im:
             controls=main.wall_group_controls(im,single=True)
             self.assertIsNotNone(controls)
@@ -174,6 +177,32 @@ class UpgradeTests(unittest.TestCase):
             self.assertFalse(main.single_wall_confirmation_matches(im,750000,'or'))
             self.assertFalse(main.single_wall_confirmation_matches(im,500000,'élixir'))
         self.assertEqual(main.layout_values('WALL_CONFIRM_BUTTON'),(70,87))
+
+    def test_last_wall_without_x1_is_bought_with_individual_confirmation(self):
+        app = app_without_gui()
+        app.settings = main.replace(app.settings, upgrade_recommended=False)
+        app._capture = Mock(return_value=Image.new('RGB', (1920, 1080)))
+        app._wait = Mock(return_value=False)
+        app._wall_click = Mock()
+        app.stable_reserves = Mock(side_effect=[(2_000_000, 2_000_000),
+                                                (2_000_000, 2_000_000),
+                                                (1_500_000, 2_000_000)])
+        payment = {'or': ((55, 80), 500_000)}
+        app.stable_wall_group = Mock(return_value={'payments': payment, 'add': None})
+        row = (52, 53)
+        with patch.object(main, 'find_wall_menu_item', return_value=row), \
+             patch.object(main, 'read_wall_available', return_value=None), \
+             patch.object(main, 'wall_selected', side_effect=[False, False, True]), \
+             patch.object(main, 'single_wall_confirmation_matches', return_value=True) as confirm, \
+             patch.object(main, 'wall_batch_confirmation_matches') as batch_confirm, \
+             patch.object(upgrades, 'scroll_builders_to_top'):
+            self.assertEqual(app.upgrade_walls_to_reserve(object(), independent=True, max_batches=1), 1)
+        confirm.assert_called_once()
+        batch_confirm.assert_not_called()
+        self.assertEqual([call.args[2] for call in app._wall_click.call_args_list],
+                         ['rempart', 'amélioration groupée or identifiée', 'confirmation remparts'])
+        self.assertEqual(app._wall_click.call_args_list[-1].args[1],
+                         main.layout_values('WALL_CONFIRM_BUTTON'))
 
     def test_group_buttons_follow_five_and_six_button_rows(self):
         cases = [('wall_group_no_ten.png',41.8,50.1,58.3,500000),
@@ -331,7 +360,7 @@ class UpgradeTests(unittest.TestCase):
         app._wait = Mock()
         app._battle_capture = Mock(return_value=object())
         app._click = Mock(return_value=True)
-        with patch.object(app, 'deploy_unit', return_value=1) as deploy, patch.object(main, 'hero_layout_shift', return_value=0), patch.object(main, 'hero_icon_saturation', return_value=100), patch.object(main, 'hero_placeholder_slot', return_value=False), patch.object(main, 'hero_health_visible', side_effect=[False,False,True]*3):
+        with patch.object(app, 'deploy_unit', return_value=1) as deploy, patch.object(main, 'hero_layout_shift', return_value=0), patch.object(main, 'hero_card_present', return_value=True), patch.object(main, 'hero_icon_saturation', return_value=100), patch.object(main, 'hero_placeholder_slot', return_value=False), patch.object(main, 'hero_health_visible', side_effect=[False,False,True]*4):
             app.deploy_attack_composition('window')
         line = deploy.call_args_list[0].args[3]
         self.assertEqual(line, deploy.call_args_list[1].args[3])
@@ -341,7 +370,7 @@ class UpgradeTests(unittest.TestCase):
             self.assertLess(x, 50)
             self.assertAlmostEqual((x-x0)*(y1-y0), (y-y0)*(x1-x0))
         drops=[c.args[1:] for c in app._click.call_args_list][1::2]
-        self.assertEqual(len(drops), 3)
+        self.assertEqual(len(drops), 4)
         self.assertTrue(all(p in line for p in drops))
         self.assertTrue(all(c.args[0] <= .12 for c in app._wait.call_args_list))
 

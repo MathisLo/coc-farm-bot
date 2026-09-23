@@ -1,4 +1,10 @@
-# CoC Farm Bot v2.0.5
+# CoC Farm Bot v2.0.6
+
+## Validation du 23 septembre 2026
+
+Sur TCD_VeNom, dans une fenêtre de jeu 1765 x 993, une attaque complète a confirmé séparément 8 électro-dragons, 1 dragon, 5 sorts Rage et 4 héros, puis le retour au village et la comptabilisation du butin. Les cartes des deux troupes ont été localisées dans la barre d'armée même lorsque leur ordre différait des positions par défaut. Les Rage ont été posés vers les points de déploiement des troupes. Un rempart a aussi été amélioré seul pour 4 000 000 d'élixir, avec confirmation de l'achat. Les journaux détaillés de ces essais restent dans `%USERPROFILE%\CoCFarmBot\runs`.
+
+Le bot reconnaît les boutons **Réessayer** et **Recharger le jeu** sur les dialogues de reconnexion connus et attend un écran stable avant de reprendre. Un message inconnu ou sans commande de reconnexion reconnue reste un arrêt prudent, pas une promesse de reprise universelle.
 
 Application Windows pour Google Play Jeux PC. Elle lit le butin des bases adverses, cherche une base qui atteint les seuils configurÃ©s, puis dÃ©ploie lâ€™armÃ©e choisie. Les commandes sont envoyÃ©es Ã  la fenÃªtre du jeu sans dÃ©placer la souris Windows.
 

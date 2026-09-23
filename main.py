@@ -220,8 +220,11 @@ START_SEARCH_BUTTON = (84.0, 85.2)
 NEXT_BASE_BUTTON = (91.9, 75.8)
 ELECTRODRAGON_SLOT = (23.2, 92.5)
 DRAGON_SLOT = (17.0, 92.5)
-HERO_SLOTS = ((36.7, 92.5), (42.5, 92.5), (48.0, 92.5))
+HERO_SLOTS = ((36.7, 92.5), (42.5, 92.5), (48.0, 92.5), (53.6, 92.5))
 HERO_DROP_POINTS = ((15.0, 40.0), (85.0, 40.0), (15.0, 49.0))
+ELECTRODRAGON_LABEL = "\u00c9lectro-dragon"
+RAGE_SLOT = (59.85, 92.5)
+RAGE_DROP_POINTS = ((24.0, 33.0), (31.0, 25.0), (37.0, 17.0), (20.0, 38.0), (34.0, 21.0))
 # The regular builder counter is left of the laboratory counter on the
 # current Google Play Games render. 49% lands on the laboratory panel and
 # makes the upgrade scan see troops/spells instead of buildings.
@@ -258,8 +261,10 @@ TROOP_COUNTER_INK_ROIS = {
     "Électro-dragon": Roi(24.22, 85.09, 26.56, 88.24),
     "Dragon": Roi(18.02, 85.09, 20.36, 88.24),
 }
-HERO_HEALTH_ROIS = (Roi(34.6, 82.6, 39.5, 84.9), Roi(40.9, 82.6, 45.8, 84.9), Roi(47.2, 82.6, 52.1, 84.9))
-HERO_ICON_ROIS = (Roi(34.4, 85.7, 40.4, 98.1), Roi(40.6, 85.7, 46.6, 98.1), Roi(46.9, 85.7, 52.6, 98.1))
+HERO_HEALTH_ROIS = (Roi(34.6, 82.6, 39.5, 84.9), Roi(40.9, 82.6, 45.8, 84.9), Roi(47.2, 82.6, 52.1, 84.9), Roi(53.5, 82.6, 58.4, 84.9))
+HERO_ICON_ROIS = (Roi(34.4, 85.7, 40.4, 98.1), Roi(40.6, 85.7, 46.6, 98.1), Roi(46.9, 85.7, 52.6, 98.1), Roi(53.1, 85.7, 59.2, 98.1))
+RAGE_ICON_ROI = Roi(57.1, 89.8, 62.6, 97.2)
+RAGE_COUNT_ROI = Roi(60.35, 85.19, 64.65, 89.35)
 ENEMY_LOOT_ROIS = {
     "gold": Roi(4.1, 11.1, 16.0, 14.4), "elixir": Roi(4.1, 15.8, 16.0, 18.8), "dark_elixir": Roi(4.1, 20.0, 16.0, 23.4),
 }
@@ -279,11 +284,11 @@ def layout_defaults():
     """Every active named point/region can be adjusted without editing Python."""
     defaults = {}
     for name in ("ATTACK_HOME_BUTTON", "FIND_MATCH_BUTTON", "START_SEARCH_BUTTON", "NEXT_BASE_BUTTON",
-                 "ELECTRODRAGON_SLOT", "DRAGON_SLOT", "HERO_SLOTS", "BUILDERS_BUTTON", "WALL_MORE_BUTTON",
+                 "ELECTRODRAGON_SLOT", "DRAGON_SLOT", "HERO_SLOTS", "RAGE_SLOT", "RAGE_DROP_POINTS", "BUILDERS_BUTTON", "WALL_MORE_BUTTON",
                  "WALL_ADD_TEN_BUTTON", "WALL_ADD_ONE_BUTTON", "WALL_MULTI_GOLD_BUTTON", "WALL_MULTI_ELIXIR_BUTTON",
                  "WALL_MULTI_CONFIRM_BUTTON", "WALL_CONFIRM_BUTTON", "RETURN_HOME_BUTTON", "DAILY_REWARD_CLOSE_BUTTON",
                  "ELECTRODRAGON_PERIMETER_POINTS", "PROFILE_ROIS", "ENEMY_LOOT_ROIS", "ENEMY_LOOT_LABEL_ROI",
-                 "TROOP_COUNT_ROIS", "TROOP_ICON_ROIS", "TROOP_COUNTER_INK_ROIS", "HERO_HEALTH_ROIS", "HERO_ICON_ROIS",
+                 "TROOP_COUNT_ROIS", "TROOP_ICON_ROIS", "TROOP_COUNTER_INK_ROIS", "HERO_HEALTH_ROIS", "HERO_ICON_ROIS", "RAGE_ICON_ROI", "RAGE_COUNT_ROI",
                  "WALL_GOLD_COST_ROI", "WALL_ELIXIR_COST_ROI", "WALL_GOLD_TIGHT_COST_ROI", "WALL_ELIXIR_TIGHT_COST_ROI",
                  "SCREEN_ROIS"):
         value = globals()[name]
@@ -326,6 +331,8 @@ def layout_labels():
                 "wall_confirmation_ok": "Bouton OK remparts", "daily_reward": "Récompense quotidienne",
                 "battle_reward": "Récompense de bataille", "hero_compact": "Roi sans engin de siège",
                 "hero_expanded": "Roi avec engin de siège", "wall_menu": "Liste des remparts"}
+    groups.update({"RAGE_SLOT": "Armée · Sélection Rage", "RAGE_DROP_POINTS": "Déploiement · Sort Rage",
+                   "RAGE_ICON_ROI": "Armée · Icône Rage", "RAGE_COUNT_ROI": "Armée · Compteur Rage"})
     labels = {}
     for key in LAYOUT_DEFAULTS:
         root, _, child = key.partition(".")
@@ -525,15 +532,136 @@ def wall_batch_size(balance: int, unit_cost: int, available: int) -> int:
     return max(0, min(available, (balance - WALL_RESERVE) // unit_cost)) if unit_cost > 0 else 0
 
 
-def read_troop_count(image: Image.Image, label: str) -> int | None:
-    card = crop_percent(image, layout_roi("TROOP_ICON_ROIS", label))
+def troop_card_kind(image: Image.Image, roi: Roi) -> str | None:
+    """Recognize the two supported troop cards by their distinctive artwork colors."""
+    pixels = crop_percent(image, roi).convert("RGB").get_flattened_data()
+    if not pixels:
+        return None
+    blue = sum(b > 80 and b > r * 1.08 and g > r * 1.0 for r, g, b in pixels) / len(pixels)
+    magenta = sum(r > 75 and r > g * 1.05 and b > g * 1.15 for r, g, b in pixels) / len(pixels)
+    if blue >= .55 and magenta < .25:
+        return "electrodragon"
+    if magenta >= .28 and blue < .5:
+        return "dragon"
+    return None
+
+
+def troop_card_frame_visible(image: Image.Image, center: float) -> bool:
+    """Distinguish blue troop cards from similarly colored hero artwork."""
+    frame = crop_percent(image, Roi(center - 2, 85.7, center + 2, 88.8)).convert("RGB")
+    pixels = frame.get_flattened_data()
+    if not pixels:
+        return False
+    blue = sum(g > r * 1.25 and b > g * 1.15 and g > 80 for r, g, b in pixels)
+    return blue / len(pixels) >= .45
+
+
+def troop_slot_offset(image: Image.Image, label: str) -> float | None:
+    """Locate a supported troop across the battle bar, independent of card order."""
+    kind = "electrodragon" if label == ELECTRODRAGON_LABEL else "dragon"
+    spacing = ELECTRODRAGON_SLOT[0] - DRAGON_SLOT[0]
+    matches = []
+    for index in range(12):
+        center = DRAGON_SLOT[0] + index * spacing
+        if center > 88:
+            break
+        if not troop_card_frame_visible(image, center):
+            continue
+        roi = shifted_roi(TROOP_ICON_ROIS["Dragon"], center - DRAGON_SLOT[0])
+        if troop_card_kind(image, roi) == kind:
+            matches.append(center)
+    if len(matches) == 1:
+        slot_name = "ELECTRODRAGON_SLOT" if label == ELECTRODRAGON_LABEL else "DRAGON_SLOT"
+        return matches[0] - layout_values(slot_name)[0]
+    return None
+
+
+def rage_targets(troop_points: list[tuple[float, float]], count: int) -> list[tuple[float, float]]:
+    """Spread spells just inside the edge where troops were deployed."""
+    if not troop_points or count <= 0:
+        return []
+    anchors = list(dict.fromkeys(troop_points))
+    targets = []
+    for index in range(count):
+        anchor = anchors[round((len(anchors) - 1) * (index + .5) / count)]
+        target = (round(min(95, anchor[0] + 6), 1), round(min(95, anchor[1] + 4), 1))
+        while target in targets:
+            next_target = (round(min(95, target[0] + 3), 1), round(min(95, target[1] + 2), 1))
+            if next_target == target:
+                break
+            target = next_target
+        targets.append(target)
+    return targets
+
+
+def rage_card_score(image: Image.Image, roi: Roi | None = None) -> float:
+    """Score the distinctive saturated-violet Rage potion artwork."""
+    crop = crop_percent(image, roi or layout_roi("RAGE_ICON_ROI")).convert("HSV")
+    pixels = crop.get_flattened_data()
+    if not pixels:
+        return 0.0
+    purple = sum(185 <= h <= 245 and s >= 75 and v >= 65 for h, s, v in pixels)
+    return purple / len(pixels)
+
+
+def rage_region(name: str, slot_center: float) -> Roi:
+    roi = layout_roi(name)
+    overrides = getattr(getattr(_operation, "settings", None), "layout_overrides", {})
+    return roi if name in overrides else shifted_roi(roi, slot_center - RAGE_SLOT[0])
+
+
+def rage_card_center(image: Image.Image, hero_shift: float | None = 0) -> float | None:
+    """Locate the violet Rage icon before or after the hero group, regardless of lineup order."""
+    overrides = getattr(getattr(_operation, "settings", None), "layout_overrides", {})
+    if "RAGE_SLOT" in overrides:
+        candidate_groups = [(0.0, [layout_values("RAGE_SLOT")[0]])]
+    else:
+        shifts = (-6.25, 0.0) if hero_shift is None else (hero_shift,)
+        hero_slots = layout_points("HERO_SLOTS")
+        candidate_groups = []
+        for shift in shifts:
+            # The pre-hero spell position exists only in the expanded row;
+            # in compact mode it overlaps the first hero card.
+            candidates = [30.45] if shift == 0 else []
+            first_post_hero = hero_slots[-1][0] + shift + 6.25
+            candidates += [first_post_hero + 6.25 * index for index in range(6)]
+            candidate_groups.append((shift, candidates))
+    for shift, candidates in candidate_groups:
+        hero_centers = [slot[0] + shift for slot in layout_points("HERO_SLOTS")]
+        for candidate in candidates:
+            # The compact hero row can leave a half-slot gap before spells.
+            scores = []
+            for step in range(-8, 9):
+                center = candidate + step * .5
+                if not 25 <= center <= 88 or any(abs(center - hero_center) < 2.7 for hero_center in hero_centers):
+                    continue
+                score = rage_card_score(image, rage_region("RAGE_ICON_ROI", center))
+                if score >= .3:
+                    scores.append((round(score, 2), -abs(step), score, center))
+            if scores:
+                return max(scores)[-1]
+    return None
+
+
+def rage_card_visible(image: Image.Image, hero_shift: float = 0) -> bool:
+    return rage_card_center(image, hero_shift) is not None
+
+
+def read_troop_count(image: Image.Image, label: str, slot_offset: float | None = None) -> int | None:
+    if slot_offset is None:
+        slot_offset = troop_slot_offset(image, label)
+    # Count-only diagnostic fixtures intentionally contain no troop artwork;
+    # production selection separately requires a positive card identification.
+    if slot_offset is None:
+        slot_offset = 0.0
+    card = crop_percent(image, shifted_roi(layout_roi("TROOP_ICON_ROIS", label), slot_offset))
     # A blank/missing card is not proof that the army is empty.
     if ImageStat.Stat(ImageOps.grayscale(card)).stddev[0] < 12:
         return None
     icon = card.convert("HSV").getchannel(1)
     if ImageStat.Stat(icon).mean[0] < 30:
         return 0
-    roi = layout_roi("TROOP_COUNT_ROIS", label)
+    roi = shifted_roi(layout_roi("TROOP_COUNT_ROIS", label), slot_offset)
     # The counter moves down when the deployment controls appear. Include
     # that motion and remove the blue card before asking OCR to read x1/x2.
     counter = crop_percent(image, Roi(max(0, roi.x1 - .5), max(0, roi.y1 - .6),
@@ -585,6 +713,33 @@ def read_troop_count(image: Image.Image, label: str) -> int | None:
                 match = re.search(r"x\s*(\d{1,2})", raw)
                 if match:
                     return int(match.group(1))
+    return None
+
+
+def read_rage_count(image: Image.Image, slot_center: float | None = None) -> int | None:
+    """Read the xN counter in the Rage card; never infer an unavailable count."""
+    center = slot_center if slot_center is not None else RAGE_SLOT[0]
+    icon = crop_percent(image, rage_region("RAGE_ICON_ROI", center))
+    if ImageStat.Stat(ImageOps.grayscale(icon)).stddev[0] >= 12 and ImageStat.Stat(icon.convert("HSV").getchannel(1)).mean[0] < 30:
+        return 0
+    for offset in (0, -.25, -.5, .25):
+        tight = Roi(center - .15 + offset, 85.1, center + 3.15 + offset, 88.2)
+        raw = read_text(white_text_mask(crop_percent(image, tight)), scale=5).casefold()
+        match = re.fullmatch(r"x\s*(\d{1,2})[^0-9]?", raw.strip())
+        if match and int(match.group(1)) <= 12:
+            return int(match.group(1))
+    for offset in (0, -2, .5, -1.5, -1, -.5, 1):
+        roi = rage_region("RAGE_COUNT_ROI", center + offset)
+        counter = crop_percent(image, Roi(max(0, roi.x1 - .5), max(0, roi.y1 - .6),
+                                          min(100, roi.x2 + 1.5), min(100, roi.y2 + 1)))
+        if counter_is_one(counter):
+            return 1
+        for scale in (2, 3, 4, 5):
+            raw = read_text(counter, scale=scale).casefold().replace("×", "x")
+            raw = raw.translate(str.maketrans({"o": "0", "i": "1", "l": "1", "s": "5", "b": "8"}))
+            match = re.fullmatch(r"x\s*(\d{1,2})", raw.strip())
+            if match:
+                return int(match.group(1))
     return None
 
 
@@ -660,7 +815,8 @@ def shifted_roi(roi: Roi, shift: float) -> Roi:
 def hero_layout_shift(image: Image.Image) -> float:
     """The siege slot may be absent; locate the king card before hero clicks."""
     overrides = getattr(getattr(_operation, "settings", None), "layout_overrides", {})
-    if all(f"{group}.{index}" in overrides for group in ("HERO_SLOTS", "HERO_HEALTH_ROIS", "HERO_ICON_ROIS") for index in range(3)):
+    if all(f"{group}.{index}" in overrides for group in ("HERO_SLOTS", "HERO_HEALTH_ROIS", "HERO_ICON_ROIS")
+           for index in range(len(layout_points("HERO_SLOTS")))):
         return 0.0  # Explicit calibrated slots/regions already include the shift.
     def skin_pixels(roi):
         pixels = crop_percent(image, roi).convert("RGB").get_flattened_data()
@@ -703,6 +859,15 @@ def hero_health_visible(image: Image.Image, index: int, shift: float = 0) -> boo
 def hero_icon_saturation(image: Image.Image, index: int, shift: float = 0) -> float:
     icon = crop_percent(image, hero_region("HERO_ICON_ROIS", index, shift)).convert("HSV").getchannel(1)
     return ImageStat.Stat(icon).mean[0]
+
+
+def hero_card_present(image: Image.Image, index: int, shift: float = 0) -> bool:
+    """Require the blue card frame; map grass alone is not an available hero."""
+    pixels = crop_percent(image, hero_region("HERO_ICON_ROIS", index, shift)).convert("RGB").get_flattened_data()
+    if not pixels:
+        return False
+    blue = sum(b > 70 and b > r * 1.2 and b > g * 1.02 for r, g, b in pixels)
+    return blue / len(pixels) >= .07
 
 
 def hero_placeholder_slot(image: Image.Image, index: int, shift: float = 0) -> bool:
@@ -1167,6 +1332,13 @@ def read_wall_available(image: Image.Image, item: tuple[float, float]) -> int | 
     return max(values) if values else None
 
 
+def read_wall_menu_price(image: Image.Image, item: tuple[float, float]) -> int | None:
+    y = item[1]
+    raw = read_text(crop_percent(image, Roi(48, y - 1.8, 64.5, y + 1.8)), scale=2)
+    price = parse_clash_number(raw)
+    return price if price is not None and 100_000 <= price <= 20_000_000 else None
+
+
 def find_wall_remove_button(image, shift=0):
     roi=shifted_roi(Roi(25,80,44,87),shift)
     matches=[]
@@ -1262,14 +1434,15 @@ def wall_group_controls(image, single=False, expected_price=None, expected_resou
         return None
     # The compact selected-wall panel sits a few pixels higher than the full
     # batch panel on the reduced VM capture.
-    roi = Roi(20,76,80,89) if compact_panel else Roi(20,81,80,87)
+    roi = (Roi(20,70,80,90) if single else
+           Roi(20,76,80,89) if compact_panel else Roi(20,81,80,87))
     crop = crop_percent(image, roi)
     adds, removes, upgrades = [], [], []
     for scale in (2,1,3):
         words = read_word_centers(crop.resize((crop.width*scale,crop.height*scale)))
         for text, x, y in words:
             label = re.sub(r'[^a-z]', '', normal(text).replace('0','o').replace('1','l'))
-            x, y = roi.x1+x*.6, roi.y1+y*.06
+            x, y = roi.x1+x*(roi.x2-roi.x1)/100, roi.y1+y*(roi.y2-roi.y1)/100
             target = None
             if label.startswith(('ajout','aiout')):
                 target = adds
@@ -1636,24 +1809,19 @@ def battle_reward_open(image: Image.Image) -> bool:
 
 
 def connection_retry_point(image):
-    # Observed Google Play Games connection dialog; fast background check
-    # avoids an extra OCR pass on every ordinary combat capture.
+    # Google Play Games recovery dialogs share a dark center panel. Only
+    # recognized retry/reload actions may be clicked on that panel.
     if any(max(image.getpixel((round(image.width*x/100),round(image.height*y/100)))[:3])>65
            for x,y in ((29.3,42.5),(70,42.5),(69.5,57.5))):
         return None
-    heading=read_text(crop_percent(image,Roi(29,41,71,47)),scale=2).casefold()
-    if not re.search(r'connexion\s+perdue',heading):
-        # The VM renders the inactivity dialog higher and wider than the
-        # original 1080p calibration. Read a generous center band so the
-        # reconnect path still sees the message at reduced client sizes.
-        message=read_text(crop_percent(image,Roi(25,38,75,55)),scale=2).casefold()
-        button=read_text(crop_percent(image,Roi(29,54,71,60)),scale=1).casefold()
-        if 'inactivit' in message and 'recharger le jeu' in button:
-            return (35,56.2)
-        return None
+    button_roi = Roi(29,54,71,60)
+    button=read_text(crop_percent(image,button_roi),scale=1).casefold()
+    normalized_button = unicodedata.normalize('NFKD',button).encode('ascii','ignore').decode()
+    if 'recharger le jeu' in normalized_button:
+        return (35,56.2)
     for text,x,y in read_word_centers(crop_percent(image,Roi(29,54,71,60))):
         label=''.join(c for c in unicodedata.normalize('NFD',text.casefold()) if unicodedata.category(c)!='Mn')
-        if label.strip('!?.:')=='reessayer':
+        if label.strip('!?.:') in ('reessayer','recharger','reconnecter'):
             return (29+x*.42,54+y*.06)
     return None
 
@@ -2163,7 +2331,9 @@ class BotApp:
                     last_attempt = time.monotonic()
                     self.events.put('Reconnexion envoyée ; attente du jeu.')
                     self._wait(3)
-            elif village_home_ready(image) or has_screen_text(image,'victoire','défaite','fin de la bataille'):
+            elif (village_home_ready(image) or battle_hud_visible(image) or
+                  enemy_loot_screen_ready(image) or builders_menu_open(image) or
+                  has_screen_text(image,'victoire','défaite','fin de la bataille')):
                 stable += 1
                 if stable >= 2:
                     self.events.put('Connexion rétablie : reprise depuis un état relu du jeu.')
@@ -2556,10 +2726,17 @@ class BotApp:
             for page in range(20):
                 menu = self._capture(window)
                 if rejected_rows:
-                    item = next((point for point in find_wall_menu_items(menu)
-                                 if all(abs(point[1] - y) >= 1.5 or
-                                        (read_wall_available(menu, point) or 1) != quantity
-                                        for y, quantity in rejected_rows)), None)
+                    item = None
+                    for point in find_wall_menu_items(menu):
+                        quantity = read_wall_available(menu, point) or 1
+                        price = read_wall_menu_price(menu, point)
+                        already_rejected = any(
+                            quantity == old_quantity and
+                            (price == old_price or (price is None and abs(point[1] - old_y) < 1.5))
+                            for old_y, old_quantity, old_price in rejected_rows)
+                        if not already_rejected:
+                            item = point
+                            break
                 else:
                     item = find_wall_menu_item(menu)
                 available = read_wall_available(menu, item) if item else None
@@ -2636,10 +2813,16 @@ class BotApp:
                 if not relocated:
                     available = read_wall_available(current_menu, item) or available
                 self._wall_click(window, item, "rempart")
-                wall_image = self._capture(window)
-                selected_wall = wall_selected(wall_image)
+                selected_wall = False
+                for _ in range(6):
+                    wall_image = self._capture(window)
+                    selected_wall = wall_selected(wall_image)
+                    if selected_wall or wall_group_controls(wall_image, single=available == 1) is not None:
+                        selected_wall = True
+                        break
+                    self._wait(.3)
                 self._trace("REMPARTS", f"Sélection envoyée : ligne={item}, x{available}, sélection reconnue={selected_wall}")
-                if selected_wall or (available == 1 and wall_group_controls(wall_image,single=True) is not None):
+                if selected_wall:
                     selected = True
                     break
                 if self.stop_event.is_set(): break
@@ -2683,7 +2866,7 @@ class BotApp:
                     self.events.put(f"Aucun autre rempart payable en conservant 1 M : or {gold:,}, élixir {elixir:,}.")
                     return upgraded
                 rejected_groups.add(group)
-                rejected_rows.add((item[1], available))
+                rejected_rows.update((item[1], available, price) for _, price in payments.values())
                 rejected_attempts += 1
                 if rejected_attempts >= 8:
                     self.events.put(f"Aucun rempart payable en conservant 1 M : or {gold:,}, élixir {elixir:,}.")
@@ -2786,7 +2969,13 @@ class BotApp:
     def deploy_unit(self, window, label, slot, points, burst=False):
         self._check_stopped()
         if not points: raise RuntimeError("Aucun point de déploiement configuré.")
-        remaining = self.stable_troop_count(window, label)
+        position_image = self._battle_capture(window)
+        slot_offset = troop_slot_offset(position_image, label) if isinstance(position_image, Image.Image) else None
+        if (isinstance(position_image, Image.Image) and slot_offset is None
+                and hasattr(window, "width")):
+            raise RuntimeError(f"Position de la carte {label} non reconnue ; pose annulée sans clic.")
+        selected_slot = (slot[0] + (slot_offset or 0.0), slot[1])
+        remaining = self.stable_troop_count(window, label, slot_offset)
         live_scaled_client = getattr(window, "width", 1920) < 1500
         live_sized_client = hasattr(window, "width") and getattr(window, "width", 0) >= 1500
         expected = self.settings.electrodragon_count if label == "Électro-dragon" else self.settings.dragon_count
@@ -2801,9 +2990,12 @@ class BotApp:
             remaining = expected
         if remaining is None: raise RuntimeError(f"Quantité de {label} illisible : pose non vérifiable.")
         if remaining == 0: return 0
+        self._check_stopped()
+        if slot_offset:
+            self.events.put(f"{label} détecté à {selected_slot[0]:.1f} % dans la barre d'armée.")
         initial = remaining
         if remaining != expected: self.events.put(f"{label} : {remaining} disponible(s), {expected} prévu(s) ; toutes les unités visibles seront envoyées.")
-        if not self._click(window, *slot): raise RuntimeError(f"Sélection {label} refusée.")
+        if not self._click(window, *selected_slot): raise RuntimeError(f"Sélection {label} refusée.")
         self._wait(.08)
         placed = 0
         rejected = set()
@@ -2819,11 +3011,11 @@ class BotApp:
                     self._battle_capture(window)
                     # Event choices can clear the selected troop. Reselect only
                     # while the last confirmed count covers this whole burst.
-                    if not self._click(window, *slot) or not self._click(window, *point):
+                    if not self._click(window, *selected_slot) or not self._click(window, *point):
                         raise RuntimeError(f"Pose rapide {label} refusée.")
                     drops.append(point)
                     self._wait(.06)
-                observed = self.stable_troop_count(window, label)
+                observed = self.stable_troop_count(window, label, slot_offset)
                 if (live_scaled_client or count_recovered_from_impossible_ocr) and (observed is None or not remaining-len(drops) <= observed <= remaining):
                     # The compact client can briefly OCR the neighbouring
                     # troop card (often as zero) while the selected card is
@@ -2838,6 +3030,8 @@ class BotApp:
                 if deployed == 0:
                     rejected.update(drops)
                 else:
+                    if deployed == len(drops):
+                        self._troop_drop_points = getattr(self, "_troop_drop_points", []) + drops
                     placed += deployed
                     remaining = observed
                     self.events.put(f"{label} : {deployed} pose(s) confirmée(s) en ligne ; {remaining} restant(s).")
@@ -2851,7 +3045,7 @@ class BotApp:
                 before = self._battle_capture(window)
                 if not self._click(window, x, y): raise RuntimeError(f"Clic pose {label} refusé.")
                 self._wait(max(.08, self.settings.delay_between_dragons_ms / 1000))
-                observed = self.stable_troop_count(window, label)
+                observed = self.stable_troop_count(window, label, slot_offset)
                 # Never retry a drop whose outcome is unknown: that could deploy
                 # another troop while counting only one, or click a changed menu.
                 if observed is None:
@@ -2860,6 +3054,7 @@ class BotApp:
                     observed = remaining - 1
                     self.events.put(f"{label} : clic de pose suivi par décompte configuré (OCR indisponible).")
                 if observed == remaining - 1:
+                    self._troop_drop_points = getattr(self, "_troop_drop_points", []) + [(x, y)]
                     placed += 1
                     remaining = observed
                     self.events.put(f"{label} confirmé à {x:.1f} %, {y:.1f} % ; {remaining} restant(s).")
@@ -2871,14 +3066,31 @@ class BotApp:
             if not accepted: raise RuntimeError(f"Aucun point de pose accepté pour {label} ; {remaining} unité(s) restante(s).")
         return placed
 
-    def stable_troop_count(self, window, label):
+    def stable_troop_count(self, window, label, slot_offset=None):
         previous = None
         try:
             with ocr_deadline(time.monotonic() + OCR_TIMEOUT):
                 for _ in range(4):
                     image = self._battle_capture(window)
-                    observed = read_troop_count(image, label)
+                    observed = read_troop_count(image, label, slot_offset)
                     self._trace("COMPTEUR", f"{label} : {observed}")
+                    self._check_stopped()
+                    if observed is not None and observed == previous:
+                        return observed
+                    previous = observed
+                    self._wait(.04)
+        except TimeoutError:
+            return None
+        return None
+
+    def stable_rage_count(self, window, slot_center=None):
+        previous = None
+        try:
+            with ocr_deadline(time.monotonic() + OCR_TIMEOUT):
+                for _ in range(4):
+                    image = self._battle_capture(window)
+                    observed = read_rage_count(image, slot_center) if isinstance(image, Image.Image) else None
+                    self._trace("COMPTEUR", f"Sort Rage : {observed}")
                     self._check_stopped()
                     if observed is not None and observed == previous:
                         return observed
@@ -2957,12 +3169,63 @@ class BotApp:
             self.events.put(f"Récompense de l’événement sélectionnée : {chosen_label} ; fermeture du choix confirmée.")
         return image
 
+    def deploy_rage_spells(self, window, hero_shift):
+        self._check_stopped()
+        image = self._battle_capture(window)
+        slot_center = rage_card_center(image, hero_shift) if isinstance(image, Image.Image) else None
+        if slot_center is None:
+            self.events.put("Aucun sort Rage reconnu dans la barre ; aucun clic de sort envoyé.")
+            return 0
+        remaining = self.stable_rage_count(window, slot_center)
+        if remaining is None:
+            raise RuntimeError("Compteur du sort Rage illisible ; aucun sort dépensé.")
+        if remaining == 0:
+            self.events.put("Sort Rage détecté mais aucun exemplaire restant.")
+            return 0
+        points = rage_targets(getattr(self, "_troop_drop_points", []), remaining)
+        if not points:
+            points = layout_points("RAGE_DROP_POINTS")
+        if not points:
+            raise RuntimeError("Aucun point de déploiement configuré pour Rage.")
+        slot = (slot_center, layout_values("RAGE_SLOT")[1])
+        placed = 0
+        rejected = set()
+        used = set()
+        while remaining and not self.stop_event.is_set():
+            candidates = [point for point in points if point not in rejected]
+            if not candidates:
+                raise RuntimeError(f"Aucun point accepté pour Rage ; {remaining} sort(s) restant(s).")
+            unused = [point for point in candidates if point not in used]
+            point = unused[0] if unused else candidates[placed % len(candidates)]
+            self._check_stopped()
+            if not self._battle_capture(window) or not self._click(window, *slot):
+                raise RuntimeError("Sélection du sort Rage refusée.")
+            self._wait(.08)
+            self._check_stopped()
+            if not self._battle_capture(window) or not self._click(window, *point):
+                raise RuntimeError("Clic de déploiement du sort Rage refusé.")
+            self._wait(.18)
+            observed = self.stable_rage_count(window, slot_center)
+            if observed is None or not remaining - 1 <= observed <= remaining:
+                raise RuntimeError("Compteur du sort Rage non confirmé après le clic.")
+            if observed == remaining:
+                rejected.add(point)
+                continue
+            placed += 1
+            used.add(point)
+            remaining = observed
+            self.events.put(f"Rage confirmé à {point[0]:.1f} %, {point[1]:.1f} % ; {remaining} restant(s).")
+        return placed
+
     def deploy_attack_composition(self, window):
         self._check_stopped()
+        self._troop_drop_points = []
         perimeter = layout_points("ELECTRODRAGON_PERIMETER_POINTS")
         electro = self.deploy_unit(window, "Électro-dragon", layout_values("ELECTRODRAGON_SLOT"), perimeter, burst=True)
         dragons = self.deploy_unit(window, "Dragon", layout_values("DRAGON_SLOT"), perimeter, burst=True)
         heroes = 0
+        shift = hero_layout_shift(self._battle_capture(window)) if self.settings.deploy_heroes else None
+        rage = self.deploy_rage_spells(window, shift)
         if self.settings.deploy_heroes:
             self._check_stopped()
             shift = hero_layout_shift(self._battle_capture(window))
@@ -2975,6 +3238,9 @@ class BotApp:
                     continue
                 if hero_placeholder_slot(before, index, shift):
                     self.events.put(f"Héros {index + 1} absent de la barre d’armée ; case vide ignorée.")
+                    continue
+                if not hero_card_present(before, index, shift):
+                    self.events.put(f"H\u00e9ros {index + 1} absent de la barre d'arm\u00e9e ; aucune carte ignor\u00e9e.")
                     continue
                 baseline = hero_icon_saturation(before, index, shift)
                 if baseline < 55:
@@ -3004,7 +3270,7 @@ class BotApp:
                         break
                 else: raise RuntimeError(f"Pose du héros {index + 1} non confirmée.")
         self._check_stopped()
-        self.events.put(f"Déploiement vérifié : {electro} électro-dragons, {dragons} dragons, {heroes} héros.")
+        self.events.put(f"Déploiement vérifié : {electro} électro-dragons, {dragons} dragons, {heroes} héros, {rage} Rage.")
 
     def prepare_attack(self, window):
         initial = self._capture(window)

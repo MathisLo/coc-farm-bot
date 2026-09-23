@@ -27,6 +27,11 @@ def app_without_gui():
 
 
 class CancellationRegressions(unittest.TestCase):
+    def test_dragon_artwork_with_partial_magenta_is_recognized(self):
+        image = Image.new("RGB", (100, 100), (35, 35, 35))
+        image.paste((120, 25, 115), (0, 0, 31, 100))
+        self.assertEqual(main.troop_card_kind(image, main.Roi(0, 0, 100, 100)), "dragon")
+
     def test_fast_line_counts_all_units_in_three_verified_bursts(self):
         app=app_without_gui()
         app._wait=Mock()
@@ -40,8 +45,75 @@ class CancellationRegressions(unittest.TestCase):
         self.assertEqual(app._click.call_count, 17)
         drops=[c.args[1:] for c in app._click.call_args_list][2::2]
         self.assertEqual(len(set(drops)),8)
+        self.assertEqual(app._troop_drop_points, drops)
         self.assertTrue(all(p in points for p in drops))
         self.assertLess(sum(c.args[0] for c in app._wait.call_args_list), .6)
+
+    def test_reversed_troop_order_selects_detected_electro_card(self):
+        app = app_without_gui()
+        app._wait = Mock()
+        image = Image.new("RGB", (1920, 1080))
+        with Image.open(Path(__file__).parent / "testdata" / "hero_unplaced.png") as strip:
+            image.paste(strip, (0, 880))
+        left, right = (280, 0, 399, 1080), (399, 0, 518, 1080)
+        first, second = image.crop(left), image.crop(right)
+        image.paste(second, (left[0], 0))
+        image.paste(first, (right[0], 0))
+        app._battle_capture = Mock(return_value=image)
+        app._click = Mock(return_value=True)
+        app.stable_troop_count = Mock(side_effect=[8, 5, 2, 0])
+        points = main.layout_points("ELECTRODRAGON_PERIMETER_POINTS")
+        self.assertEqual(app.deploy_unit(object(), main.ELECTRODRAGON_LABEL, main.layout_values("ELECTRODRAGON_SLOT"), points, burst=True), 8)
+        self.assertEqual(app._click.call_args_list[0].args[1:], (17.0, 92.5))
+        for call in app.stable_troop_count.call_args_list:
+            self.assertAlmostEqual(call.args[2], -6.2)
+
+    def test_all_visible_rage_spells_are_placed_and_counted_one_by_one(self):
+        app = app_without_gui()
+        app._wait = Mock()
+        app._battle_capture = Mock(return_value=Image.new("RGB", (1920, 1080)))
+        app._click = Mock(return_value=True)
+        app.stable_rage_count = Mock(side_effect=[5, 4, 3, 2, 1, 0])
+        with patch.object(main, "rage_card_center", return_value=53.6):
+            self.assertEqual(app.deploy_rage_spells(object(), -6.25), 5)
+        clicks = [call.args[1:] for call in app._click.call_args_list]
+        self.assertEqual(len(clicks), 10)
+        self.assertEqual(clicks[::2], [(53.6, 92.5)] * 5)
+        self.assertEqual(clicks[1::2], main.layout_points("RAGE_DROP_POINTS"))
+
+    def test_rage_targets_follow_confirmed_troop_drops(self):
+        app = app_without_gui()
+        app._wait = Mock()
+        app._battle_capture = Mock(return_value=Image.new("RGB", (1920, 1080)))
+        app._click = Mock(return_value=True)
+        app._troop_drop_points = [(18, 40), (24, 32), (31, 23), (38, 13)]
+        app.stable_rage_count = Mock(side_effect=[3, 2, 1, 0])
+        with patch.object(main, "rage_card_center", return_value=59.85):
+            self.assertEqual(app.deploy_rage_spells(object(), 0), 3)
+        actual = [call.args[1:] for call in app._click.call_args_list][1::2]
+        self.assertEqual(actual, main.rage_targets(app._troop_drop_points, 3))
+        self.assertNotEqual(actual, main.layout_points("RAGE_DROP_POINTS")[:3])
+
+    def test_rage_is_cast_after_troops_before_heroes(self):
+        app = app_without_gui()
+        order = []
+        app.deploy_unit = Mock(side_effect=lambda *args, **kwargs: order.append('troop') or 1)
+        app.deploy_rage_spells = Mock(side_effect=lambda *args: order.append('rage') or 1)
+        app._battle_capture = Mock(return_value=object())
+        with patch.object(main, 'hero_layout_shift', return_value=0), \
+             patch.object(main, 'hero_health_visible', side_effect=lambda *args: order.append('hero') or True):
+            app.deploy_attack_composition(object())
+        self.assertEqual(order[:4], ['troop', 'troop', 'rage', 'hero'])
+
+    def test_absent_rage_card_never_receives_a_spell_click(self):
+        app = app_without_gui()
+        app._battle_capture = Mock(return_value=Image.new("RGB", (1920, 1080)))
+        app._click = Mock()
+        app.stable_rage_count = Mock()
+        with patch.object(main, "rage_card_center", return_value=None):
+            self.assertEqual(app.deploy_rage_spells(object(), 0), 0)
+        app._click.assert_not_called()
+        app.stable_rage_count.assert_not_called()
 
     def test_fast_line_stops_when_burst_outcome_is_unknown(self):
         app=app_without_gui()
@@ -93,6 +165,7 @@ class CancellationRegressions(unittest.TestCase):
              patch.object(main, "hero_layout_shift", return_value=0), \
              patch.object(main, "hero_health_visible", return_value=False), \
              patch.object(main, "hero_placeholder_slot", return_value=False), \
+             patch.object(main, "hero_card_present", return_value=True), \
              patch.object(main, "hero_icon_saturation", side_effect=[100, 0, 0]):
             with self.assertRaisesRegex(RuntimeError, "non confirmée"):
                 app.deploy_attack_composition(object())
@@ -113,10 +186,39 @@ class CancellationRegressions(unittest.TestCase):
         app._click = Mock(return_value=True)
         with patch.object(app, "deploy_unit", return_value=0), \
              patch.object(main, "hero_layout_shift", return_value=-6.25), \
-             patch.object(main, "hero_health_visible", side_effect=[True, True, False]):
+             patch.object(main, "hero_health_visible", side_effect=[True, True, False, False]):
             app.deploy_attack_composition(object())
         app._click.assert_not_called()
         self.assertTrue(any("case vide ignorée" in event for event in app.events.queue))
+
+    def test_fourth_available_hero_is_selected_and_verified(self):
+        app = app_without_gui()
+        app._wait = Mock()
+        app._battle_capture = Mock(return_value=Image.new("RGB", (1920, 1080)))
+        app._click = Mock(return_value=True)
+        with patch.object(app, "deploy_unit", return_value=0), \
+             patch.object(main, "hero_layout_shift", return_value=0), \
+             patch.object(main, "hero_health_visible", side_effect=[False, False, True] * 4), \
+             patch.object(main, "hero_placeholder_slot", return_value=False), \
+             patch.object(main, "hero_card_present", return_value=True), \
+             patch.object(main, "hero_icon_saturation", return_value=100), \
+             patch.object(main, "rage_card_center", return_value=None):
+            app.deploy_attack_composition(object())
+        self.assertEqual(len(main.layout_points("HERO_SLOTS")), 4)
+        self.assertEqual(app._click.call_count, 8)
+        self.assertEqual(app._click.call_args_list[6].args[1:], main.layout_points("HERO_SLOTS")[3])
+        self.assertTrue(any("4 héros" in str(event) for event in app.events.queue))
+
+    def test_rage_locator_resolves_compact_bar_without_hero_deployment(self):
+        app = app_without_gui()
+        app.settings = main.replace(app.settings, deploy_heroes=False)
+        app.deploy_unit = Mock(return_value=0)
+        app.deploy_rage_spells = Mock(return_value=0)
+        window = object()
+        with patch.object(main, "hero_layout_shift", return_value=-6.25) as resolve_shift:
+            app.deploy_attack_composition(window)
+        resolve_shift.assert_not_called()
+        app.deploy_rage_spells.assert_called_once_with(window, None)
 
     def test_rejected_deployment_point_is_not_retried_for_next_troop(self):
         app = app_without_gui()
@@ -202,6 +304,7 @@ class CancellationRegressions(unittest.TestCase):
              patch.object(main, "hero_layout_shift", return_value=0), \
              patch.object(main, "hero_health_visible", return_value=False), \
              patch.object(main, "hero_placeholder_slot", return_value=False), \
+             patch.object(main, "hero_card_present", return_value=True), \
              patch.object(main, "hero_icon_saturation", return_value=100):
             with self.assertRaises(main.OperationCancelled):
                 app.deploy_attack_composition(object())
@@ -617,6 +720,14 @@ class ConnectionRegressions(unittest.TestCase):
             self.assertAlmostEqual(point[1],56.1,delta=.2)
         self.assertIsNone(main.connection_retry_point(Image.new('RGB',(1920,1080),'white')))
 
+    def test_retry_button_survives_different_dialog_message(self):
+        with Image.open(Path(__file__).parent/'testdata/connection_lost.png') as source:
+            image=source.copy()
+        image.paste((30,30,30),(557,443,1363,572))
+        point=main.connection_retry_point(image)
+        self.assertIsNotNone(point)
+        self.assertAlmostEqual(point[0],32.7,delta=.2)
+
     def test_inactivity_dialog_blocks_village_and_offers_reload(self):
         with Image.open(Path(__file__).parent/'testdata/inactive_dialog.png') as image:
             self.assertEqual(main.connection_retry_point(image),(35,56.2))
@@ -640,6 +751,20 @@ class ConnectionRegressions(unittest.TestCase):
         app._click=Mock()
         app.reconnect_game()
         app._click.assert_not_called()
+
+    def test_reconnect_accepts_a_restored_battle_without_extra_clicks(self):
+        app=app_without_gui()
+        app._wait=Mock()
+        app._click=Mock(return_value=True)
+        image=Image.new('RGB',(1920,1080))
+        window=SimpleNamespace(title='Clash test')
+        with patch.object(main.WindowDriver,'resolve',return_value=window), \
+             patch.object(main.WindowDriver,'capture',return_value=image), \
+             patch.object(main,'connection_retry_point',side_effect=[(35,56),None,None]), \
+             patch.object(main,'battle_hud_visible',return_value=True), \
+             patch.object(main,'village_home_ready',return_value=False):
+            app.reconnect_game()
+        app._click.assert_called_once_with(window,35,56)
 
 
 class DiagnosticLogRegressions(unittest.TestCase):
