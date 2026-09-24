@@ -850,13 +850,16 @@ def read_troop_count(image: Image.Image, label: str, slot_offset: float | None =
 
 
 def event_extra_troop_card(image: Image.Image) -> tuple[float, int] | None:
-    """Find the temporary red troop card only while it is present in battle."""
+    """Find the extra troop card among troop slots while it is present."""
     for center in EVENT_EXTRA_TROOP_CENTERS:
-        if event_extra_troop_red_score(image, center) < .15:
-            continue
-        count = read_event_extra_troop_count(image, center)
-        if count is not None and 1 <= count <= 40:
-            return center, count
+        if event_extra_troop_red_score(image, center) >= .15:
+            count = read_event_extra_troop_count(image, center)
+            if count is not None and 1 <= count <= 40:
+                return center, count
+        elif read_event_extra_troop_count(image, center, 40, 40) == 40:
+            # The PC render can omit the red icon. A fresh x40 outside the
+            # already-deployed regular army is the event card for this cycle.
+            return center, 40
     return None
 
 
@@ -2362,7 +2365,7 @@ class DiagnosticJournal:
             self._run_file = self.run_path.open("x", encoding="utf-8")
             self.last_run_path = self.run_path
             self._run_failed = False
-            self.record("DÉBUT", f"Action={label}; journal={self.run_path}; programme={sys.executable}")
+            self.record("DÉBUT", f"Action={label}; version={APP_VERSION}; journal={self.run_path}; programme={sys.executable}")
             if settings is not None:
                 self.record("CONFIG", json.dumps(asdict(settings), ensure_ascii=False, sort_keys=True))
             return self.run_path
@@ -3780,6 +3783,19 @@ class BotApp:
                     return initial
         raise RuntimeError('Carte électro-dragon toujours active après les poses résiduelles bornées.')
 
+    def _save_event_bar_diagnostic(self, image, reason):
+        journal = getattr(self, 'journal', None)
+        if not isinstance(image, Image.Image) or journal is None or journal.run_path is None:
+            return
+        screenshot = journal.run_path.with_suffix('.png')
+        if screenshot.exists():
+            return
+        try:
+            image.crop((0, int(image.height * .78), image.width, image.height)).save(screenshot)
+            self._trace('RENFORTS', f'{reason} ; barre de combat enregistrée : {screenshot}')
+        except OSError as exc:
+            self._trace('RENFORTS', f'Capture de la barre impossible : {exc}')
+
     def stable_event_extra_count(self, window, center, minimum=0, maximum=40):
         previous = None
         for _ in range(4):
@@ -3799,8 +3815,12 @@ class BotApp:
         if found is None:
             if isinstance(start_image, Image.Image) and battle_result_return_ready(start_image):
                 raise BattleEndedEarly("Combat terminé avant la recherche des renforts d'événement.")
+            self._save_event_bar_diagnostic(start_image, "Carte x40 non reconnue")
             return 0
         center, remaining = found
+        red_guard = event_extra_troop_red_score(start_image, center) >= .15
+        if not red_guard:
+            self._save_event_bar_diagnostic(start_image, f"Carte x40 reconnue au compteur à {center:.1f} %")
         initial = remaining
         stalled = 0
         self.events.put(f"Renfort d'événement détecté : x{initial} dans la barre de combat.")
@@ -3809,10 +3829,12 @@ class BotApp:
             batch = min(5, remaining)
             for _ in range(batch):
                 image = self._battle_capture(window)
-                if isinstance(image, Image.Image) and event_extra_troop_red_score(image, center) < .08 and battle_result_return_ready(image):
+                if (isinstance(image, Image.Image) and red_guard
+                        and event_extra_troop_red_score(image, center) < .08
+                        and battle_result_return_ready(image)):
                     raise BattleEndedEarly("Combat terminé avant la pose de tous les renforts d'événement.")
                 if (not isinstance(image, Image.Image)
-                        or event_extra_troop_red_score(image, center) < .08):
+                        or (red_guard and event_extra_troop_red_score(image, center) < .08)):
                     raise RuntimeError("Carte de renfort d'événement disparue avant la fin de la pose.")
                 if not self._click(window, center, DRAGON_SLOT[1]) or not self._click(window, *anchor):
                     raise RuntimeError("Clic de renfort d'événement refusé.")
@@ -3838,7 +3860,7 @@ class BotApp:
         final_image = self._battle_capture(window)
         if battle_result_return_ready(final_image):
             raise BattleEndedEarly("Combat terminé avant la vérification de la carte de renfort vide.")
-        if final_count != 0 or event_extra_troop_red_score(final_image, center) >= .08:
+        if final_count != 0 or (red_guard and event_extra_troop_red_score(final_image, center) >= .08):
             raise RuntimeError("Carte de renfort d'événement non vide après la pose.")
         self.events.put(f"Renfort d'événement vérifié : {initial} troupe(s) posée(s).")
         return initial

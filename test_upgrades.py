@@ -8,6 +8,17 @@ import upgrades
 
 
 class UpgradeTests(unittest.TestCase):
+    def test_moving_building_row_is_relocated_before_click(self):
+        app = app_without_gui()
+        app._wait = Mock()
+        app._capture = Mock(return_value=Image.new('RGB', (1920, 1080)))
+        rows = [[('Caserne noire', y, 2_880_000, 'élixir')] for y in (59.6, 55.2, 55.2)]
+        with patch.object(main, 'builders_menu_open', return_value=True), \
+             patch.object(upgrades, 'suggested_items', side_effect=rows):
+            self.assertEqual(upgrades.stable_upgrade_row(
+                app, object(), 'Caserne noire', 2_880_000, 'élixir'), 55.2)
+        self.assertEqual(app._capture.call_count, 3)
+
     def test_matching_wall_payment_cards_remove_tiny_ocr_suffix(self):
         prices = {'or': ((58, 80), 4_000_004), 'élixir': ((66, 80), 4_000_000)}
         self.assertEqual(main.reconcile_wall_payment_prices(prices),

@@ -45,6 +45,43 @@ class CancellationRegressions(unittest.TestCase):
         with Image.open(captures / 'live_compact_battle_bar.png') as regular:
             self.assertIsNone(main.event_extra_troop_card(regular))
 
+    def test_event_x40_can_be_found_without_red_icon_on_pc_sized_bar(self):
+        with Image.open(Path(__file__).parent / 'testdata' / 'event_extra_troop_x40_1323.png') as source:
+            image = source.resize((1920, 1080))
+        ImageDraw.Draw(image).rectangle((int(image.width * .148), int(image.height * .90),
+                                         int(image.width * .192), int(image.height * .96)),
+                                        fill=(25, 70, 175))
+        self.assertLess(main.event_extra_troop_red_score(image, 17.0), .15)
+        self.assertEqual(main.event_extra_troop_card(image), (17.0, 40))
+        app = app_without_gui()
+        gray = image.convert('L').convert('RGB')
+        app._click = Mock(return_value=True)
+        app._wait = Mock()
+        app.stable_event_extra_count = Mock(side_effect=list(range(35, 0, -5)) + [0, 0])
+        app._battle_capture = Mock(side_effect=lambda _: gray if app.stable_event_extra_count.call_count >= 9 else image)
+        self.assertEqual(app.deploy_event_extra_troops(object(), (28.7, 25.6)), 40)
+        self.assertEqual(app._click.call_count, 80)
+
+    def test_missing_event_card_saves_battle_bar_in_diagnostic_zip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = main.DiagnosticJournal(Path(directory) / 'bot.log')
+            app = app_without_gui()
+            app.journal = journal
+            with Image.open(Path(__file__).parent / 'testdata' / 'live_compact_battle_bar.png') as image:
+                app._battle_capture = Mock(return_value=image)
+                journal.start_run('event probe')
+                screenshot = journal.run_path.with_suffix('.png')
+                self.assertEqual(app.deploy_event_extra_troops(object(), (28.7, 25.6)), 0)
+                self.assertTrue(screenshot.exists())
+                with Image.open(screenshot) as saved:
+                    self.assertLess(saved.height, image.height / 3)
+            journal.end_run('terminée')
+            destination = Path(directory) / 'diagnostic.zip'
+            journal.export_bundle(destination)
+            with zipfile.ZipFile(destination) as archive:
+                self.assertIn(screenshot.name, archive.namelist())
+            journal.close()
+
     def test_all_forty_temporary_troops_are_deployed_and_verified(self):
         app = app_without_gui()
         with Image.open(Path(__file__).parent / 'testdata' / 'event_extra_troop_x40_1323.png') as image:

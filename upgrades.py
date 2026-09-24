@@ -571,6 +571,29 @@ def verify_building_spend(app, window, title, cost, resource, free, balances):
     app.events.put(f'{title} : amélioration lancée pour {cost:,} {resource} ; {after} ouvrier(s) libre(s).')
 
 
+def stable_upgrade_row(app, window, title, cost, resource, include_town_hall=False):
+    """Relocate a moving builder row before any click is sent."""
+    m = engine()
+    previous_y = None
+    for attempt in range(6):
+        app._wait(.35)
+        menu = app._capture(window)
+        if not m.builders_menu_open(menu):
+            return None
+        matches = [item for item in suggested_items(menu, include_others=True,
+                                                   include_town_hall=include_town_hall)
+                   if same_building_title(item[0], title) and item[2:] == (cost, resource)]
+        app._trace('BÂTIMENTS', f'Ligne avant clic {attempt + 1}/6 : {matches!r}')
+        if len(matches) != 1:
+            previous_y = None
+            continue
+        current_y = matches[0][1]
+        if previous_y is not None and abs(current_y - previous_y) <= .8:
+            return current_y
+        previous_y = current_y
+    return None
+
+
 def upgrade_suggested(app, window, max_upgrades=5):
     m = engine()
     if app.settings.dry_run:
@@ -616,14 +639,11 @@ def upgrade_suggested(app, window, max_upgrades=5):
         app._trace('BÂTIMENTS',f'Sélection : {title!r} à y={y:.2f} %, coût={cost} {resource}')
         if is_town_hall(title) and not allow_town_hall:
             raise RuntimeError('Hôtel de ville exclu des améliorations automatiques.')
-        # The builder list can keep moving after a wheel event. Confirm the
-        # price under the click twice before selecting anything in the village.
-        prices = []
-        for _check in range(2):
-            app._wait(.55)
-            menu = app._capture(window)
-            prices.append(builder_price_resource(menu, y) if m.builders_menu_open(menu) else None)
-        if prices != [(cost, resource), (cost, resource)]:
+        # The list can move after the row is found; confirm its current
+        # position from title and price on two consecutive captures.
+        settled_y = stable_upgrade_row(app, window, title, cost, resource,
+                                      include_town_hall=allow_town_hall)
+        if settled_y is None:
             app.events.put(f'Ligne {title} déplacée ou illisible avant le clic : aucune sélection envoyée.')
             skipped_titles.add(title)
             failed_choices += 1
@@ -631,6 +651,9 @@ def upgrade_suggested(app, window, max_upgrades=5):
                 app.events.put('Deux lignes de bâtiments instables : reprise des remparts et des attaques.')
                 return completed
             continue
+        if abs(settled_y - y) > .8:
+            app._trace('BÂTIMENTS', f'Ligne {title} recalée de {y:.2f} % à {settled_y:.2f} %.')
+        y = settled_y
         app._wall_click(window, (44,y), title)
         selected = app._capture(window)
         # The builder list remains as a translucent overlay. Close it before
