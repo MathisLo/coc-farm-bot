@@ -81,14 +81,15 @@ def direct_upgrade_button(image, title, cost, resource):
             buttons.append((px,py))
     if len(buttons) == 1:
         return buttons[0]
-    if image.width < 1500:
-        px, py = 83.0, 58.0
-        button = m.crop_percent(image, m.Roi(78, 55, 88, 64)).convert('RGB')
+    for px, py, button_roi, price_roi, icon_roi in (
+            (83.0, 58.0, m.Roi(78,55,88,64), m.Roi(78,59,87,63), m.Roi(85.5,58.5,88.5,62.5)),
+            (83.0, 43.0, m.Roi(78,39,88,47), m.Roi(78,42,86,47), m.Roi(85.5,41,88.5,46))):
+        button = m.crop_percent(image, button_roi).convert('RGB')
         pixels = list(button.get_flattened_data())
         green = sum(g > r * 1.3 and g > b * 1.2 and g > 100 for r, g, b in pixels)
         if (green > len(pixels) * .2
-                and m.read_result_amount(m.crop_percent(image, m.Roi(px-5, py+1, px+4, py+5))) == cost
-                and resource_icon(image, m.Roi(px+2.5, py+.5, px+5.5, py+4.5)) == resource):
+                and m.read_result_amount(m.crop_percent(image, price_roi)) == cost
+                and resource_icon(image, icon_roi) == resource):
             return (px, py)
     return None
 
@@ -288,6 +289,8 @@ def suggested_items(image, include_others=False, include_town_hall=False):
             title = re.sub(r"[\s,]+x\S*$", '', focused, flags=re.I).strip(" '•.,:")
         if is_wall_row(title):
             continue
+        if len(canonical_title(title)) < 5:
+            continue
         if is_town_hall(title) and not include_town_hall:
             continue
         price = builder_price_resource(image,screen_y)
@@ -370,6 +373,35 @@ def _menu_image_is_stable(previous, current):
         return False
 
 
+def menu_anchor_rows(image):
+    """Read label positions without prices or animated scenery behind the menu."""
+    m = engine()
+    region = m.Roi(39, 12, 56, 64)
+    words = m.read_word_centers(m.crop_percent(image, region))
+    rows = []
+    for word, _x, y in sorted(words, key=lambda item: item[2]):
+        label = canonical_title(word)
+        if len(label) < 4:
+            continue
+        screen_y = region.y1 + y * (region.y2 - region.y1) / 100
+        if rows and abs(screen_y - rows[-1][0]) < 1.5:
+            rows[-1] = (rows[-1][0], rows[-1][1] + label)
+        else:
+            rows.append((screen_y, label))
+    return rows
+
+
+def menu_rows_stationary(previous, current):
+    """Detect an exhausted scroll despite small OCR changes between frames."""
+    if len(previous) < 3 or len(current) < 3:
+        return False
+    matched = sum(any(abs(y - old_y) < 1.5 and
+                      SequenceMatcher(None, label, old_label).ratio() >= .75
+                      for old_y, old_label in previous)
+                  for y, label in current)
+    return matched >= 3 and matched >= min(len(previous), len(current)) * .6
+
+
 def find_payable_upgrade(app, window, free, balances, include_town_hall=False, excluded_titles=None):
     """Inspect the whole list, then relocate the most expensive payable row."""
     m = engine()
@@ -377,8 +409,11 @@ def find_payable_upgrade(app, window, free, balances, include_town_hall=False, e
     scroll_builders_to_top(app,window)
     previous = None
     previous_image = None
+    previous_rows = []
+    previous_items = []
     unchanged = 0
     observations = []
+    ambiguous_prices = []
     for _ in range(5):
         seen_top = set()
         for item in suggested_items(app._capture(window), include_town_hall=include_town_hall):
@@ -416,13 +451,25 @@ def find_payable_upgrade(app, window, free, balances, include_town_hall=False, e
                 seen.add(index)
         # Text equality avoids treating animated scenery as further scrolling.
         signature = normal(m.read_text(m.crop_percent(menu,m.Roi(39,12,64,64)),scale=2))
-        unchanged = unchanged + 1 if signature and signature == previous else 0
+        rows = menu_anchor_rows(menu)
+        stationary = menu_rows_stationary(previous_rows, rows)
+        if stationary:
+            for title, y, cost, resource in items:
+                for old_title, old_y, old_cost, old_resource in previous_items:
+                    if (resource == old_resource and abs(y - old_y) < 1.5 and
+                            min(cost, old_cost) > 0 and max(cost, old_cost) >= 3 * min(cost, old_cost)):
+                        ambiguous_prices.extend(((y, cost, resource), (old_y, old_cost, old_resource)))
+                        app._trace('BÂTIMENTS', f'Prix contradictoires sur la même ligne : {old_title!r} {old_cost}, {title!r} {cost} {resource}')
+        unchanged = unchanged + 1 if ((signature and signature == previous) or
+                                      stationary) else 0
         if _menu_image_is_stable(previous_image, menu) and page >= 2:
             unchanged = max(unchanged, 2)
         if unchanged >= 2:
             break
         previous = signature
         previous_image = menu
+        previous_rows = rows
+        previous_items = items
         if not m.builders_menu_open(menu):
             raise RuntimeError('Liste des ouvriers fermée pendant la recherche : aucun défilement envoyé.')
         with app.action_lock:
@@ -431,7 +478,9 @@ def find_payable_upgrade(app, window, free, balances, include_town_hall=False, e
             if not m.WindowDriver.scroll_menu(window,delta=-1200):
                 raise RuntimeError('Défilement de la liste des améliorations refusé.')
         app._wait(.35)
-    confirmed = [record for record in observations if record[2] >= 2]
+    confirmed = [record for record in observations if record[2] >= 2 and not any(
+        abs(record[3][1] - y) < 1.5 and record[1] == (cost, resource)
+        for y, cost, resource in ambiguous_prices)]
     app._trace('BÂTIMENTS',f'Lignes vues au moins deux fois : {[(record[0],record[1],record[2]) for record in confirmed]!r}')
     if not confirmed:
         app.events.put('Liste des ouvriers parcourue : aucune amélioration payable lue sur deux captures.')
@@ -439,8 +488,9 @@ def find_payable_upgrade(app, window, free, balances, include_town_hall=False, e
     best = max(confirmed, key=lambda record: record[1][0])[3]
     app.events.put(f'Bâtiment le plus cher reconnu : {best[0]}, {best[2]:,} {best[3]}.')
     # The scan ends elsewhere in the list. Re-find the exact row before a click.
+    pages_scanned = page + 1
     scroll_builders_to_top(app,window)
-    for page in range(20):
+    for page in range(pages_scanned):
         for _ in range(4 if page == 0 else 1):
             menu = app._capture(window)
             for item in suggested_items(menu,include_others=True,include_town_hall=include_town_hall):
@@ -492,6 +542,12 @@ def perform_direct_upgrade(app, window, title, cost, resource):
     app._wall_click(window,(44,matches[0][1]),'rouvrir l’amélioration directe')
     final = app._capture(window)
     button = direct_upgrade_button(final,title,cost,resource)
+    for _ in range(4):
+        if button is not None:
+            break
+        app._wait(.4)
+        final = app._capture(window)
+        button = direct_upgrade_button(final,title,cost,resource)
     app._trace('BÂTIMENTS',f'Bouton direct vérifié : {button!r}, coût={cost} {resource}')
     if button is None:
         raise RuntimeError('Confirmation directe modifiée : aucune dépense envoyée.')

@@ -55,6 +55,10 @@ class ReconnectRequired(Exception):
     """Unwind the interrupted action before reconnecting and re-reading state."""
 
 
+class BattleEndedEarly(Exception):
+    """The result appeared before the remaining deployment could be verified."""
+
+
 def check_cancelled():
     event = getattr(_operation, "stop_event", None)
     if event is not None and event.is_set():
@@ -226,6 +230,7 @@ ELECTRODRAGON_LABEL = "\u00c9lectro-dragon"
 RAGE_SLOT = (59.85, 92.5)
 RAGE_DROP_POINTS = ((24.0, 33.0), (31.0, 25.0), (37.0, 17.0), (20.0, 38.0), (34.0, 21.0))
 ARMY_REQUIRED_RAGE = 5
+EVENT_EXTRA_TROOP_CENTERS = (17.0, 23.2, 29.4)
 # The regular builder counter is left of the laboratory counter on the
 # current Google Play Games render. 49% lands on the laboratory panel and
 # makes the upgrade scan see troops/spells instead of buildings.
@@ -456,6 +461,35 @@ def white_text_mask(image: Image.Image) -> Image.Image:
 def read_safe_reserve(image: Image.Image, resource: str) -> int | None:
     """Read a home-village reserve conservatively; invalid OCR stops upgrades."""
     calibrated = f"PROFILE_ROIS.{resource}" in getattr(getattr(_operation, "settings", None), "layout_overrides", {})
+    if resource == "gold" and image.width < 1500 and not calibrated:
+        strip = ImageOps.grayscale(crop_percent(image, Roi(87.1, 3.0, 95.1, 6.4)))
+        threshold_readings = [parse_reserve_number(read_text(
+            ImageOps.invert(strip.point(lambda pixel: 255 if pixel > threshold else 0)), scale=4))
+            for threshold in (180, 190, 200, 210, 220)]
+        million_votes = [value for value in threshold_readings if value is not None
+                         and 1_000_000 <= value <= 20_000_000]
+        agreed = [value for value in set(million_votes) if million_votes.count(value) >= 2]
+        if len(agreed) == 1:
+            return agreed[0]
+        wide = crop_percent(image, Roi(86, 2, 95.5, 7))
+        tight = crop_percent(image, Roi(87.5, 3.1, 95.3, 6.1))
+        readings = [parse_reserve_number(read_text(crop, scale=scale))
+                    for crop, scale in ((wide, 3), (wide, 5), (tight, 5))]
+        if readings[0] is not None and len(set(readings)) == 1 and 1_000_000 <= readings[0] <= 20_000_000:
+            return readings[0]
+        second_tight = crop_percent(image, Roi(87.5, 3.1, 95.2, 6.5))
+        tight_readings = [parse_reserve_number(read_text(crop, scale=5))
+                          for crop in (tight, second_tight)]
+        if (tight_readings[0] is not None and len(set(tight_readings)) == 1
+                and 1_000_000 <= tight_readings[0] <= 20_000_000):
+            return tight_readings[0]
+    if resource == 'elixir' and image.width < 1500 and not calibrated:
+        crop = ImageOps.grayscale(crop_percent(image, Roi(86.55,11.02,95.09,14.25)))
+        readings = [parse_reserve_number(read_text(
+            ImageOps.invert(crop.point(lambda pixel: 255 if pixel > threshold else 0)), scale=scale))
+            for threshold, scale in ((200,4),(200,5),(205,4))]
+        if readings[0] is not None and len(set(readings)) == 1 and 1_000_000 <= readings[0] <= 20_000_000:
+            return readings[0]
     fallback_rois = () if calibrated else ((Roi(86, 3, 95, 6.2), Roi(86, 2.5, 95, 6.5)) if resource == "gold" else (Roi(86, 10.5, 95, 15),))
     for rois in ((layout_roi("PROFILE_ROIS", resource),), fallback_rois):
         values = []
@@ -499,7 +533,11 @@ def parse_reserve_number(text: str) -> int | None:
     if match: return int("".join(match.groups()))
     stripped = corrected.strip(" ,-.")
     digits = re.sub(r"\s+", "", stripped)
+    if re.fullmatch(r"\d{2}\s+\d{3}|\d{5}", stripped):
+        return int(digits)
     if re.fullmatch(r"\d{3}\s+\d{3}|\d{6}", stripped):
+        return int(digits)
+    if re.fullmatch(r"\d{4}\s+\d{3}", stripped):
         return int(digits)
     return int(digits) if re.fullmatch(r"\d{7,8}|\d{1,2}\s+\d{6}", stripped) else None
 
@@ -811,6 +849,44 @@ def read_troop_count(image: Image.Image, label: str, slot_offset: float | None =
     return None
 
 
+def event_extra_troop_card(image: Image.Image) -> tuple[float, int] | None:
+    """Find the temporary red troop card only while it is present in battle."""
+    for center in EVENT_EXTRA_TROOP_CENTERS:
+        if event_extra_troop_red_score(image, center) < .15:
+            continue
+        count = read_event_extra_troop_count(image, center)
+        if count is not None and 1 <= count <= 40:
+            return center, count
+    return None
+
+
+def event_extra_troop_red_score(image: Image.Image, center: float) -> float:
+    icon = crop_percent(image, shifted_roi(Roi(14.8, 90, 19.2, 96), center - DRAGON_SLOT[0])).convert("RGB")
+    pixels = icon.get_flattened_data()
+    if not pixels:
+        return 0.0
+    return sum(r > 110 and r > g * 1.35 and r > b * 1.25 for r, g, b in pixels) / len(pixels)
+
+
+def read_event_extra_troop_count(image: Image.Image, center: float,
+                                 minimum: int = 0, maximum: int = 40) -> int | None:
+    # The wide crop can truncate the last digit of x25; read the badge itself first.
+    # Hero deployment can shift the card by a few pixels without moving its click target.
+    scales = (5, 4, 3) if image.width >= 2000 else (5, 4)
+    for shift in (0, .4, -.4, .8, -.8):
+        offset = center + shift - DRAGON_SLOT[0]
+        for roi in (Roi(17, 84.6, 20.6, 89), Roi(16.6, 84.4, 20.9, 90)):
+            badge = crop_percent(image, shifted_roi(roi, offset))
+            for scale in scales:
+                raw = read_text(badge, scale=scale).casefold().replace('×', 'x')
+                raw = raw.translate(str.maketrans({'s': '5', 'o': '0', 'l': '1'}))
+                match = re.search(r'x\s*(\d{1,2})\s*$', raw)
+                if match and minimum <= int(match.group(1)) <= maximum:
+                    return int(match.group(1))
+    fallback = read_troop_count(image, "Dragon", center - DRAGON_SLOT[0])
+    return fallback if fallback is not None and minimum <= fallback <= maximum else None
+
+
 def read_rage_count(image: Image.Image, slot_center: float | None = None) -> int | None:
     """Read the xN counter in the Rage card; never infer an unavailable count."""
     center = slot_center if slot_center is not None else RAGE_SLOT[0]
@@ -968,10 +1044,17 @@ def hero_layout_shift(image: Image.Image) -> float:
            for index in range(len(layout_points("HERO_SLOTS")))):
         return 0.0  # Explicit calibrated slots/regions already include the shift.
     compact_first = hero_region("HERO_ICON_ROIS", 0, -6.25)
-    if (hero_card_present(image, 0, -6.25)
-            and hero_icon_saturation(image, 0, -6.25) >= 90
-            and rage_card_score(image, compact_first) < .18):
+    expanded_first = hero_region("HERO_ICON_ROIS", 0, 0)
+    compact_card = (hero_card_present(image, 0, -6.25)
+                    and hero_icon_saturation(image, 0, -6.25) >= 90
+                    and rage_card_score(image, compact_first) < .18)
+    expanded_card = (hero_card_present(image, 0, 0)
+                     and hero_icon_saturation(image, 0, 0) >= 90
+                     and rage_card_score(image, expanded_first) < .18)
+    if compact_card:
         return -6.25
+    if expanded_card:
+        return 0.0
     def skin_pixels(roi):
         pixels = crop_percent(image, roi).convert("RGB").get_flattened_data()
         return sum(r > 140 and 75 < g < 210 and b < 110 and r > g * 1.12 and g > b * 1.2 for r, g, b in pixels)
@@ -1075,7 +1158,9 @@ def has_all_screen_text(image: Image.Image, *needles: str) -> bool:
 
 
 def multiplayer_menu_ready(image: Image.Image) -> bool:
-    return has_screen_text(image, "multijoueur", "mon armée", "formez", "puissante armée")
+    text = normalized_screen_text(image)
+    return (any(token in text for token in ("monarm", "formez", "puissantearm"))
+            or ("multijou" in text and "trouv" in text and "part" in text))
 
 
 def army_selection_ready(image: Image.Image) -> bool:
@@ -1599,6 +1684,21 @@ def wall_price_readings(image, expected=None):
     return readings
 
 
+def reconcile_wall_payment_prices(payments):
+    if 'or' not in payments or 'élixir' not in payments:
+        return payments
+    lower = min(payments['or'][1], payments['élixir'][1])
+    upper = max(payments['or'][1], payments['élixir'][1])
+    agreed = None
+    if lower >= 100_000 and lower % 100_000 == 0 and 0 < upper - lower <= 100:
+        agreed = lower
+    elif lower >= 100_000 and upper == lower * 10 and upper % 100_000 == 0:
+        agreed = upper
+    if agreed is not None:
+        return {resource: (point, agreed) for resource, (point, _price) in payments.items()}
+    return payments
+
+
 def wall_group_controls(image, single=False, expected_price=None, expected_resource=None):
     """Locate the controls in the current row; never reuse a row offset.
 
@@ -1737,6 +1837,7 @@ def wall_group_controls(image, single=False, expected_price=None, expected_resou
                 payments['or'] = ((x, y - 3), known_price)
             elif 58 <= x < 67 and 'élixir' not in payments:
                 payments['élixir'] = ((x, y - 3), known_price)
+    payments = reconcile_wall_payment_prices(payments)
     if compact_panel and len(payments) >= 2:
         # Both supported compact cards show the same wall unit price. If one
         # card loses a leading digit, use the larger confirmed peer amount.
@@ -1788,7 +1889,7 @@ def wall_group_controls(image, single=False, expected_price=None, expected_resou
             add_x, add_y = more
         plus_pixels=list(crop_percent(image,Roi(add_x-1.5,add_y-3.8,add_x+1.5,add_y+1.2)).convert('RGB').get_flattened_data())
         active_plus=sum(g>110 and g>r*1.25 and g>b*1.3 for r,g,b in plus_pixels)
-        if not compact_panel and active_plus < len(plus_pixels)*.06:
+        if not compact_panel and active_plus < len(plus_pixels)*.04:
             return None
         remove = (removes[0][0],removes[0][1]-3) if len(removes)==1 else None
         # When both add cards are visible, the leftmost one is +10 and the
@@ -1829,6 +1930,17 @@ def wall_batch_confirmation_matches(image: Image.Image, total: int, resource: st
     ok = read_text(crop_percent(image, layout_roi("SCREEN_ROIS", "wall_confirmation_ok")), scale=2).casefold()
     ok_visible = "ok" in ok or _green_confirmation_button_visible(image)
     return bool("rempart" in text and amount and parse_clash_number(amount.group(1)) == total and payment in text[amount.end():] and ok_visible)
+
+
+def wall_confirmation_button(image: Image.Image, total: int, resource: str,
+                             single: bool, count: int) -> str | None:
+    if single:
+        return "WALL_CONFIRM_BUTTON" if single_wall_confirmation_matches(image, total, resource) else None
+    if wall_batch_confirmation_matches(image, total, resource):
+        return "WALL_MULTI_CONFIRM_BUTTON"
+    if count == 1 and single_wall_confirmation_matches(image, total, resource):
+        return "WALL_CONFIRM_BUTTON"
+    return None
 
 
 def _green_confirmation_button_visible(image: Image.Image) -> bool:
@@ -2776,6 +2888,8 @@ class BotApp:
             self._trace("REFUS", "Démarrage du farm impossible : une autre action est en cours.")
             return
         if not self.persist(): return
+        if not self.settings.dry_run and not self.settings.upgrade_recommended:
+            self.write("Améliorer les bâtiments est désactivé : cochez cette option pour lancer les améliorations longues.")
         if self.settings.dry_run: self.write("Simulation active : recherche et lecture uniquement, aucune pose ne sera envoyée.")
         else: self.write("Mode réel actif : toutes les troupes disponibles seront posées et vérifiées sur une base retenue.")
         self.stop_event.clear(); self._begin_run("cycle complet"); self.worker=threading.Thread(target=self._run_operation,args=(self.farm_loop,),daemon=True); self.worker.start(); self.run_state.set("EN COURS"); self.write("Recherche automatique démarrée.")
@@ -2901,7 +3015,7 @@ class BotApp:
         self._wait(.45)
 
     def stable_wall_group(self, window, resource=None, single=False, price_above=None, expected_price=None):
-        previous = None
+        observed = []
         for attempt in range(16 if price_above is not None else 8):
             controls = wall_group_controls(self._capture(window),single=single,
                                            expected_price=expected_price,expected_resource=resource)
@@ -2911,13 +3025,14 @@ class BotApp:
             if (controls is not None and price_above is not None and
                     controls['payments'][resource][1] <= price_above):
                 controls = None
-            if controls is not None and previous is not None:
-                same_prices = {r:p[1] for r,p in controls['payments'].items()} == {r:p[1] for r,p in previous['payments'].items()}
-                same_add = single or all(abs(a-b)<.5 for a,b in zip(controls['add'],previous['add']))
-                if same_prices and same_add:
-                    self._trace("REMPARTS", f"Contrôles stables : {controls!r}")
-                    return controls
-            previous = controls
+            if controls is not None:
+                for previous in observed:
+                    same_prices = {r:p[1] for r,p in controls['payments'].items()} == {r:p[1] for r,p in previous['payments'].items()}
+                    same_add = single or all(abs(a-b)<.5 for a,b in zip(controls['add'],previous['add']))
+                    if same_prices and same_add:
+                        self._trace("REMPARTS", f"Contrôles stables : {controls!r}")
+                        return controls
+                observed.append(controls)
             self._wait(.15)
         self._trace("REFUS", "Boutons ou prix de remparts instables ; aucune confirmation.")
         return None
@@ -2961,10 +3076,19 @@ class BotApp:
                     else:
                         self.events.put("Menu ouvriers non confirmé : remparts reportés au prochain cycle.")
                         return upgraded
-            from upgrades import scroll_builders_to_top
-            scroll_builders_to_top(self,window)
+            from upgrades import menu_anchor_rows, menu_rows_stationary, scroll_builders_to_top
+            try:
+                scroll_builders_to_top(self,window)
+            except OperationCancelled:
+                raise
+            except RuntimeError as exc:
+                if 'Début de la liste des ouvriers non confirmé' not in str(exc):
+                    raise
+                self.events.put("Haut de la liste non confirmé : remparts reportés et attaque conservée.")
+                return upgraded
             available = None
             previous_menu = None
+            previous_rows = []
             unchanged_menu = 0
             for page in range(20):
                 menu = self._capture(window)
@@ -2974,8 +3098,8 @@ class BotApp:
                         quantity = read_wall_available(menu, point) or 1
                         price = read_wall_menu_price(menu, point)
                         already_rejected = any(
-                            quantity == old_quantity and
-                            (price == old_price or (price is None and abs(point[1] - old_y) < 1.5))
+                            (price is not None and price == old_price) or
+                            (price is None and quantity == old_quantity and abs(point[1] - old_y) < 1.5)
                             for old_y, old_quantity, old_price in rejected_rows)
                         if not already_rejected:
                             item = point
@@ -3003,10 +3127,13 @@ class BotApp:
                 if available is not None: break
                 if isinstance(menu, Image.Image):
                     signature = read_text(crop_percent(menu,Roi(38,12,64,64)),scale=2).casefold()
-                    unchanged_menu = unchanged_menu + 1 if signature and signature == previous_menu else 0
+                    rows = menu_anchor_rows(menu)
+                    unchanged_menu = unchanged_menu + 1 if ((signature and signature == previous_menu) or
+                                                           menu_rows_stationary(previous_rows, rows)) else 0
                     if unchanged_menu >= 2:
                         break
                     previous_menu = signature
+                    previous_rows = rows
                 # The border and heading can disappear during a scroll. A
                 # bounded wheel action is safe even when menu OCR is uncertain.
                 with self.action_lock:
@@ -3081,16 +3208,25 @@ class BotApp:
             single = available == 1
             if not single:
                 for attempt in range(3):
-                    more_button = find_wall_more_button(self._capture(window))
-                    if more_button is None:
-                        raise RuntimeError("Bouton Améliorer plus introuvable : cycle arrêté avant l’attaque.")
-                    self._wall_click(window, more_button, "Améliorer plus")
-                    if wall_multi_mode(self._capture(window)):
+                    current = self._capture(window)
+                    if isinstance(current, Image.Image) and wall_multi_mode(current):
                         break
-                    if attempt == 2 or not wall_selected(self._capture(window)):
-                        raise RuntimeError("Ouverture du groupe de remparts non confirmée : cycle arrêté avant l’attaque.")
-                    self.events.put("Améliorer plus sans effet confirmé : nouvel essai avant toute dépense.")
-                    self._wait(.6)
+                    more_button = find_wall_more_button(current)
+                    if more_button is None:
+                        self.events.put("Bouton Améliorer plus introuvable : remparts reportés au prochain cycle.")
+                        return upgraded
+                    self._wall_click(window, more_button, "Améliorer plus")
+                    for _ in range(4):
+                        if wall_multi_mode(self._capture(window)):
+                            break
+                        self._wait(.3)
+                    else:
+                        if attempt == 2 or not wall_selected(self._capture(window)):
+                            self.events.put("Ouverture du groupe de remparts non confirmée : remparts reportés.")
+                            return upgraded
+                        self.events.put("Améliorer plus sans effet confirmé : nouvel essai avant toute dépense.")
+                        continue
+                    break
             controls = self.stable_wall_group(window,single=single)
             self._trace("REMPARTS", f"Contrôles du groupe : {controls!r}, individuel={single}")
             if controls is None:
@@ -3163,7 +3299,8 @@ class BotApp:
             fresh = self.stable_reserves(window)
             self._trace("REMPARTS", f"Avant paiement : lot={selected_count}, total={total} {resource}, réserves relues={fresh}, plancher={WALL_RESERVE}")
             if fresh is None:
-                raise RuntimeError("Réserves incertaines : aucune dépense envoyée, cycle arrêté avant l’attaque.")
+                self.events.put("Réserves incertaines : aucun paiement envoyé, remparts reportés et attaque conservée.")
+                return upgraded
             if not wall_spend_preserves_reserve(fresh, resource, total):
                 self.events.put("Réserve de paiement insuffisante : remparts reportés, attaque conservée.")
                 return upgraded
@@ -3181,19 +3318,17 @@ class BotApp:
                 self.events.put("Bouton de paiement instable : remparts reportés au prochain cycle.")
                 return upgraded
             self._wall_click(window, payment[0], f"amélioration groupée {resource} identifiée")
-            matches = False
+            confirm_button = None
             for attempt in range(3):
                 confirmation = self._capture(window)
-                matches = (single_wall_confirmation_matches(confirmation,total,resource) if single
-                           else wall_batch_confirmation_matches(confirmation,total,resource))
-                if matches:
+                confirm_button = wall_confirmation_button(confirmation, total, resource, single, count)
+                if confirm_button is not None:
                     break
                 if attempt < 2:
                     self._wait(.2)
-            self._trace("REMPARTS", f"Confirmation affichée : groupe={not single}, coût={total} {resource}, correspondance={matches}")
-            if self.stop_event.is_set() or not matches:
+            self._trace("REMPARTS", f"Confirmation affichée : groupe={not single}, coût={total} {resource}, bouton={confirm_button}")
+            if self.stop_event.is_set() or confirm_button is None:
                 raise RuntimeError("Montant, rempart ou ressource de la confirmation non vérifié : cycle arrêté avant l’attaque.")
-            confirm_button = "WALL_CONFIRM_BUTTON" if single else "WALL_MULTI_CONFIRM_BUTTON"
             self._wall_click(window, layout_values(confirm_button), "confirmation remparts")
             self._wait(.8)
             after = self.stable_reserves(window)
@@ -3201,7 +3336,8 @@ class BotApp:
             after_spend = after[0] if resource == "or" and after else (after[1] if after else None)
             self._trace("REMPARTS", f"Après paiement : réserves avant={(gold,elixir)}, après={after}, variation attendue={total} {resource}")
             if after_spend is None or abs(before_spend - after_spend - total) > 50_000:
-                raise RuntimeError("Dépense groupée non vérifiée sur les réserves : cycle arrêté avant l’attaque.")
+                self.events.put("Paiement envoyé mais réserves finales incertaines : autres remparts reportés, attaque conservée.")
+                return upgraded
             if not wall_spend_preserves_reserve(after, resource, 0):
                 raise RuntimeError("La réserve dépensée est passée sous le plancher : cycle arrêté avant l’attaque.")
             upgraded += count
@@ -3231,13 +3367,22 @@ class BotApp:
         remaining = self.stable_troop_count(window, label, slot_offset)
         live_scaled_client = getattr(window, "width", 1920) < 1500
         live_sized_client = hasattr(window, "width") and getattr(window, "width", 0) >= 1500
-        expected = self.settings.electrodragon_count if label == "Électro-dragon" else self.settings.dragon_count
         count_recovered_from_impossible_ocr = False
+        expected = self.settings.electrodragon_count if label == "Électro-dragon" else self.settings.dragon_count
         preview = getattr(self, "_army_preview_counts", {}).get(
             "electrodragon" if label == ELECTRODRAGON_LABEL else "dragon")
         if preview is not None and (remaining is None or (remaining == 1 and preview >= 10)):
             self.events.put(f"{label} : compteur de combat {remaining}, lecture avant attaque x{preview} retenue.")
             remaining = preview
+        if remaining is not None and preview is not None and remaining > preview:
+            count_recovered_from_impossible_ocr = True
+            self.events.put(f"{label} : compteur de combat x{remaining} supérieur à l'armée préparée x{preview} ; quantité avant attaque retenue.")
+            remaining = preview
+        elif (label == "Dragon" and remaining is not None and preview is None and expected
+              and remaining > max(expected + 1, expected * 2)):
+            count_recovered_from_impossible_ocr = True
+            self.events.put(f"Dragon : compteur de combat x{remaining} incohérent avec {expected} prévu(s) ; quantité {expected} issue de configuration utilisée pour la pose.")
+            remaining = expected
         if remaining is None and (live_scaled_client or live_sized_client):
             count_recovered_from_impossible_ocr = True
             remaining = preview if preview is not None else expected
@@ -3324,12 +3469,11 @@ class BotApp:
                     remaining = observed
                     self.events.put(f"{label} : x{initial} initial lu x1 ; première pose confirmée par x{observed}.")
                     continue
-                if (live_scaled_client or count_recovered_from_impossible_ocr) and (observed is None or not remaining-len(drops) <= observed <= remaining):
-                    # The compact client can briefly OCR the neighbouring
+                if (live_scaled_client or live_sized_client or count_recovered_from_impossible_ocr) and (observed is None or not remaining-len(drops) <= observed <= remaining):
+                    # A live client can briefly OCR the neighbouring
                     # troop card (often as zero) while the selected card is
-                    # animating. We already know exactly how many clicks were
-                    # accepted in this burst, so use that deterministic delta
-                    # instead of aborting a live attack or risking retries.
+                    # animating. Track the attempted drops, then require the
+                    # card to be empty before reporting success.
                     observed = remaining - len(drops)
                     self.events.put(f"{label} : compteur OCR incohérent ; lot de {len(drops)} pose(s) suivi par décompte configuré.")
                 if observed is None or not remaining-len(drops) <= observed <= remaining:
@@ -3479,9 +3623,21 @@ class BotApp:
 
     def deploy_rage_spells(self, window, hero_shift):
         self._check_stopped()
-        image = self._battle_capture(window)
-        slot_center = rage_card_center(image, hero_shift) if isinstance(image, Image.Image) else None
+        slot_center = None
+        for attempt in range(4):
+            image = self._battle_capture(window)
+            if not isinstance(image, Image.Image):
+                break
+            slot_center = rage_card_center(image, hero_shift)
+            if slot_center is None and hero_shift is not None:
+                slot_center = rage_card_center(image, None)
+            if slot_center is not None:
+                break
+            if attempt < 3:
+                self._wait(.25)
         if slot_center is None:
+            if getattr(self, '_army_preview_counts', {}).get('rage', 0) > 0:
+                raise RuntimeError('Rage présent avant combat mais carte introuvable pendant le déploiement.')
             self.events.put("Aucun sort Rage reconnu dans la barre ; aucun clic de sort envoyé.")
             return 0
         remaining = self.stable_rage_count(window, slot_center)
@@ -3536,6 +3692,7 @@ class BotApp:
         indices = (len(points)//2, len(points)//4, 3*len(points)//4)
         anchor = None
         tried = set()
+        unchanged_clicks = 0
         for vertical_shift in (0, -5, -10, -15, -20, 5):
             for index in indices:
                 x, y = points[index]
@@ -3549,7 +3706,13 @@ class BotApp:
                     raise RuntimeError('Clic de recherche du point de pose refusé.')
                 self._wait(.18)
                 observed = self.stable_troop_count(window, ELECTRODRAGON_LABEL, slot_offset)
-                if observed == remaining - 1:
+                drop_count = remaining - observed if observed is not None else 0
+                if (1 < drop_count <= min(3, unchanged_clicks + 1)):
+                    self._wait(.1)
+                    if self.stable_troop_count(window, ELECTRODRAGON_LABEL, slot_offset) != observed:
+                        raise RuntimeError(f'Compteur électro-dragon ambigu après recherche : {remaining} → {observed}.')
+                    self.events.put(f'Électro-dragon : {drop_count} poses cumulées confirmées après compteur retardé.')
+                if drop_count == 1 or (1 < drop_count <= min(3, unchanged_clicks + 1)):
                     anchor = point
                     remaining = observed
                     self._troop_drop_points = getattr(self, '_troop_drop_points', []) + [point]
@@ -3557,11 +3720,13 @@ class BotApp:
                     break
                 if observed != remaining:
                     raise RuntimeError(f'Compteur électro-dragon ambigu après recherche : {remaining} → {observed}.')
+                unchanged_clicks += 1
             if anchor is not None:
                 break
         if anchor is None:
             raise RuntimeError('Aucun point de pose confirmé par le compteur électro-dragon.')
         self._confirmed_drop_point = anchor
+        stalled = 0
         while remaining:
             self._check_stopped()
             self._battle_capture(window)
@@ -3569,18 +3734,113 @@ class BotApp:
                 raise RuntimeError('Clic de pose électro-dragon refusé.')
             self._wait(.18)
             observed = self.stable_troop_count(window, ELECTRODRAGON_LABEL, slot_offset)
-            if observed != remaining - 1:
-                raise RuntimeError(f'Électro-dragon non confirmé après pose : {remaining} → {observed}.')
-            remaining = observed
+            if observed is None or not 0 <= observed <= remaining:
+                remaining -= 1
+                self.events.put(f'Électro-dragon : compteur instable ; pose suivie provisoirement, {remaining} estimé(s) restant(s).')
+            elif observed == remaining:
+                stalled += 1
+                if stalled >= 3:
+                    raise RuntimeError(f'Électro-dragon non confirmé après trois poses : {remaining} restant(s).')
+                self.events.put(f'Électro-dragon : pose non confirmée, nouvel essai au point déjà validé ({remaining} restant(s)).')
+                continue
+            else:
+                remaining = observed
+            stalled = 0
             self._troop_drop_points.append(anchor)
             self.events.put(f'Électro-dragon posé au point confirmé ; {remaining} restant(s).')
         for _ in range(2):
             image = self._battle_capture(window)
+            if not battle_hud_visible(image):
+                raise RuntimeError('Combat terminé avant la vérification finale des électro-dragons.')
             icon = crop_percent(image, shifted_roi(layout_roi('TROOP_ICON_ROIS', ELECTRODRAGON_LABEL), slot_offset or 0))
             if ImageStat.Stat(icon.convert('HSV').getchannel(1)).mean[0] >= 30:
-                raise RuntimeError('Carte électro-dragon encore active après les poses confirmées.')
+                break
             self._wait(.1)
-        self.events.put('Électro-dragon : carte vide confirmée après déploiement.')
+        else:
+            self.events.put('Électro-dragon : carte vide confirmée après déploiement.')
+            return initial
+        for retry in range(initial + 2):
+            self._check_stopped()
+            self._battle_capture(window)
+            if not self._click(window, *slot) or not self._click(window, *anchor):
+                raise RuntimeError('Pose résiduelle électro-dragon refusée.')
+            self._troop_drop_points.append(anchor)
+            self.events.put(f'Électro-dragon : carte encore active ; pose résiduelle {retry + 1} envoyée.')
+            self._wait(.18)
+            image = self._battle_capture(window)
+            if not battle_hud_visible(image):
+                raise RuntimeError('Combat terminé avant la vérification résiduelle des électro-dragons.')
+            icon = crop_percent(image, shifted_roi(layout_roi('TROOP_ICON_ROIS', ELECTRODRAGON_LABEL), slot_offset or 0))
+            if ImageStat.Stat(icon.convert('HSV').getchannel(1)).mean[0] < 30:
+                self._wait(.1)
+                confirm = self._battle_capture(window)
+                icon = crop_percent(confirm, shifted_roi(layout_roi('TROOP_ICON_ROIS', ELECTRODRAGON_LABEL), slot_offset or 0))
+                if ImageStat.Stat(icon.convert('HSV').getchannel(1)).mean[0] < 30:
+                    self.events.put('Électro-dragon : carte vide confirmée après déploiement.')
+                    return initial
+        raise RuntimeError('Carte électro-dragon toujours active après les poses résiduelles bornées.')
+
+    def stable_event_extra_count(self, window, center, minimum=0, maximum=40):
+        previous = None
+        for _ in range(4):
+            image = self._battle_capture(window)
+            if not isinstance(image, Image.Image):
+                raise RuntimeError("Écran illisible pendant la pose des renforts d'événement.")
+            observed = read_event_extra_troop_count(image, center, minimum, maximum)
+            if observed is not None and observed == previous:
+                return observed
+            previous = observed
+            self._wait(.08)
+        return None
+
+    def deploy_event_extra_troops(self, window, anchor):
+        start_image = self._battle_capture(window)
+        found = event_extra_troop_card(start_image)
+        if found is None:
+            if isinstance(start_image, Image.Image) and battle_result_return_ready(start_image):
+                raise BattleEndedEarly("Combat terminé avant la recherche des renforts d'événement.")
+            return 0
+        center, remaining = found
+        initial = remaining
+        stalled = 0
+        self.events.put(f"Renfort d'événement détecté : x{initial} dans la barre de combat.")
+        while remaining:
+            self._check_stopped()
+            batch = min(5, remaining)
+            for _ in range(batch):
+                image = self._battle_capture(window)
+                if isinstance(image, Image.Image) and event_extra_troop_red_score(image, center) < .08 and battle_result_return_ready(image):
+                    raise BattleEndedEarly("Combat terminé avant la pose de tous les renforts d'événement.")
+                if (not isinstance(image, Image.Image)
+                        or event_extra_troop_red_score(image, center) < .08):
+                    raise RuntimeError("Carte de renfort d'événement disparue avant la fin de la pose.")
+                if not self._click(window, center, DRAGON_SLOT[1]) or not self._click(window, *anchor):
+                    raise RuntimeError("Clic de renfort d'événement refusé.")
+                self._wait(.06)
+            observed = self.stable_event_extra_count(window, center, remaining - batch, remaining)
+            if observed is None and battle_result_return_ready(self._battle_capture(window)):
+                raise BattleEndedEarly("Combat terminé avant la pose de tous les renforts d'événement.")
+            if observed is None:
+                remaining -= batch
+                self.events.put(f"Renfort d'événement : {remaining} restant(s) estimé(s), compteur illisible.")
+                continue
+            if observed is None or not remaining - batch <= observed <= remaining:
+                raise RuntimeError(f"Compteur des renforts d'événement incohérent : {remaining} -> {observed}.")
+            if observed == remaining:
+                stalled += 1
+                if stalled >= 2:
+                    raise RuntimeError("Renfort d'événement non posé après deux lots.")
+                continue
+            stalled = 0
+            remaining = observed
+            self.events.put(f"Renfort d'événement : {remaining} restant(s).")
+        final_count = self.stable_event_extra_count(window, center, 0, 0)
+        final_image = self._battle_capture(window)
+        if battle_result_return_ready(final_image):
+            raise BattleEndedEarly("Combat terminé avant la vérification de la carte de renfort vide.")
+        if final_count != 0 or event_extra_troop_red_score(final_image, center) >= .08:
+            raise RuntimeError("Carte de renfort d'événement non vide après la pose.")
+        self.events.put(f"Renfort d'événement vérifié : {initial} troupe(s) posée(s).")
         return initial
 
     def deploy_attack_composition(self, window):
@@ -3601,6 +3861,9 @@ class BotApp:
             for index, slot in enumerate(layout_points("HERO_SLOTS")):
                 self._check_stopped()
                 before = self._battle_capture(window)
+                if (isinstance(before, Image.Image) and not hero_card_present(before, index, shift)
+                        and battle_result_return_ready(before)):
+                    raise BattleEndedEarly(f"Combat terminé avant la pose vérifiée du héros {index + 1}.")
                 if hero_health_visible(before, index, shift):
                     heroes += 1
                     self.events.put(f"Héros {index + 1} déjà posé : barre de vie confirmée.")
@@ -3622,6 +3885,9 @@ class BotApp:
                     # Recheck before selecting so an already deployed hero's
                     # ability is never deliberately clicked as a retry.
                     current = self._battle_capture(window)
+                    if (isinstance(current, Image.Image) and not hero_card_present(current, index, shift)
+                            and battle_result_return_ready(current)):
+                        raise BattleEndedEarly(f"Combat terminé avant la pose vérifiée du héros {index + 1}.")
                     if hero_health_visible(current, index, shift):
                         heroes += 1
                         self.events.put(f"Héros {index + 1} posé : barre de vie confirmée.")
@@ -3633,11 +3899,16 @@ class BotApp:
                     if not self._click(window, x, y): raise RuntimeError(f"Clic héros {index + 1} refusé.")
                     self._wait(.12)
                     after = self._battle_capture(window)
+                    if (isinstance(after, Image.Image) and not hero_card_present(after, index, shift)
+                            and battle_result_return_ready(after)):
+                        raise BattleEndedEarly(f"Combat terminé avant la pose vérifiée du héros {index + 1}.")
                     if hero_health_visible(after, index, shift):
                         heroes += 1
                         self.events.put(f"Héros {index + 1} confirmé à {x:.1f} %, {y:.1f} %.")
                         break
                 else: raise RuntimeError(f"Pose du héros {index + 1} non confirmée.")
+        if self._confirmed_drop_point is not None:
+            self.deploy_event_extra_troops(window, self._confirmed_drop_point)
         self._check_stopped()
         self.events.put(f"Déploiement vérifié : {electro} électro-dragons, {dragons} dragons, {heroes} héros, {rage} Rage.")
 
@@ -3852,6 +4123,10 @@ class BotApp:
                     self.deploy_attack_composition(window)
                 except OperationCancelled:
                     raise
+                except BattleEndedEarly as exc:
+                    self.events.put(str(exc))
+                    if not self.wait_for_battle_return(window) or not self.settings.chain_attacks: return
+                    continue
                 except RuntimeError as exc:
                     # A failed deployment must not abandon event handling or
                     # the result screen while a real battle is still running.

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import main
-from PIL import Image
+from PIL import Image, ImageDraw
 
 
 def app_without_gui():
@@ -27,6 +27,60 @@ def app_without_gui():
 
 
 class CancellationRegressions(unittest.TestCase):
+    def test_temporary_x40_card_is_detected_only_while_visible(self):
+        captures = Path(__file__).parent / 'testdata'
+        with Image.open(captures / 'event_extra_troop_x40_1323.png') as event:
+            self.assertEqual(main.event_extra_troop_card(event), (17.0, 40))
+            self.assertEqual(main.read_event_extra_troop_count(event, 17.0), 40)
+        with Image.open(captures / 'event_extra_troop_x37_1323.png') as partial:
+            self.assertEqual(main.read_event_extra_troop_count(partial, 17.0), 37)
+        with Image.open(captures / 'event_extra_troop_x25_1323.png') as partial:
+            self.assertEqual(main.read_event_extra_troop_count(partial, 17.0), 25)
+            self.assertEqual(main.read_event_extra_troop_count(partial, 17.0, 25, 28), 25)
+        with Image.open(captures / 'event_extra_troop_x35_shifted_1323.png') as shifted:
+            self.assertEqual(main.event_extra_troop_card(shifted), (29.4, 35))
+            self.assertEqual(main.read_event_extra_troop_count(shifted, 29.4, 35, 40), 35)
+            for size in ((1387, 780), (1920, 1080), (2560, 1440)):
+                self.assertEqual(main.event_extra_troop_card(shifted.resize(size)), (29.4, 35))
+        with Image.open(captures / 'live_compact_battle_bar.png') as regular:
+            self.assertIsNone(main.event_extra_troop_card(regular))
+
+    def test_all_forty_temporary_troops_are_deployed_and_verified(self):
+        app = app_without_gui()
+        with Image.open(Path(__file__).parent / 'testdata' / 'event_extra_troop_x40_1323.png') as image:
+            gray = image.convert('L').convert('RGB')
+            app._click = Mock(return_value=True)
+            app._wait = Mock()
+            app.stable_event_extra_count = Mock(side_effect=list(range(35, 0, -5)) + [0, 0])
+            app._battle_capture = Mock(side_effect=lambda _: gray if app.stable_event_extra_count.call_count >= 9 else image)
+            self.assertEqual(app.deploy_event_extra_troops(object(), (28.7, 25.6)), 40)
+        self.assertEqual(app._click.call_count, 80)
+        self.assertTrue(any("Renfort d'événement vérifié : 40" in event for event in app.events.queue))
+
+    def test_temporary_troops_continue_when_last_single_digit_counts_are_unreadable(self):
+        app = app_without_gui()
+        with Image.open(Path(__file__).parent / 'testdata' / 'event_extra_troop_x40_1323.png') as image:
+            gray = image.convert('L').convert('RGB')
+            app._click = Mock(return_value=True)
+            app._wait = Mock()
+            app.stable_event_extra_count = Mock(side_effect=list(range(35, 9, -5)) + [None, None, 0])
+            app._battle_capture = Mock(side_effect=lambda _: gray if app.stable_event_extra_count.call_count >= 9 else image)
+            self.assertEqual(app.deploy_event_extra_troops(object(), (28.7, 25.6)), 40)
+        self.assertEqual(app._click.call_count, 80)
+        self.assertTrue(any('estimé(s)' in event for event in app.events.queue))
+
+    def test_victory_is_not_mistaken_for_empty_temporary_card(self):
+        app = app_without_gui()
+        with Image.open(Path(__file__).parent / 'testdata' / 'event_extra_troop_x40_1323.png') as image:
+            app._battle_capture = Mock(return_value=image)
+            app._click = Mock(return_value=True)
+            app._wait = Mock()
+            app.stable_event_extra_count = Mock(side_effect=list(range(35, 0, -5)) + [0, 0])
+            with patch.object(main, 'battle_result_return_ready', return_value=True):
+                with self.assertRaises(main.BattleEndedEarly):
+                    app.deploy_event_extra_troops(object(), (28.7, 25.6))
+        self.assertFalse(any('vérifié : 40' in event for event in app.events.queue))
+
     def test_battle_x10_misread_as_x1_uses_prebattle_army_count(self):
         app = app_without_gui()
         app.settings = main.replace(app.settings, electrodragon_count=10)
@@ -40,6 +94,46 @@ class CancellationRegressions(unittest.TestCase):
                                          main.ELECTRODRAGON_SLOT, points, burst=True), 10)
         self.assertEqual(len(app._troop_drop_points), 10)
 
+    def test_delayed_first_electro_counter_accepts_two_confirmed_drops(self):
+        app = app_without_gui()
+        app._troop_drop_points = []
+        app._battle_capture = Mock(return_value=Image.new('RGB', (1323, 744)))
+        app._click = Mock(return_value=True)
+        app._wait = Mock()
+        app.stable_troop_count = Mock(side_effect=[10, 8, 8, 7, 6, 5, 4, 3, 2, 1, 0])
+        points = main.layout_points('ELECTRODRAGON_PERIMETER_POINTS')
+        with patch.object(main, 'battle_hud_visible', return_value=True):
+            self.assertEqual(app._deploy_compact_electro(object(), main.ELECTRODRAGON_SLOT,
+                                                          points, 10, 0), 10)
+        self.assertEqual(app._click.call_count, 20)
+        self.assertTrue(any('2 poses cumulées confirmées' in event for event in app.events.queue))
+
+    def test_full_hd_live_client_continues_when_mid_burst_counter_is_unreadable(self):
+        image = Image.new('RGB', (1920, 1080), (80, 80, 80))
+        draw = ImageDraw.Draw(image)
+        for y in range(0, image.height, 20):
+            draw.rectangle((0, y, image.width, y + 9), fill=(180, 180, 180))
+        app = app_without_gui()
+        app.settings = main.replace(app.settings, electrodragon_count=10)
+        app._wait = Mock()
+        app._battle_capture = Mock(return_value=image)
+        app._click = Mock(return_value=True)
+        app.stable_troop_count = Mock(side_effect=[10, None, None, None, None])
+        points = main.layout_points('ELECTRODRAGON_PERIMETER_POINTS')
+        with patch.object(main, 'troop_slot_offset', return_value=0), \
+                patch.object(main, 'battle_hud_visible', return_value=True):
+            self.assertEqual(app.deploy_unit(SimpleNamespace(width=1920), main.ELECTRODRAGON_LABEL,
+                                             main.ELECTRODRAGON_SLOT, points, burst=True), 10)
+        self.assertEqual(app._click.call_count, 21)
+        self.assertTrue(any('compteur OCR incohérent' in event for event in app.events.queue))
+
+    def test_blue_expanded_hero_card_does_not_require_skin_tones(self):
+        image = Image.new('RGB', (1323, 744))
+        with patch.object(main, 'hero_card_present', return_value=True), \
+                patch.object(main, 'hero_icon_saturation', side_effect=[75, 140]), \
+                patch.object(main, 'rage_card_score', return_value=0):
+            self.assertEqual(main.hero_layout_shift(image), 0.0)
+
     def test_impossible_battle_count_uses_army_preview_not_old_setting(self):
         app = app_without_gui()
         app._army_preview_counts = {"electrodragon": 10}
@@ -50,6 +144,28 @@ class CancellationRegressions(unittest.TestCase):
         points = main.layout_points("ELECTRODRAGON_PERIMETER_POINTS")
         self.assertEqual(app.deploy_unit(object(), main.ELECTRODRAGON_LABEL,
                                          main.ELECTRODRAGON_SLOT, points, burst=True), 10)
+
+    def test_dragon_neighbor_badge_cannot_exceed_prepared_army(self):
+        app = app_without_gui()
+        app._army_preview_counts = {'dragon': 1}
+        app._battle_capture = Mock(return_value=object())
+        app._click = Mock(return_value=True)
+        app._wait = Mock()
+        app.stable_troop_count = Mock(side_effect=[8, 0])
+        self.assertEqual(app.deploy_unit(object(), 'Dragon', main.DRAGON_SLOT,
+                                         [(28.7, 25.6)], burst=True), 1)
+        self.assertTrue(any('supérieur à l\'armée préparée x1' in event for event in app.events.queue))
+
+    def test_dragon_neighbor_badge_uses_setting_when_preview_is_unreadable(self):
+        app = app_without_gui()
+        app._army_preview_counts = {'dragon': None}
+        app._battle_capture = Mock(return_value=object())
+        app._click = Mock(return_value=True)
+        app._wait = Mock()
+        app.stable_troop_count = Mock(side_effect=[8, 0])
+        self.assertEqual(app.deploy_unit(object(), 'Dragon', main.DRAGON_SLOT,
+                                         [(28.7, 25.6)], burst=True), 1)
+        self.assertTrue(any('issue de configuration' in event for event in app.events.queue))
 
     def test_live_card_x1_after_ten_clicks_requires_another_drop(self):
         image = Image.new("RGB", (1765, 993))
@@ -244,6 +360,36 @@ class CancellationRegressions(unittest.TestCase):
             app.deploy_attack_composition(object())
         self.assertEqual(order[:4], ['troop', 'troop', 'rage', 'hero'])
 
+    def test_temporary_troops_follow_regular_army_and_heroes(self):
+        app = app_without_gui()
+        order = []
+        def deploy_regular(*args, **kwargs):
+            order.append('troop')
+            app._confirmed_drop_point = (28.7, 25.6)
+            return 1
+        app.deploy_unit = Mock(side_effect=deploy_regular)
+        app.deploy_rage_spells = Mock(side_effect=lambda *args: order.append('rage') or 5)
+        app.deploy_event_extra_troops = Mock(side_effect=lambda *args: order.append('event') or 40)
+        app._battle_capture = Mock(return_value=Image.new('RGB', (1323, 744)))
+        with patch.object(main, 'hero_layout_shift', return_value=0), \
+             patch.object(main, 'hero_card_present', return_value=True), \
+             patch.object(main, 'hero_health_visible', side_effect=lambda *args: order.append('hero') or True):
+            app.deploy_attack_composition(object())
+        self.assertEqual(order, ['troop', 'troop', 'rage'] + ['hero'] * 4 + ['event'])
+
+    def test_victory_before_hero_does_not_click_result_screen(self):
+        app = app_without_gui()
+        app.deploy_unit = Mock(return_value=0)
+        app.deploy_rage_spells = Mock(return_value=0)
+        app._battle_capture = Mock(return_value=Image.new('RGB', (1323, 744)))
+        app._click = Mock()
+        with patch.object(main, 'hero_layout_shift', return_value=0), \
+             patch.object(main, 'hero_card_present', return_value=False), \
+             patch.object(main, 'battle_result_return_ready', return_value=True):
+            with self.assertRaises(main.BattleEndedEarly):
+                app.deploy_attack_composition(object())
+        app._click.assert_not_called()
+
     def test_absent_rage_card_never_receives_a_spell_click(self):
         app = app_without_gui()
         app._battle_capture = Mock(return_value=Image.new("RGB", (1920, 1080)))
@@ -253,6 +399,29 @@ class CancellationRegressions(unittest.TestCase):
             self.assertEqual(app.deploy_rage_spells(object(), 0), 0)
         app._click.assert_not_called()
         app.stable_rage_count.assert_not_called()
+
+    def test_rage_card_retries_both_layouts_after_transient_miss(self):
+        app = app_without_gui()
+        app._army_preview_counts = {'rage': 1}
+        app._wait = Mock()
+        app._battle_capture = Mock(return_value=Image.new('RGB', (1323, 744)))
+        app._click = Mock(return_value=True)
+        app.stable_rage_count = Mock(side_effect=[1, 0])
+        with patch.object(main, 'rage_card_center', side_effect=[None, None, None, None, 63.35]):
+            self.assertEqual(app.deploy_rage_spells(object(), 0), 1)
+        self.assertEqual(app._click.call_count, 2)
+        self.assertEqual(sum(call.args == (.25,) for call in app._wait.call_args_list), 2)
+
+    def test_expected_rage_card_missing_is_an_error_not_success(self):
+        app = app_without_gui()
+        app._army_preview_counts = {'rage': 5}
+        app._wait = Mock()
+        app._battle_capture = Mock(return_value=Image.new('RGB', (1323, 744)))
+        app._click = Mock()
+        with patch.object(main, 'rage_card_center', return_value=None):
+            with self.assertRaisesRegex(RuntimeError, 'Rage présent avant combat'):
+                app.deploy_rage_spells(object(), 0)
+        app._click.assert_not_called()
 
     def test_fast_line_stops_when_burst_outcome_is_unknown(self):
         app=app_without_gui()
@@ -601,9 +770,36 @@ class DeploymentRegressions(unittest.TestCase):
         app._wait = Mock()
         app.stable_troop_count = Mock(side_effect=[10,9] + list(range(8,-1,-1)))
         app._troop_drop_points = []
-        self.assertEqual(app._deploy_compact_electro(object(),(17,92.5),[(28,25.6)],10,-6.2),10)
+        with patch.object(main, 'battle_hud_visible', return_value=True):
+            self.assertEqual(app._deploy_compact_electro(object(),(17,92.5),[(28,25.6)],10,-6.2),10)
         self.assertEqual(app._confirmed_drop_point,(28,20.6))
         self.assertEqual(len(app._troop_drop_points),10)
+
+    def test_compact_electro_finishes_after_transient_counter_dropout(self):
+        app = app_without_gui()
+        app._battle_capture = Mock(return_value=Image.new('RGB', (1323, 744), 'white'))
+        app._click = Mock(return_value=True)
+        app._wait = Mock()
+        app.stable_troop_count = Mock(side_effect=[9, None, 7, 6, 5, 4, 3, 2, 1, 0])
+        app._troop_drop_points = []
+        with patch.object(main, 'battle_hud_visible', return_value=True):
+            self.assertEqual(app._deploy_compact_electro(object(), (17, 92.5), [(28, 25.6)], 10, 0), 10)
+        self.assertEqual(len(app._troop_drop_points), 10)
+        self.assertTrue(any('suivie provisoirement' in event for event in app.events.queue))
+
+    def test_compact_electro_uses_bounded_residual_drop_until_card_empties(self):
+        app = app_without_gui()
+        active = Image.new('RGB', (1323, 744), (150, 35, 70))
+        empty = Image.new('RGB', (1323, 744), (90, 90, 90))
+        app._click = Mock(return_value=True)
+        app._battle_capture = Mock(side_effect=lambda _window: empty if app._click.call_count >= 22 else active)
+        app._wait = Mock()
+        app.stable_troop_count = Mock(side_effect=[9] + [None] * 9)
+        app._troop_drop_points = []
+        with patch.object(main, 'battle_hud_visible', return_value=True):
+            self.assertEqual(app._deploy_compact_electro(object(), (17, 92.5), [(28, 25.6)], 10, 0), 10)
+        self.assertEqual(app._click.call_count, 22)
+        self.assertTrue(any('pose résiduelle' in event for event in app.events.queue))
 
     def test_compact_army_badge_x10_is_read_before_attack(self):
         with Image.open(Path(__file__).parent/'testdata/army_wait_current_1323.png') as image:

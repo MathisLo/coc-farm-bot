@@ -1,6 +1,12 @@
-# CoC Farm Bot v2.0.7
+# CoC Farm Bot v2.0.8
 
-## Validation du 24 septembre 2026
+## Validation du 24 septembre 2026 (v2.0.8)
+
+Sur TCD_VeNom, dans la fenêtre de jeu 1323 x 744, le bot a lancé une Tour d'archères à 4 000 000 d'or puis un Éradicateur de héros à 6 000 000 d'élixir (durée affichée : 9 h 59), en passant de trois à un ouvrier libre. Il a également acheté un rempart unique (`x1`) en or et un autre en élixir, à 4 000 000 chacun. Un nouvel essai a confirmé un rempart isolé en or après correction d'une lecture initiale à 400 000, et un cycle suivant a payé un autre rempart en élixir. Les journaux de ces essais sont conservés dans `%USERPROFILE%\CoCFarmBot\runs`. Plusieurs essais intermédiaires ont été interrompus par une mauvaise lecture OCR du premier million restant ; leurs captures alimentent les tests de régression.
+
+Un cycle de 31,9 minutes sur TCD_VeNom a confirmé 6 attaques complètes (10 électro-dragons, 1 dragon, 5 Rage, 4 héros et 40 troupes temporaires à chaque fois), 5 collectes de foreuses d'élixir noir et 3 paiements de remparts. Il s'est arrêté normalement au village. Le bot ne cherche les troupes temporaires que lorsque leur carte rouge apparaît dans la barre de combat ; il cesse automatiquement de le faire quand elle disparaît après l'événement. La recherche des bâtiments s'arrête plus tôt quand le menu est immobile, et une alerte indique si l'option d'amélioration des bâtiments est désactivée. Les lectures critiques et le panneau compact d'amélioration sont testés sur captures en 1387 x 780, 1920 x 1080 et 2560 x 1440 ; ces trois résolutions ne sont pas toutes validées en jeu. La reconnexion reste limitée aux dialogues reconnus (Réessayer / Recharger le jeu).
+
+## Validation du 24 septembre 2026 (v2.0.7)
 
 Sur TCD_VeNom, dans une fenêtre de jeu 1323 x 744, un cycle de 34,5 minutes a confirmé trois attaques complètes (10 électro-dragons, 1 dragon, 4 héros et 5 Rage à chaque fois), la collecte répétée des foreuses d'élixir noir, une tour d'archers lancée pour 4 000 000 d'or et un rempart amélioré pour 4 000 000 d'élixir avec une réserve supérieure à 1 000 000. Le scan des bâtiments passe avant celui des remparts et s'arrête après deux propositions instables pour ne pas bloquer les attaques. Il restait deux ouvriers libres à la fin de cet essai : le passage à un seul ouvrier n'a pas été démontré en jeu, faute d'une autre proposition payable et lisible.
 

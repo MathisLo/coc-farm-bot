@@ -8,6 +8,16 @@ import upgrades
 
 
 class UpgradeTests(unittest.TestCase):
+    def test_matching_wall_payment_cards_remove_tiny_ocr_suffix(self):
+        prices = {'or': ((58, 80), 4_000_004), 'élixir': ((66, 80), 4_000_000)}
+        self.assertEqual(main.reconcile_wall_payment_prices(prices),
+                         {'or': ((58, 80), 4_000_000), 'élixir': ((66, 80), 4_000_000)})
+        missing_zero = {'or': ((58, 80), 400_000), 'élixir': ((66, 80), 4_000_000)}
+        self.assertEqual(main.reconcile_wall_payment_prices(missing_zero),
+                         {'or': ((58, 80), 4_000_000), 'élixir': ((66, 80), 4_000_000)})
+        conflicting = {'or': ((58, 80), 5_000_000), 'élixir': ((66, 80), 4_000_000)}
+        self.assertEqual(main.reconcile_wall_payment_prices(conflicting), conflicting)
+
     def test_two_unstable_building_rows_return_to_farming(self):
         app = app_without_gui()
         app._capture = Mock(return_value=Image.new('RGB',(1323,744)))
@@ -120,6 +130,18 @@ class UpgradeTests(unittest.TestCase):
         app._wall_click.assert_called_once()
         scroll.assert_not_called()
 
+    def test_unconfirmed_builder_list_top_defers_walls_without_stopping_attacks(self):
+        app = app_without_gui()
+        app._capture = Mock(return_value=Image.new('RGB', (1323, 744)))
+        app._wall_click = Mock()
+        app.stable_reserves = Mock(return_value=(5_000_000, 5_000_000))
+        with patch.object(main, 'builders_menu_open', return_value=True), \
+             patch.object(upgrades, 'scroll_builders_to_top', side_effect=RuntimeError(
+                 'Début de la liste des ouvriers non confirmé après défilement.')):
+            self.assertEqual(app.upgrade_walls_to_reserve(object(), independent=True), 0)
+        app._wall_click.assert_not_called()
+        self.assertTrue(any('remparts reportés et attaque conservée' in event for event in app.events.queue))
+
     def test_wall_row_is_selected_after_menu_slides_to_a_new_position(self):
         app = app_without_gui()
         app._capture = Mock(return_value=object())
@@ -135,8 +157,7 @@ class UpgradeTests(unittest.TestCase):
                 patch.object(main, 'read_wall_available', return_value=203), \
                 patch.object(main, 'wall_selected', return_value=True), \
                 patch.object(main, 'find_wall_more_button', return_value=None):
-            with self.assertRaisesRegex(RuntimeError, 'Améliorer plus introuvable'):
-                app.upgrade_walls_to_reserve('window', independent=True)
+            self.assertEqual(app.upgrade_walls_to_reserve('window', independent=True),0)
         app._wall_click.assert_called_once_with('window', settled_row, 'rempart')
 
     def test_shifted_wall_row_uses_fresh_stable_quantity_after_ocr_error(self):
@@ -154,8 +175,7 @@ class UpgradeTests(unittest.TestCase):
                 patch.object(main, 'read_wall_available', side_effect=[159, 169, 169]), \
                 patch.object(main, 'wall_selected', return_value=True), \
                 patch.object(main, 'find_wall_more_button', return_value=None):
-            with self.assertRaisesRegex(RuntimeError, 'Améliorer plus introuvable'):
-                app.upgrade_walls_to_reserve('window', independent=True)
+            self.assertEqual(app.upgrade_walls_to_reserve('window', independent=True),0)
         app._wall_click.assert_called_once_with('window', settled_row, 'rempart')
 
     def test_unaffordable_wall_row_falls_through_to_second_row(self):
@@ -240,6 +260,14 @@ class UpgradeTests(unittest.TestCase):
             with patch.object(main, 'has_all_screen_text', return_value=False):
                 self.assertTrue(main.village_home_ready(image))
 
+    def test_group_of_one_uses_individual_confirmation_shown_by_game(self):
+        with Image.open(Path(__file__).parent / 'testdata' / 'wall_group_single_confirmation_1323.png') as image:
+            self.assertEqual(main.wall_confirmation_button(image, 4_000_000, 'or', False, 1),
+                             'WALL_CONFIRM_BUTTON')
+            self.assertIsNone(main.wall_confirmation_button(image, 5_000_000, 'or', False, 1))
+            self.assertIsNone(main.wall_confirmation_button(image, 4_000_000, 'élixir', False, 1))
+            self.assertIsNone(main.wall_confirmation_button(image, 4_000_000, 'or', False, 2))
+
     def test_last_wall_without_x1_is_bought_with_individual_confirmation(self):
         app = app_without_gui()
         app.settings = main.replace(app.settings, upgrade_recommended=False)
@@ -266,6 +294,43 @@ class UpgradeTests(unittest.TestCase):
         self.assertEqual(app._wall_click.call_args_list[-1].args[1],
                          main.layout_values('WALL_CONFIRM_BUTTON'))
 
+    def test_unreadable_reserves_before_wall_payment_keep_attack_available(self):
+        app = app_without_gui()
+        app.settings = main.replace(app.settings, upgrade_recommended=False)
+        app._capture = Mock(return_value=Image.new('RGB', (1920, 1080)))
+        app._wait = Mock(return_value=False)
+        app._wall_click = Mock()
+        app.stable_reserves = Mock(side_effect=[(3_000_000, 5_809_040), None])
+        app.stable_wall_group = Mock(return_value={
+            'payments': {'élixir': ((66, 80), 4_000_000)}, 'add': None})
+        with patch.object(main, 'find_wall_menu_item', return_value=(52, 53)), \
+             patch.object(main, 'read_wall_available', return_value=1), \
+             patch.object(main, 'wall_selected', side_effect=[False, False, True]), \
+             patch.object(upgrades, 'scroll_builders_to_top'):
+            self.assertEqual(app.upgrade_walls_to_reserve(object(), independent=True), 0)
+        self.assertEqual([call.args[2] for call in app._wall_click.call_args_list], ['rempart'])
+        self.assertTrue(any('attaque conservée' in message for message in app.events.queue))
+
+    def test_unverified_balance_after_wall_payment_defers_more_walls(self):
+        app = app_without_gui()
+        app._capture = Mock(return_value=Image.new('RGB', (1920, 1080)))
+        app._wait = Mock(return_value=False)
+        app._wall_click = Mock()
+        app.stable_reserves = Mock(side_effect=[(2_000_000, 2_000_000),
+                                                (2_000_000, 2_000_000),
+                                                (500_000, 2_000_000)])
+        app.stable_wall_group = Mock(return_value={
+            'payments': {'or': ((55, 80), 500_000)}, 'add': None})
+        with patch.object(main, 'find_wall_menu_item', return_value=(52, 53)), \
+             patch.object(main, 'read_wall_available', return_value=1), \
+             patch.object(main, 'wall_selected', side_effect=[False, False, True]), \
+             patch.object(main, 'single_wall_confirmation_matches', return_value=True), \
+             patch.object(upgrades, 'scroll_builders_to_top'):
+            self.assertEqual(app.upgrade_walls_to_reserve(object(), independent=True), 0)
+        self.assertEqual(len(app._wall_click.call_args_list), 3)
+        self.assertTrue(any('autres remparts reportés, attaque conservée' in message
+                            for message in app.events.queue))
+
     def test_group_buttons_follow_five_and_six_button_rows(self):
         cases = [('wall_group_no_ten.png',41.8,50.1,58.3,500000),
                  ('wall_group_background.png',41.8,50.1,58.3,500000),
@@ -282,6 +347,17 @@ class UpgradeTests(unittest.TestCase):
                     self.assertAlmostEqual(point[0],x,delta=.3)
                     self.assertTrue(78 < point[1] < 84)
                     self.assertEqual(cost,price)
+
+    def test_compact_wall_group_detects_small_active_add_one(self):
+        with Image.open(Path(__file__).parent/'testdata/wall_group_compact_1323.png') as image:
+            for size in ((1323,744),(1387,780),(1920,1080),(2560,1440)):
+                with self.subTest(size=size):
+                    controls=main.wall_group_controls(image.resize(size))
+                    self.assertIsNotNone(controls)
+                    self.assertTrue(48 < controls['add'][0] < 51)
+                    self.assertEqual(controls['payments']['élixir'][1],4_000_000)
+                    if 'or' in controls['payments']:
+                        self.assertEqual(controls['payments']['or'][1],4_000_000)
 
     def test_army_camp_is_never_a_wall_group(self):
         with Image.open(Path(__file__).parent/'testdata/wall_wrong_army_camp.png') as image:
@@ -372,6 +448,16 @@ class UpgradeTests(unittest.TestCase):
             self.assertEqual(app.stable_wall_group('window','or',price_above=600000),new)
         self.assertEqual(app._capture.call_count,4)
 
+    def test_stable_group_accepts_matching_nonconsecutive_price_reads(self):
+        app=app_without_gui()
+        app._capture=Mock(return_value=object())
+        app._wait=Mock()
+        truncated={'add':(50,80),'payments':{'élixir':((66,80),400000)}}
+        full={'add':(50,80),'payments':{'élixir':((66,80),4_000_000)}}
+        with patch.object(main,'wall_group_controls',side_effect=[truncated,full,None,full]):
+            self.assertEqual(app.stable_wall_group('window'),full)
+        self.assertEqual(app._capture.call_count,4)
+
     def test_unchanged_add_price_retries_before_spending(self):
         app=app_without_gui()
         app._capture=Mock(return_value=object())
@@ -387,7 +473,7 @@ class UpgradeTests(unittest.TestCase):
         self.assertEqual(labels.count('ajouter un rempart identifié'),2)
         self.assertEqual(labels.count('confirmation remparts'),1)
 
-    def test_unresponsive_more_button_is_retried_before_reading_group(self):
+    def test_delayed_wall_group_is_waited_for_before_reading_controls(self):
         app=app_without_gui()
         app._capture=Mock(return_value=object())
         app._wall_click=Mock()
@@ -395,10 +481,34 @@ class UpgradeTests(unittest.TestCase):
         app.stable_reserves=Mock(return_value=(1100000,1100000))
         controls={'add':(45.9,80),'remove':None,'payments':{'or':((50,80),600000),'élixir':((58.3,80),600000)}}
         app.stable_wall_group=Mock(return_value=controls)
-        with patch.object(upgrades,'scroll_builders_to_top'),patch.object(main,'builders_menu_open',return_value=True),patch.object(main,'find_wall_menu_item',return_value=(44,54)),patch.object(main,'find_wall_menu_items',return_value=[]),patch.object(main,'read_wall_available',return_value=265),patch.object(main,'wall_selected',return_value=True),patch.object(main,'find_wall_more_button',return_value=(46,85)),patch.object(main,'wall_multi_mode',side_effect=[False,True]),patch.object(main.WindowDriver,'scroll_menu',return_value=True):
+        with patch.object(upgrades,'scroll_builders_to_top'),patch.object(main,'builders_menu_open',return_value=True),patch.object(main,'find_wall_menu_item',return_value=(44,54)),patch.object(main,'find_wall_menu_items',return_value=[]),patch.object(main,'read_wall_available',return_value=265),patch.object(main,'wall_selected',return_value=True),patch.object(main,'find_wall_more_button',return_value=(46,85)),patch.object(main,'wall_multi_mode',side_effect=[False,False,True]),patch.object(main.WindowDriver,'scroll_menu',return_value=True):
             self.assertEqual(app.upgrade_walls_to_reserve('window',independent=True),0)
         labels=[c.args[2] for c in app._wall_click.call_args_list]
-        self.assertEqual(labels.count('Améliorer plus'),2)
+        self.assertEqual(labels.count('Améliorer plus'),1)
+        app._wait.assert_any_call(.3)
+
+    def test_unaffordable_wall_is_not_reselected_when_quantity_ocr_changes(self):
+        app=app_without_gui()
+        app._capture=Mock(return_value=object())
+        app._wall_click=Mock()
+        app._wait=Mock()
+        app.stable_reserves=Mock(return_value=(3_466_604,1_320_672))
+        app.stable_wall_group=Mock(return_value={
+            'add':None,'remove':None,
+            'payments':{'or':((58,80),4_000_000),'élixir':((66,80),4_000_000)}})
+        quantities=iter((1,1,216))
+        with patch.object(upgrades,'scroll_builders_to_top'), \
+                patch.object(main,'builders_menu_open',return_value=True), \
+                patch.object(main,'find_wall_menu_item',return_value=(41,56)), \
+                patch.object(main,'find_wall_menu_items',return_value=[(41,56)]), \
+                patch.object(main,'read_wall_available',side_effect=lambda *_: next(quantities,216)), \
+                patch.object(main,'read_wall_menu_price',return_value=4_000_000), \
+                patch.object(main,'wall_selected',return_value=True), \
+                patch.object(main,'find_wall_more_button') as more, \
+                patch.object(main.WindowDriver,'scroll_menu',return_value=True):
+            self.assertEqual(app.upgrade_walls_to_reserve('window',independent=True),0)
+        more.assert_not_called()
+        self.assertEqual(app._wall_click.call_count,1)
 
     def test_full_cycle_does_not_attack_after_unconfirmed_walls(self):
         app=app_without_gui()
@@ -486,6 +596,36 @@ class UpgradeTests(unittest.TestCase):
             choice = upgrades.find_payable_upgrade(app, 'window', 3, (10_000_000, 2_100_000))
         self.assertEqual(choice, pages[1][0])
         self.assertEqual(position[0], 1)
+
+    def test_menu_stall_uses_row_positions_despite_ocr_variation(self):
+        previous = [(18, 'teslacamouflee'), (26, 'bombeaerienne'),
+                    (34, 'piegearessort'), (42, 'catapulteexplosive')]
+        same_page = [(18.2, 'teslacamouplée'), (26.1, 'bombeaerienne'),
+                     (33.9, 'piegearessor'), (42.1, 'catapulteexplosive')]
+        moving_page = [(23, label) for _, label in previous]
+        self.assertTrue(upgrades.menu_rows_stationary(previous, same_page))
+        self.assertFalse(upgrades.menu_rows_stationary(previous, moving_page))
+
+    def test_conflicting_price_on_stationary_row_is_not_a_payable_upgrade(self):
+        app = app_without_gui()
+        app._capture = Mock(return_value=Image.new('RGB', (1323, 744)))
+        app._wait = Mock()
+        app._trace = Mock()
+        prices = iter((300_000, 3_000_000, 300_000))
+        rows = [(20, 'bombeaerienne'), (30, 'piegearessort'), (40, 'teslacamouflee')]
+
+        def items(_image, include_others=False, include_town_hall=False):
+            return [('Bombe aérienne x7', 33.9, next(prices), 'or')] if include_others else []
+
+        with patch.object(upgrades, 'scroll_builders_to_top'), \
+                patch.object(upgrades, 'suggested_items', side_effect=items), \
+                patch.object(upgrades, 'menu_anchor_rows', return_value=rows), \
+                patch.object(main, 'builders_menu_open', return_value=True), \
+                patch.object(main, 'read_text', return_value='same'), \
+                patch.object(main.WindowDriver, 'scroll_menu', return_value=True):
+            self.assertIsNone(upgrades.find_payable_upgrade(app, 'window', 2, (1_000_000, 1_000_000)))
+        self.assertTrue(any('Prix contradictoires' in call.args[1]
+                            for call in app._trace.call_args_list))
 
     def test_closed_builder_menu_never_scrolls_the_village(self):
         app = app_without_gui()
@@ -620,6 +760,37 @@ class UpgradeTests(unittest.TestCase):
             self.assertIsNone(upgrades.direct_upgrade_button(image, 'Catapulte explosive', 4_000_000, 'or'))
             self.assertIsNone(upgrades.direct_upgrade_button(image, 'Tour de sorciers', 4_000_000, 'élixir'))
 
+    def test_compact_hero_eradicator_direct_upgrade_requires_exact_cost_and_resource(self):
+        with Image.open(Path(__file__).parent / 'testdata' / 'hero_eradicator_selected_1323.png') as image:
+            self.assertEqual(upgrades.direct_upgrade_button(image, 'Éradicateur de héros', 6_000_000, 'élixir'),
+                             (83.0, 43.0))
+            self.assertIsNone(upgrades.direct_upgrade_button(image, 'Éradicateur de héros', 5_000_000, 'élixir'))
+            self.assertIsNone(upgrades.direct_upgrade_button(image, 'Éradicateur de héros', 6_000_000, 'or'))
+            self.assertIsNone(upgrades.direct_upgrade_button(image, 'Catapulte explosive', 6_000_000, 'élixir'))
+            for size in ((1387,780),(1920,1080),(2560,1440)):
+                with self.subTest(size=size):
+                    scaled=image.resize(size)
+                    point=upgrades.direct_upgrade_button(scaled,'Éradicateur de héros',6_000_000,'élixir')
+                    self.assertIsNotNone(point)
+                    self.assertTrue(82 <= point[0] <= 84 and 39 <= point[1] <= 45)
+
+    def test_direct_upgrade_waits_for_delayed_confirmation_panel(self):
+        app=app_without_gui()
+        app._capture=Mock(return_value=object())
+        app._wall_click=Mock()
+        app._wait=Mock()
+        app.stable_reserves=Mock(return_value=(3_466_604,7_320_672))
+        with patch.object(upgrades,'stable_builders',return_value=2), \
+                patch.object(upgrades,'suggested_items',return_value=[('Éradicateur de héros',54,6_000_000,'élixir')]), \
+                patch.object(upgrades,'direct_upgrade_button',side_effect=[None,(83,43)]), \
+                patch.object(upgrades,'confirmation_headings',return_value=[]), \
+                patch.object(main,'builders_menu_open',return_value=True):
+            self.assertEqual(upgrades.perform_direct_upgrade(app,'window','Éradicateur de héros',
+                                                              6_000_000,'élixir'),
+                             (2,(3_466_604,7_320_672)))
+        app._wait.assert_called_once_with(.4)
+        self.assertEqual(app._wall_click.call_args_list[-1].args[1],(83,43))
+
     def test_compact_canon_panel_and_confirmation_require_exact_price(self):
         with Image.open(Path(__file__).parent/'testdata/canon_selected_1323.png') as image:
             self.assertTrue(upgrades.selected_panel_matches(image,'anon',3_000_000,'or'))
@@ -649,6 +820,35 @@ class UpgradeTests(unittest.TestCase):
         with Image.open(Path(__file__).parent / 'testdata' / 'wizard_upgraded_1765.png') as image:
             self.assertEqual(main.read_safe_reserve(image, 'gold'), 654_905)
             self.assertEqual(upgrades.builder_count(image), 2)
+
+    def test_gold_balance_keeps_leading_one_after_single_wall_purchase(self):
+        with Image.open(Path(__file__).parent / 'testdata' / 'reserve_gold_after_wall_1323.png') as image:
+            self.assertEqual(main.read_safe_reserve(image, 'gold'), 1_830_265)
+            self.assertEqual(main.read_safe_reserve(image, 'elixir'), 3_614_231)
+
+    def test_gold_balance_keeps_leading_one_after_group_wall_purchase(self):
+        with Image.open(Path(__file__).parent / 'testdata' / 'reserve_gold_after_group_wall_1323.png') as image:
+            self.assertEqual(main.read_safe_reserve(image, 'gold'), 1_307_362)
+            self.assertEqual(main.read_safe_reserve(image, 'elixir'), 3_067_265)
+
+    def test_gold_balance_on_selected_wall_uses_two_thresholds(self):
+        with Image.open(Path(__file__).parent / 'testdata' / 'reserve_gold_3003444_1323.png') as image:
+            self.assertEqual(main.read_safe_reserve(image, 'gold'), 3_003_444)
+            self.assertEqual(main.read_safe_reserve(image, 'elixir'), 5_809_040)
+
+    def test_gold_balance_after_wall_keeps_leading_one_at_new_price(self):
+        with Image.open(Path(__file__).parent / 'testdata' / 'reserve_gold_1587926_1323.png') as image:
+            self.assertEqual(main.read_safe_reserve(image, 'gold'), 1_587_926)
+            self.assertEqual(main.read_safe_reserve(image, 'elixir'), 4_775_582)
+
+    def test_elixir_balance_survives_animated_village_background(self):
+        with Image.open(Path(__file__).parent / 'testdata' / 'reserve_elixir_stylized_1323.png') as image:
+            self.assertEqual(main.read_safe_reserve(image, 'gold'), 3_828_394)
+            self.assertEqual(main.read_safe_reserve(image, 'elixir'), 5_306_572)
+
+    def test_elixir_balance_keeps_leading_one_after_wall_purchase(self):
+        with Image.open(Path(__file__).parent / 'testdata' / 'reserve_elixir_after_wall_1323.png') as image:
+            self.assertEqual(main.read_safe_reserve(image, 'elixir'), 1_306_572)
 
     def test_reserves_survive_partial_and_conflicting_ocr(self):
         with Image.open(Path(__file__).parent/'testdata/reserves_one_million.png') as im:

@@ -1,6 +1,7 @@
 """Run one real, bounded bot action without opening its dashboard."""
 
 import argparse
+import re
 import sys
 import threading
 import time
@@ -8,6 +9,15 @@ from dataclasses import replace
 
 import main
 from farm_stats import FarmStats
+
+
+def deployment_matches_configuration(event, settings):
+    match = re.fullmatch(
+        r"Déploiement vérifié : (\d+) électro-dragons, (\d+) dragons, 4 héros, 5 Rage\.",
+        event,
+    )
+    return bool(match and int(match.group(1)) >= settings.electrodragon_count
+                and int(match.group(2)) >= settings.dragon_count)
 
 
 def main_cli():
@@ -92,9 +102,8 @@ def main_cli():
             deployments = [event for event in events if isinstance(event, str)
                            and event.startswith("Déploiement vérifié :")]
             print(f"Durée : {elapsed / 60:.1f} min ; attaques complètes : {len(deployments)}")
-            expected = (f"Déploiement vérifié : {app.settings.electrodragon_count} électro-dragons, "
-                        f"{app.settings.dragon_count} dragons, 4 héros, 5 Rage.")
-            if any(event != expected for event in deployments):
+            if any(not deployment_matches_configuration(event, app.settings)
+                   for event in deployments):
                 raise SystemExit("Composition différente de l'armée attendue pendant la validation continue.")
             if elapsed < args.minutes * 60 or len(deployments) < 2:
                 raise SystemExit("Validation continue insuffisante : 30 minutes et deux attaques complètes requises.")

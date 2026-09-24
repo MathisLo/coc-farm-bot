@@ -11,9 +11,19 @@ from unittest.mock import Mock, patch
 
 from PIL import Image, ImageDraw
 import main
+from tools.headless_validation import deployment_matches_configuration
 
 
 class WindowsIntegrationTests(unittest.TestCase):
+    def test_soak_accepts_all_visible_troops_above_configured_minimum(self):
+        settings = main.replace(main.Settings(), electrodragon_count=8, dragon_count=1)
+        self.assertTrue(deployment_matches_configuration(
+            "Déploiement vérifié : 10 électro-dragons, 1 dragons, 4 héros, 5 Rage.", settings))
+        self.assertFalse(deployment_matches_configuration(
+            "Déploiement vérifié : 7 électro-dragons, 1 dragons, 4 héros, 5 Rage.", settings))
+        self.assertFalse(deployment_matches_configuration(
+            "Déploiement vérifié : 10 électro-dragons, 1 dragons, 3 héros, 5 Rage.", settings))
+
     def test_home_attack_button_is_not_multiplayer_menu(self):
         with Image.open(Path(__file__).parent / "testdata" / "suggested_menu.png") as village:
             self.assertTrue(main.has_screen_text(village, "attaquer"))
@@ -23,6 +33,12 @@ class WindowsIntegrationTests(unittest.TestCase):
             multiplayer.paste(crop, (0, 0))
         self.assertTrue(main.multiplayer_menu_ready(multiplayer))
         self.assertFalse(main.army_selection_ready(multiplayer))
+
+    def test_battle_log_is_not_the_multiplayer_attack_menu(self):
+        image = Image.new('RGB', (1323, 744))
+        with patch.object(main, 'normalized_screen_text', return_value=(
+                'multijoueurattaquesjournaldecomatdefenseshistoriquedeligue')):
+            self.assertFalse(main.multiplayer_menu_ready(image))
 
     def test_army_readiness_detects_ten_electrodragons_and_four_heroes(self):
         image = Image.new("RGB", (1765, 993))

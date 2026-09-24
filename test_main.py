@@ -42,6 +42,9 @@ class FarmLogicTests(unittest.TestCase):
         self.assertEqual(main.parse_reserve_number("-2-625*518"), 2_625_518)
         self.assertEqual(main.parse_reserve_number("1,800 575"), 1_800_575)
         self.assertEqual(main.parse_reserve_number("1-800S75"), 1_800_575)
+        self.assertEqual(main.parse_reserve_number("43 380"), 43_380)
+        self.assertEqual(main.parse_reserve_number("43380"), 43_380)
+        self.assertEqual(main.parse_reserve_number("1307 362"), 1_307_362)
         self.assertIsNone(main.parse_reserve_number("94 9 000-"))
 
     def test_group_confirmation_checks_amount_and_resource(self):
