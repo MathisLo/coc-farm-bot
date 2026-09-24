@@ -10,6 +10,10 @@ from test_regressions import app_without_gui
 
 
 class StatisticsTests(unittest.TestCase):
+    def test_stylized_bonus_is_counted_on_real_vm_result(self):
+        with Image.open(Path(__file__).parent / 'testdata' / 'result_bonus_stylized_1765.png') as image:
+            self.assertEqual(main.read_battle_earnings(image), (461_924, 657_042, 5_256))
+
     def test_final_reward_without_readable_top_border_is_selected(self):
         with tempfile.TemporaryDirectory() as directory:
             app = app_without_gui()
@@ -142,6 +146,10 @@ class StatisticsTests(unittest.TestCase):
     def test_large_result_includes_league_bonus(self):
         with Image.open(Path(__file__).parent / 'testdata/result_large.png') as screenshot:
             self.assertEqual(main.read_battle_earnings(screenshot), (1773011, 2057709, 16323))
+
+    def test_vm_defeat_heading_read_at_second_ocr_scale(self):
+        with Image.open(Path(__file__).parent / 'testdata/result_defeat_unread_1765.png') as screenshot:
+            self.assertEqual(main.read_battle_earnings(screenshot), (648788, 326588, 2324))
 
     def test_unknown_screen_does_not_count_as_zero(self):
         self.assertIsNone(main.read_battle_earnings(Image.new('RGB', (1920,1080))))

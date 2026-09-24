@@ -14,6 +14,80 @@ import main
 
 
 class WindowsIntegrationTests(unittest.TestCase):
+    def test_home_attack_button_is_not_multiplayer_menu(self):
+        with Image.open(Path(__file__).parent / "testdata" / "suggested_menu.png") as village:
+            self.assertTrue(main.has_screen_text(village, "attaquer"))
+            self.assertFalse(main.multiplayer_menu_ready(village))
+        multiplayer = Image.new("RGB", (1765, 993))
+        with Image.open(Path(__file__).parent / "testdata" / "multiplayer_menu.png") as crop:
+            multiplayer.paste(crop, (0, 0))
+        self.assertTrue(main.multiplayer_menu_ready(multiplayer))
+        self.assertFalse(main.army_selection_ready(multiplayer))
+
+    def test_army_readiness_detects_ten_electrodragons_and_four_heroes(self):
+        image = Image.new("RGB", (1765, 993))
+        with Image.open(Path(__file__).parent / "testdata" / "army_ready_selection.png") as crop:
+            image.paste(crop, (100, 210))
+        settings = main.replace(main.Settings(), electrodragon_count=10)
+        for frame in (image, image.resize((1920, 1080))):
+            ready, _, counts = main.army_readiness(frame, settings)
+            self.assertTrue(ready)
+            self.assertEqual(counts["electrodragon"], 10)
+            self.assertEqual(counts["rage"], 5)
+        incomplete = image.copy()
+        ImageDraw.Draw(incomplete).rectangle((135, 225, 225, 280), fill="black")
+        ready, reason, _ = main.army_readiness(incomplete, settings)
+        self.assertFalse(ready)
+        self.assertIn("héros", reason)
+
+    def test_army_readiness_across_requested_16_9_resolutions(self):
+        image = Image.new("RGB", (1765, 993))
+        with Image.open(Path(__file__).parent / "testdata" / "army_ready_selection.png") as crop:
+            image.paste(crop, (100, 210))
+        settings = main.replace(main.Settings(), electrodragon_count=10)
+        for size in ((1920, 1080), (2560, 1440), (1387, 780)):
+            with self.subTest(size=size):
+                frame = image.resize(size, Image.Resampling.LANCZOS)
+                ready, reason, counts = main.army_readiness(frame, settings)
+                self.assertTrue(ready, reason)
+                self.assertEqual(counts["electrodragon"], 10)
+                self.assertEqual(counts["rage"], 5)
+
+    def test_enemy_loot_across_requested_16_9_resolutions(self):
+        with Image.open(Path(__file__).parent / "testdata" / "enemy_clear.png") as source:
+            for size in ((1920, 1080), (2560, 1440), (1387, 780)):
+                with self.subTest(size=size):
+                    frame = source.resize(size, Image.Resampling.LANCZOS)
+                    loot = main.read_enemy_loot(frame)
+                    self.assertEqual((loot.gold, loot.elixir, loot.dark_elixir),
+                                     (855156, 941101, 9297))
+
+    def test_wall_result_and_connection_across_requested_16_9_resolutions(self):
+        fixtures = (
+            ("wall_single_4m_1765.png", lambda frame: main.single_wall_confirmation_matches(frame, 4_000_000, "or")),
+            ("result_defeat_unread_1765.png", lambda frame: main.read_battle_earnings(frame) == (648788, 326588, 2324)),
+            ("connection_lost.png", lambda frame: main.connection_retry_point(frame) is not None),
+        )
+        for filename, check in fixtures:
+            with Image.open(Path(__file__).parent / "testdata" / filename) as source:
+                for size in ((1920, 1080), (2560, 1440), (1387, 780)):
+                    with self.subTest(filename=filename, size=size):
+                        frame = source.resize(size, Image.Resampling.LANCZOS)
+                        self.assertTrue(check(frame))
+
+    def test_wall_payment_controls_across_requested_16_9_resolutions(self):
+        for filename, single in (("wall_panel_live_1765.png", False),
+                                 ("wall_last_selected.png", True)):
+            with Image.open(Path(__file__).parent / "testdata" / filename) as source:
+                for size in ((1920, 1080), (2560, 1440), (1387, 780)):
+                    with self.subTest(filename=filename, size=size):
+                        frame = source.resize(size, Image.Resampling.LANCZOS)
+                        controls = main.wall_group_controls(frame, single=single,
+                                                            expected_price=500_000)
+                        self.assertIsNotNone(controls)
+                        self.assertEqual(controls["payments"]["or"][1], 500_000)
+                        self.assertEqual(controls["payments"]["\u00e9lixir"][1], 500_000)
+
     def test_enemy_resource_crops_exclude_labels_and_icons(self):
         with Image.open(Path(__file__).parent/'testdata/enemy_clear.png') as im:
             loot=main.read_enemy_loot(im)
@@ -26,6 +100,11 @@ class WindowsIntegrationTests(unittest.TestCase):
         self.assertTrue(main.hero_health_visible(after, 0, -6.25))
         self.assertTrue(main.hero_health_visible(after, 1, -6.25))
         self.assertFalse(main.hero_health_visible(after, 2, -6.25))
+
+    def test_prince_first_card_uses_compact_hero_layout(self):
+        with Image.open(Path(__file__).parent / 'testdata' / 'hero_prince_compact_1765.png') as image:
+            self.assertEqual(main.hero_layout_shift(image), -6.25)
+            self.assertTrue(all(main.hero_card_present(image, index, -6.25) for index in range(4)))
 
     def test_empty_hero_slot_is_not_a_coloured_card(self):
         image = self.fixture("hero_empty_slot.png", (0, 880))
@@ -62,6 +141,18 @@ class WindowsIntegrationTests(unittest.TestCase):
             self.assertLess(center, 58)
             self.assertEqual(main.read_rage_count(image, center), expected)
 
+    def test_rage_two_template_recovers_when_windows_ocr_is_blank(self):
+        for filename, expected in (("live_compact_battle_bar_rage_two.png", True),
+                                   ("live_compact_battle_bar.png", False)):
+            with self.subTest(filename=filename):
+                image = Image.new("RGB", (1765, 993))
+                with Image.open(Path(__file__).parent / "testdata" / filename) as bar:
+                    image.paste(bar, (0, 830))
+                center = main.rage_card_center(image, -6.25)
+                with patch.object(main, "read_text", return_value=""):
+                    self.assertEqual(main.rage_counter_is_two(image, center), expected)
+                    self.assertEqual(main.read_rage_count(image, center), 2 if expected else None)
+
     def test_event_prefers_gold_or_elixir_over_bonus_troops(self):
         for name, token in (("event_gold.png", "OR"), ("event_elixir.png", "lixi")):
             image = self.fixture(name, (400, 120))
@@ -86,6 +177,22 @@ class WindowsIntegrationTests(unittest.TestCase):
                 image = self.fixture(name, (1500, 0))
                 self.assertEqual(tuple(main.read_safe_reserve(image, k) for k in ("gold", "elixir")), expected)
         self.assertIsNone(main.parse_reserve_number("1 4261 844"))
+
+    def test_real_780p_village_reserves(self):
+        with Image.open(Path(__file__).parent / 'testdata' / 'village_live_1387x780.png') as image:
+            self.assertTrue(main.village_home_ready(image))
+            self.assertEqual(main.read_safe_reserve(image, 'gold'), 3_303_214)
+            self.assertEqual(main.read_safe_reserve(image, 'elixir'), 4_446_704)
+            self.assertTrue(main.wall_selection_open(image))
+            icons = main.find_collectible_icons(image)
+            self.assertEqual([kind for kind, *_ in icons].count('dark'), 2)
+            self.assertTrue(main.collectible_icon_still_visible(image, 'dark', 1501, 341))
+
+    def test_compact_scrolled_builder_menu_is_not_the_village(self):
+        with Image.open(Path(__file__).parent / 'testdata' / 'builders_scrolled_1323.png') as menu, \
+             Image.open(Path(__file__).parent / 'testdata' / 'village_zoomed_1323.png') as village:
+            self.assertTrue(main.builders_menu_open(menu))
+            self.assertFalse(main.builders_menu_open(village))
 
     def test_selected_last_troop_is_one_not_unreadable(self):
         image = self.fixture("army_last_electro.png", (0, 880))

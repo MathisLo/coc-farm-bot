@@ -1,4 +1,10 @@
-# CoC Farm Bot v2.0.6
+# CoC Farm Bot v2.0.7
+
+## Validation du 24 septembre 2026
+
+Sur TCD_VeNom, dans une fenêtre de jeu 1323 x 744, un cycle de 34,5 minutes a confirmé trois attaques complètes (10 électro-dragons, 1 dragon, 4 héros et 5 Rage à chaque fois), la collecte répétée des foreuses d'élixir noir, une tour d'archers lancée pour 4 000 000 d'or et un rempart amélioré pour 4 000 000 d'élixir avec une réserve supérieure à 1 000 000. Le scan des bâtiments passe avant celui des remparts et s'arrête après deux propositions instables pour ne pas bloquer les attaques. Il restait deux ouvriers libres à la fin de cet essai : le passage à un seul ouvrier n'a pas été démontré en jeu, faute d'une autre proposition payable et lisible.
+
+La ligne d'un rempart unique (`x1`) a été reconnue, mais elle coûtait 4 000 000 et n'était pas payable avec la réserve exigée au moment du test. Les lectures critiques ont aussi été testées sur des captures en 1920 x 1080, 2560 x 1440 et 1387 x 780 ; ces tailles n'ont pas toutes été validées en jeu. Les messages de reconnexion reconnus sont couverts par les tests, sans garantie pour un message inconnu.
 
 ## Validation du 23 septembre 2026
 
@@ -30,6 +36,8 @@ La **simulation** clique rÃ©ellement pour rechercher et passer les bases, mais
 **ArrÃªter** bloque les nouveaux clics de toutes les actions, y compris les hÃ©ros et les confirmations de remparts. Un clic dÃ©jÃ  envoyÃ© est relÃ¢chÃ©. Les lectures OCR sont annulables et limitÃ©es Ã  huit secondes par appel ; une base dont lâ€™Ã©cran ou le butin reste illisible dispose dâ€™un budget de 35 secondes. Ensuite, sa capture est conservÃ©e dans `%USERPROFILE%\CoCFarmBot\unread-enemies` et le bot passe Ã  la suivante uniquement si le bouton Suivant est reconnu sur une nouvelle capture. Sinon, il sâ€™arrÃªte sans clic. Avec le rÃ©glage Â« or ou Ã©lixir Â», une seule ressource lisible atteignant son seuil suffit ; le rÃ©glage exigeant les deux ressources conserve ses deux vÃ©rifications. **Lire lâ€™Ã©cran** et **Relever le profil** travaillent en arriÃ¨re-plan : lâ€™interface et le bouton ArrÃªter restent disponibles. Une seule opÃ©ration est autorisÃ©e Ã  la fois, et les rÃ©glages utilisÃ©s ne changent pas en cours de cycle.
 
 ## Adapter les positions
+
+Les lectures critiques sont testées sur des captures redimensionnées en 1920 x 1080, 2560 x 1440 et 1387 x 780. Pour une autre largeur, y compris un 780p non 16:9, régler d'abord la fenêtre du jeu à la taille voulue, puis ouvrir **Calibrer les positions...** : la taille intérieure affichée est celle de la capture et son format est enregistré avec les positions. Le bot refuse les clics si le format de la fenêtre ne correspond plus au calibrage. Ces tests sur images ne remplacent pas un essai réel sur le PC concerné.
 
 Le profil fourni vise lâ€™interface franÃ§aise en **16:9**, avec dragons, Ã©lectro-dragons et trois hÃ©ros. Les captures et les clics utilisent la zone intÃ©rieure de la fenÃªtre, sans barre de titre. Les dimensions sont relues Ã  chaque capture et chaque clic. Un redimensionnement entre la lecture et lâ€™action interrompt le bot ; relancer une fois la fenÃªtre stabilisÃ©e. Si son format diffÃ¨re du calibrage, aucun clic nâ€™est envoyÃ©.
 

@@ -2,6 +2,7 @@
 import re
 import unicodedata
 import sys
+from collections import Counter
 from difflib import SequenceMatcher
 from PIL import ImageChops, ImageStat
 
@@ -50,6 +51,11 @@ def is_town_hall(title):
     return any(word in label for word in ('hotel', 'hobel', 'ville', 'hdv'))
 
 
+def is_wall_row(title):
+    label = canonical_title(title)
+    return 'mpart' in label or bool(re.fullmatch(r'x\d+', label))
+
+
 def confirmation_headings(image):
     m = engine()
     return [normal(m.read_text(m.crop_percent(image, roi), scale=scale))
@@ -73,24 +79,72 @@ def direct_upgrade_button(image, title, cost, resource):
         observed = m.read_result_amount(m.crop_percent(image,price_roi))
         if observed == cost and resource_icon(image,icon_roi) == resource:
             buttons.append((px,py))
-    return buttons[0] if len(buttons) == 1 else None
+    if len(buttons) == 1:
+        return buttons[0]
+    if image.width < 1500:
+        px, py = 83.0, 58.0
+        button = m.crop_percent(image, m.Roi(78, 55, 88, 64)).convert('RGB')
+        pixels = list(button.get_flattened_data())
+        green = sum(g > r * 1.3 and g > b * 1.2 and g > 100 for r, g, b in pixels)
+        if (green > len(pixels) * .2
+                and m.read_result_amount(m.crop_percent(image, m.Roi(px-5, py+1, px+4, py+5))) == cost
+                and resource_icon(image, m.Roi(px+2.5, py+.5, px+5.5, py+4.5)) == resource):
+            return (px, py)
+    return None
+
+
+def selected_panel_matches(image, title, cost, resource):
+    m = engine()
+    if image.width < 1500:
+        # The compact title is stylized and unreadable by OCR. The next
+        # confirmation dialog must still match the building title and price.
+        for rois, icon in (
+                ((m.Roi(45,74,54,80), m.Roi(44,73,55,80)), m.Roi(52,74,55,80)),
+                ((m.Roi(50,74,59,80), m.Roi(49,73,59,80)), m.Roi(56,75,58,78))):
+            readings = []
+            for roi in rois:
+                raw = m.read_text(m.crop_percent(image,roi),scale=2).strip(" +.,'\"*")
+                if re.fullmatch(r'\d[\d\s]*',raw):
+                    readings.append(int(re.sub(r'\s','',raw)))
+            if readings == [cost,cost] and resource_icon(image,icon) == resource:
+                return True
+        return False
+    if (m.read_result_amount(m.crop_percent(image,m.Roi(50,74,58,78))) != cost
+            or resource_icon(image,m.Roi(56,74,58,79)) != resource):
+        return False
+    heading = ' '.join(normal(m.read_text(m.crop_percent(image, roi), scale=scale))
+                       for roi, scale in ((m.Roi(20,68,80,78),1), (m.Roi(20,66,80,81),2)))
+    observed = canonical_title(heading)
+    tokens = [token for token in re.findall(r'[a-z0-9]+', normal(title)) if len(token) >= 6]
+    return bool(tokens and any(
+        token in observed or any(
+            SequenceMatcher(None, token, observed[start:start+length]).ratio() >= .78
+            for length in range(max(4,len(token)-2),len(token)+3)
+            for start in range(max(0,len(observed)-length+1)))
+        for token in tokens))
+
+
+def confirmation_cost(image):
+    m = engine()
+    readings = []
+    rois = (m.Roi(63,87,76,93), m.Roi(63,87,75,93)) if image.width < 1500 else (m.Roi(63,86,75,91),)
+    for roi in rois:
+        price = m.crop_percent(image,roi)
+        for scale in (1,2,3,4):
+            raw = m.read_text(price,scale=scale).strip(" +.,'\"*")
+            raw = raw.translate(str.maketrans({'S':'5','s':'5','O':'0','o':'0'}))
+            if re.fullmatch(r'\d[\d\s]*',raw):
+                amount = int(re.sub(r'\s','',raw))
+                if 0 < amount <= 20_000_000:
+                    readings.append(amount)
+    votes = Counter(readings)
+    return next((amount for amount,count in votes.items() if count >= 2),None)
 
 
 def builder_count(image, with_total=False):
     m = engine()
-    # Google Play Games uses a different top-bar layout below 1500 px: the
-    # village builder counter is at x≈41%, while the old 1920 px crop lands on
-    # the hero counter (4/5). Prefer the live VM crop and only accept a
-    # two-builder ratio here.
-    if getattr(image, 'width', 1920) < 1500:
-        live_crop = m.crop_percent(image, m.Roi(39.3, 2.7, 42.7, 6.7))
-        for variant, scale in ((m.white_text_mask(live_crop), 3), (live_crop, 2), (live_crop, 3)):
-            raw = m.read_text(variant, scale=scale)
-            ratio = m.parse_worker_ratio(raw)
-            if ratio:
-                free, total = map(int, ratio.split('/'))
-                if 0 <= free <= total <= 3:
-                    return (free, total) if with_total else free
+    # The x=41% counter may belong to a temporary Goblin Builder event.
+    # Only the regular village counter at x=51% may reserve builders.
     from PIL import Image, ImageDraw, ImageFont
     # Remove the enclosing horizontal rules, then add neutral OCR context.
     # Windows OCR otherwise treats this tiny isolated fraction as decoration.
@@ -184,24 +238,30 @@ def resource_icon(image, roi):
 
 
 def builder_price_resource(image, y):
-    """Read both menu widths without dropping a leading price digit."""
+    """Read a price across small OCR row offsets without borrowing a neighbor."""
     m = engine()
-    readings = []
-    for price_roi, icon_roi in ((m.Roi(55.7,y-2,62.7,y+2), m.Roi(54.5,y-1.8,57.1,y+1.8)),
-                                (m.Roi(57,y-2,65,y+2), m.Roi(56.5,y-1.8,58.5,y+1.8))):
-        cost = m.read_result_amount(m.crop_percent(image,price_roi))
-        resource = resource_icon(image,icon_roi)
-        if cost and resource:
-            readings.append((cost,resource))
-    return max(readings, key=lambda reading: reading[0]) if readings else None
+    price_x1, price_x2 = (56.6, 64.2) if image.width < 1500 else (57, 65)
+    costs = [m.read_result_amount(m.crop_percent(image,m.Roi(price_x1,y+offset-2,price_x2,y+offset+2)))
+             for offset in (-.4,0,.4)]
+    if not any(costs):
+        costs = [m.read_result_amount(m.crop_percent(image,m.Roi(55.7,y+offset-2,62.7,y+offset+2)))
+                 for offset in (-.4,0,.4)]
+    resources = {resource_icon(image, roi) for roi in
+                 (m.Roi(54.5,y-1.8,57.1,y+1.8), m.Roi(55,y-1.8,57,y+1.8),
+                  m.Roi(56.5,y-1.8,58.5,y+1.8))}
+    resources.discard(None)
+    votes = Counter(cost for cost in costs if cost)
+    if len(resources) != 1 or not votes:
+        return None
+    return (min(votes, key=lambda cost: (-votes[cost], cost)), resources.pop())
 
 
 def suggested_items(image, include_others=False, include_town_hall=False):
     m = engine()
-    region = m.Roi(39,12,64,64) if include_others else m.Roi(39,20,64,58)
+    region = m.Roi(39,12,64,64)
     words = m.read_word_centers(m.crop_percent(image, region))
     starts = [y for text,x,y in words if 'suggere' in normal(text)]
-    ends = [y for text,x,y in words if normal(text).startswith(('autres','aubres'))]
+    ends = [y for text,x,y in words if re.sub(r'^[^a-z]+', '', normal(text)).startswith(('autres','aubres','ubres'))]
     if not include_others and (len(starts) != 1 or len(ends) != 1):
         return []
     rows = []
@@ -219,14 +279,14 @@ def suggested_items(image, include_others=False, include_town_hall=False):
     for y, labels in rows:
         title = ' '.join(text for x,text in sorted(labels))
         title = re.sub(r'\s*x\w+\s*$', '', title)
-        if normal(title).startswith('remp'):
+        if is_wall_row(title):
             continue  # Wall batching has its own immediate-upgrade path.
         screen_y = region.y1 + y*(region.y2-region.y1)/100
         # Re-read only the label; scenery behind the full menu corrupts words.
         focused = m.read_text(m.crop_percent(image,m.Roi(39,screen_y-2,56,screen_y+2)),scale=2)
         if focused:
             title = re.sub(r"[\s,]+x\S*$", '', focused, flags=re.I).strip(" '•.,:")
-        if normal(title).startswith('remp'):
+        if is_wall_row(title):
             continue
         if is_town_hall(title) and not include_town_hall:
             continue
@@ -267,20 +327,23 @@ def scroll_builders_to_top(app, window):
     previous_menu = None
     for attempt in range(20):
         menu = app._capture(window)
+        if not m.builders_menu_open(menu):
+            raise RuntimeError('Liste des ouvriers absente : aucun défilement envoyé.')
         # A village with many builders already in progress can push the
         # suggested section below the old 45% crop. Read the full menu band
         # before scrolling; otherwise an already-top menu is needlessly
         # scrolled twenty times and the wall/building pass aborts.
         heading = normal(m.read_text(m.crop_percent(menu,m.Roi(37,11,65,65)),scale=2))
+        has_running_header = any(marker in heading for marker in ('en cours', 'encours', 'enpours'))
         app._trace('MENU OUVRIERS',f'Retour en haut {attempt+1}/20 : texte={heading[:500]!r}')
-        if 'suggere' in heading and ('disponible' in heading or 'ameliorations' in heading):
+        if 'sugger' in heading and has_running_header and 'disponible' in heading:
             app._trace('MENU OUVRIERS','Début de la liste confirmé.')
             return
         # The live VM can omit the suggested heading for one OCR pass even
         # after the menu reached the top. Require a stable frame and the
         # fixed in-progress/available header before accepting that state.
         if (previous_menu is not None and _menu_image_is_stable(previous_menu, menu)
-                and 'ameliorations en cours' in heading and 'disponible' in heading):
+                and has_running_header and 'disponible' in heading):
             app._trace('MENU OUVRIERS','DÃ©but de la liste confirmÃ© par image stable.')
             return
         previous_menu = menu
@@ -316,6 +379,21 @@ def find_payable_upgrade(app, window, free, balances, include_town_hall=False, e
     previous_image = None
     unchanged = 0
     observations = []
+    for _ in range(5):
+        seen_top = set()
+        for item in suggested_items(app._capture(window), include_town_hall=include_town_hall):
+            if (any(same_building_title(item[0], title) for title in excluded_titles or ())
+                    or not can_start_upgrade(free, balances[0 if item[3]=='or' else 1], item[2])):
+                continue
+            index = next((index for index, record in enumerate(observations)
+                          if record[1] == item[2:] and same_building_title(record[0], item[0])), None)
+            if index is None:
+                observations.append([item[0], item[2:], 0, item])
+                index = len(observations)-1
+            if index not in seen_top:
+                observations[index][2] += 1
+                observations[index][3] = item
+                seen_top.add(index)
     for page in range(20):
         menu = app._capture(window)
         items = suggested_items(menu, include_others=True, include_town_hall=include_town_hall)
@@ -345,6 +423,8 @@ def find_payable_upgrade(app, window, free, balances, include_town_hall=False, e
             break
         previous = signature
         previous_image = menu
+        if not m.builders_menu_open(menu):
+            raise RuntimeError('Liste des ouvriers fermée pendant la recherche : aucun défilement envoyé.')
         with app.action_lock:
             app._check_stopped()
             app._trace('DÉFILEMENT', 'Améliorations : ligne suivante')
@@ -361,13 +441,22 @@ def find_payable_upgrade(app, window, free, balances, include_town_hall=False, e
     # The scan ends elsewhere in the list. Re-find the exact row before a click.
     scroll_builders_to_top(app,window)
     for page in range(20):
-        menu = app._capture(window)
-        for item in suggested_items(menu,include_others=True,include_town_hall=include_town_hall):
-            if excluded_titles and any(same_building_title(item[0], title) for title in excluded_titles):
-                continue
-            if same_building_title(item[0], best[0]) and item[2:] == best[2:]:
-                app._trace('BÂTIMENTS',f'Ligne retrouvée page {page+1} : {item!r}')
-                return item
+        for _ in range(4 if page == 0 else 1):
+            menu = app._capture(window)
+            for item in suggested_items(menu,include_others=True,include_town_hall=include_town_hall):
+                if excluded_titles and any(same_building_title(item[0], title) for title in excluded_titles):
+                    continue
+                if same_building_title(item[0], best[0]) and item[2:] == best[2:]:
+                    app._trace('BÂTIMENTS',f'Ligne retrouvée page {page+1} : {item!r}')
+                    return item
+            if page == 0:
+                title = m.read_text(m.crop_percent(menu,m.Roi(39,best[1]-2,56,best[1]+2)),scale=2)
+                if (same_building_title(title,best[0])
+                        and builder_price_resource(menu,best[1]) == best[2:]):
+                    app._trace('BÂTIMENTS',f'Ligne du haut retrouvée : {title!r}, y={best[1]:.2f}')
+                    return best
+        if not m.builders_menu_open(menu):
+            raise RuntimeError('Liste des ouvriers fermée avant de retrouver la ligne : aucun défilement envoyé.')
         with app.action_lock:
             app._check_stopped()
             app._trace('DÉFILEMENT', 'Améliorations : retrouver la ligne sélectionnée')
@@ -432,6 +521,7 @@ def upgrade_suggested(app, window, max_upgrades=5):
         return 0
     completed = 0
     skipped_titles = set()
+    failed_choices = 0
     for _ in range(max_upgrades):
         free = stable_builders(app, window)
         app._trace('BÂTIMENTS',f'Début du tour {completed+1} : ouvriers libres={free}')
@@ -445,6 +535,9 @@ def upgrade_suggested(app, window, max_upgrades=5):
             return completed
         if not m.builders_menu_open(app._capture(window)):
             app._wall_click(window, m.BUILDERS_BUTTON, 'liste des ouvriers')
+            if not m.builders_menu_open(app._capture(window)):
+                app.events.put('Liste des ouvriers non confirmée : aucune amélioration lancée.')
+                return completed
         choice = None
         allow_town_hall = False
         candidate = find_payable_upgrade(app,window,free,balances,excluded_titles=skipped_titles)
@@ -467,27 +560,56 @@ def upgrade_suggested(app, window, max_upgrades=5):
         app._trace('BÂTIMENTS',f'Sélection : {title!r} à y={y:.2f} %, coût={cost} {resource}')
         if is_town_hall(title) and not allow_town_hall:
             raise RuntimeError('Hôtel de ville exclu des améliorations automatiques.')
+        # The builder list can keep moving after a wheel event. Confirm the
+        # price under the click twice before selecting anything in the village.
+        prices = []
+        for _check in range(2):
+            app._wait(.55)
+            menu = app._capture(window)
+            prices.append(builder_price_resource(menu, y) if m.builders_menu_open(menu) else None)
+        if prices != [(cost, resource), (cost, resource)]:
+            app.events.put(f'Ligne {title} déplacée ou illisible avant le clic : aucune sélection envoyée.')
+            skipped_titles.add(title)
+            failed_choices += 1
+            if failed_choices >= 2:
+                app.events.put('Deux lignes de bâtiments instables : reprise des remparts et des attaques.')
+                return completed
+            continue
         app._wall_click(window, (44,y), title)
         selected = app._capture(window)
         # The builder list remains as a translucent overlay. Close it before
         # reading the selected building title; otherwise OCR can read the list
         # row or the building behind it instead of the selected panel.
-        app._wall_click(window, (88.4,7.5), 'fermer la liste après sélection')
-        selected = app._capture(window)
-        selected_heading = ' '.join(normal(engine().read_text(engine().crop_percent(selected, roi), scale=scale))
-                                    for roi, scale in ((engine().Roi(20,68,80,78),1), (engine().Roi(20,66,80,81),2)))
-        selected_compact = canonical_title(selected_heading)
-        expected_tokens = [token for token in re.findall(r'[a-z0-9]+', normal(title)) if len(token) >= 6]
-        if not expected_tokens or not any(token in selected_compact for token in expected_tokens):
-            app.events.put(f'Sélection vérifiée différente de {title} : aucune dépense envoyée.')
-            skipped_titles.add(title)
-            continue
+        if m.builders_menu_open(selected):
+            app._wall_click(window, m.BUILDERS_BUTTON, 'fermer la liste après sélection')
+            for _check in range(3):
+                selected = app._capture(window)
+                if not m.builders_menu_open(selected):
+                    break
+                app._wait(.5)
+            if m.builders_menu_open(selected):
+                app.events.put('Liste des ouvriers encore ouverte après sélection : aucune dépense envoyée.')
+                return completed
         if direct_upgrade_button(selected,title,cost,resource) is not None:
             checked = perform_direct_upgrade(app,window,title,cost,resource)
             if checked is None:
                 return completed
             verify_building_spend(app,window,title,cost,resource,*checked)
             completed += 1
+            failed_choices = 0
+            continue
+        if not selected_panel_matches(selected,title,cost,resource):
+            app.events.put(f'Sélection vérifiée différente de {title} : aucune dépense envoyée.')
+            skipped_titles.add(title)
+            failed_choices += 1
+            if not m.builders_menu_open(app._capture(window)):
+                app._wall_click(window, m.BUILDERS_BUTTON, 'rouvrir la liste après sélection refusée')
+                if not m.builders_menu_open(app._capture(window)):
+                    app.events.put('Liste des ouvriers non confirmée après sélection refusée : arrêt des améliorations.')
+                    return completed
+            if failed_choices >= 2:
+                app.events.put('Deux lignes de bâtiments instables : reprise des remparts et des attaques.')
+                return completed
             continue
         # The world-space building label is occluded by the open builder menu.
         # Verify its identity on the confirmation dialog before any spending.
@@ -502,6 +624,10 @@ def upgrade_suggested(app, window, max_upgrades=5):
             app.events.put('Bâtiment sélectionné sans bouton Améliorer unique : sélection reportée.')
             skipped_titles.add(title)
             app._wall_click(window,(88.4,7.5),'close selection without upgrade button')
+            failed_choices += 1
+            if failed_choices >= 2:
+                app.events.put('Deux lignes de bâtiments instables : reprise des remparts et des attaques.')
+                return completed
             continue
         app._wall_click(window, buttons[0], 'ouvrir la confirmation')
         dialog = app._capture(window)
@@ -520,7 +646,7 @@ def upgrade_suggested(app, window, max_upgrades=5):
             app._wall_click(window,(88.4,7.5),'fermer la confirmation inattendue')
             app.events.put('Confirmation de bâtiment différente de la ligne lue : aucune dépense envoyée.')
             return completed
-        confirmed_cost = m.read_result_amount(m.crop_percent(dialog,m.Roi(62,85,74.5,89)))
+        confirmed_cost = confirmation_cost(dialog)
         confirmed_resource = resource_icon(dialog,m.Roi(74.5,85.5,77.5,92))
         app._trace('BÂTIMENTS',f'Confirmation : {confirmed_cost} {confirmed_resource}; attendus={cost} {resource}')
         if confirmed_cost != cost or confirmed_resource!=resource:
@@ -538,11 +664,12 @@ def upgrade_suggested(app, window, max_upgrades=5):
         final = app._capture(window)
         if not any(title_matches_heading(title,heading) for heading in confirmation_headings(final)):
             raise RuntimeError('La confirmation a changé : arrêt.')
-        final_cost = m.read_result_amount(m.crop_percent(final,m.Roi(62,85,74.5,89)))
+        final_cost = confirmation_cost(final)
         app._trace('BÂTIMENTS',f'Prix final={final_cost}, ressource finale={resource_icon(final,m.Roi(74.5,85.5,77.5,92))}')
         if final_cost != confirmed_cost or resource_icon(final,m.Roi(74.5,85.5,77.5,92)) != resource:
             raise RuntimeError('Le prix ou la ressource a changé : aucune dépense envoyée.')
         app._wall_click(window,(70,87),'confirmer l’amélioration conseillée')
         verify_building_spend(app,window,title,cost,resource,free,balances)
         completed += 1
+        failed_choices = 0
     return completed

@@ -29,6 +29,12 @@ class FarmLogicTests(unittest.TestCase):
         self.assertEqual(main.wall_batch_size(1_499_000, 500_000, 184), 0)
         self.assertEqual(main.wall_batch_size(10_000_000, 500_000, 3), 3)
 
+    def test_wall_payment_checks_only_the_resource_being_spent(self):
+        balances = (718_360, 5_185_508)
+        self.assertTrue(main.wall_spend_preserves_reserve(balances, "élixir", 4_000_000))
+        self.assertFalse(main.wall_spend_preserves_reserve(balances, "or", 4_000_000))
+        self.assertTrue(main.wall_spend_preserves_reserve((718_360, 1_185_508), "élixir", 0))
+
     def test_reserve_ocr_requires_complete_amount(self):
         self.assertEqual(main.parse_reserve_number("g 499 OOO-"), 9_499_000)
         self.assertEqual(main.parse_reserve_number("1 000-000"), 1_000_000)

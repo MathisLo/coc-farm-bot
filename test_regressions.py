@@ -27,6 +27,128 @@ def app_without_gui():
 
 
 class CancellationRegressions(unittest.TestCase):
+    def test_battle_x10_misread_as_x1_uses_prebattle_army_count(self):
+        app = app_without_gui()
+        app.settings = main.replace(app.settings, electrodragon_count=10)
+        app._army_preview_counts = {"electrodragon": 10}
+        app._wait = Mock()
+        app._battle_capture = Mock(return_value=object())
+        app._click = Mock(return_value=True)
+        app.stable_troop_count = Mock(side_effect=[1, 7, 4, 1, 0])
+        points = main.layout_points("ELECTRODRAGON_PERIMETER_POINTS")
+        self.assertEqual(app.deploy_unit(object(), main.ELECTRODRAGON_LABEL,
+                                         main.ELECTRODRAGON_SLOT, points, burst=True), 10)
+        self.assertEqual(len(app._troop_drop_points), 10)
+
+    def test_impossible_battle_count_uses_army_preview_not_old_setting(self):
+        app = app_without_gui()
+        app._army_preview_counts = {"electrodragon": 10}
+        app._wait = Mock()
+        app._battle_capture = Mock(return_value=object())
+        app._click = Mock(return_value=True)
+        app.stable_troop_count = Mock(side_effect=[80, 7, 4, 1, 0])
+        points = main.layout_points("ELECTRODRAGON_PERIMETER_POINTS")
+        self.assertEqual(app.deploy_unit(object(), main.ELECTRODRAGON_LABEL,
+                                         main.ELECTRODRAGON_SLOT, points, burst=True), 10)
+
+    def test_live_card_x1_after_ten_clicks_requires_another_drop(self):
+        image = Image.new("RGB", (1765, 993))
+        with Image.open(Path(__file__).parent / "testdata" / "residual_electro_x1.png") as crop:
+            image.paste(crop, (240, 820))
+        self.assertEqual(main.read_troop_count(image, main.ELECTRODRAGON_LABEL, -6.2), 1)
+        app = app_without_gui()
+        app.settings = main.replace(app.settings, electrodragon_count=10)
+        app._army_preview_counts = {"electrodragon": 10}
+        app._wait = Mock()
+        empty = image.copy()
+        empty.paste(image.crop((240, 820, 610, 993)).convert("L").convert("RGB"), (240, 820))
+        app._click = Mock(return_value=True)
+        app._battle_capture = Mock(side_effect=lambda _: empty if app._click.call_count >= 23 else image)
+        app.stable_troop_count = Mock(side_effect=[80, 7, 4, 1, 0])
+        window = SimpleNamespace(width=1765)
+        points = main.layout_points("ELECTRODRAGON_PERIMETER_POINTS")
+        with patch.object(main, "battle_hud_visible", return_value=True):
+            self.assertEqual(app.deploy_unit(window, main.ELECTRODRAGON_LABEL,
+                                             main.ELECTRODRAGON_SLOT, points, burst=True), 10)
+        self.assertEqual(app._click.call_count, 23)
+        self.assertTrue(any("pose résiduelle" in event for event in app.events.queue))
+
+    def test_live_x2_misread_as_21_requires_two_residual_drops(self):
+        image = Image.new("RGB", (1765, 993))
+        with Image.open(Path(__file__).parent / "testdata" / "residual_electro_x2.png") as crop:
+            image.paste(crop, (240, 820))
+        self.assertEqual(main.read_troop_count(image, main.ELECTRODRAGON_LABEL, -6.2), 21)
+        empty = image.convert("L").convert("RGB")
+        app = app_without_gui()
+        app.settings = main.replace(app.settings, electrodragon_count=10)
+        app._army_preview_counts = {"electrodragon": 10}
+        app._wait = Mock()
+        app._click = Mock(return_value=True)
+        app._battle_capture = Mock(side_effect=lambda _: empty if app._click.call_count >= 25 else image)
+        app.stable_troop_count = Mock(side_effect=[80, 7, 4, 1, 0])
+        with patch.object(main, "battle_hud_visible", return_value=True):
+            self.assertEqual(app.deploy_unit(SimpleNamespace(width=1765), main.ELECTRODRAGON_LABEL,
+                                             main.ELECTRODRAGON_SLOT,
+                                             main.layout_points("ELECTRODRAGON_PERIMETER_POINTS"), burst=True), 10)
+        self.assertEqual(app._click.call_count, 25)
+
+    def test_live_card_that_never_empties_stops_residual_clicks(self):
+        image = Image.new("RGB", (1765, 993))
+        with Image.open(Path(__file__).parent / "testdata" / "residual_electro_x1.png") as crop:
+            image.paste(crop, (240, 820))
+        app = app_without_gui()
+        app.settings = main.replace(app.settings, electrodragon_count=10)
+        app._army_preview_counts = {"electrodragon": 10}
+        app._wait = Mock()
+        app._battle_capture = Mock(return_value=image)
+        app._click = Mock(return_value=True)
+        app.stable_troop_count = Mock(side_effect=[80, 7, 4, 1, 0])
+        with patch.object(main, "battle_hud_visible", return_value=True):
+            with self.assertRaisesRegex(RuntimeError, "toujours active"):
+                app.deploy_unit(SimpleNamespace(width=1765), main.ELECTRODRAGON_LABEL,
+                                main.ELECTRODRAGON_SLOT,
+                                main.layout_points("ELECTRODRAGON_PERIMETER_POINTS"), burst=True)
+        self.assertEqual(app._click.call_count, 45)
+
+    def test_rejected_perimeter_retries_on_outer_line(self):
+        app = app_without_gui()
+        app.settings = main.replace(app.settings, electrodragon_count=1)
+        app._wait = Mock()
+        app._battle_capture = Mock(return_value=object())
+        app._click = Mock(return_value=True)
+        app.stable_troop_count = Mock(side_effect=[1, 1, 1, 0])
+        points = [(18.0, 40.0), (26.0, 30.0)]
+        self.assertEqual(app.deploy_unit(object(), main.ELECTRODRAGON_LABEL,
+                                         main.ELECTRODRAGON_SLOT, points, burst=True), 1)
+        drops = [call.args[1:] for call in app._click.call_args_list][2::2]
+        self.assertEqual(drops, points + [(13.0, 40.0)])
+        self.assertTrue(any("ligne de pose extérieure" in event for event in app.events.queue))
+
+    def test_battle_x1_to_x9_recovers_ten_without_army_preview(self):
+        app = app_without_gui()
+        app.settings = main.replace(app.settings, electrodragon_count=10)
+        app._wait = Mock()
+        app._battle_capture = Mock(return_value=object())
+        app._click = Mock(return_value=True)
+        app.stable_troop_count = Mock(side_effect=[1, 9, 6, 3, 0])
+        points = main.layout_points("ELECTRODRAGON_PERIMETER_POINTS")
+        self.assertEqual(app.deploy_unit(object(), main.ELECTRODRAGON_LABEL,
+                                         main.ELECTRODRAGON_SLOT, points, burst=True), 10)
+        self.assertTrue(any("initial lu x1" in event for event in app.events.queue))
+
+    def test_late_x1_ocr_does_not_rewrite_verified_initial_ten(self):
+        app = app_without_gui()
+        app.settings = main.replace(app.settings, electrodragon_count=10)
+        app._army_preview_counts = {"electrodragon": 10}
+        app._wait = Mock()
+        app._battle_capture = Mock(return_value=object())
+        app._click = Mock(return_value=True)
+        app.stable_troop_count = Mock(side_effect=[80, 7, 4, 1, 5])
+        self.assertEqual(app.deploy_unit(object(), main.ELECTRODRAGON_LABEL,
+                                         main.ELECTRODRAGON_SLOT,
+                                         main.layout_points("ELECTRODRAGON_PERIMETER_POINTS"), burst=True), 10)
+        self.assertFalse(any("initial lu x1" in event for event in app.events.queue))
+
     def test_dragon_artwork_with_partial_magenta_is_recognized(self):
         image = Image.new("RGB", (100, 100), (35, 35, 35))
         image.paste((120, 25, 115), (0, 0, 31, 100))
@@ -81,6 +203,12 @@ class CancellationRegressions(unittest.TestCase):
         self.assertEqual(clicks[::2], [(53.6, 92.5)] * 5)
         self.assertEqual(clicks[1::2], main.layout_points("RAGE_DROP_POINTS"))
 
+    def test_rage_five_counter_read_as_xs_in_live_battle(self):
+        image = Image.new("RGB", (1765, 993))
+        with Image.open(Path(__file__).parent / "testdata" / "rage_five_xs.png") as crop:
+            image.paste(crop, (900, 800))
+        self.assertEqual(main.read_rage_count(image, 57.1), 5)
+
     def test_rage_targets_follow_confirmed_troop_drops(self):
         app = app_without_gui()
         app._wait = Mock()
@@ -93,6 +221,17 @@ class CancellationRegressions(unittest.TestCase):
         actual = [call.args[1:] for call in app._click.call_args_list][1::2]
         self.assertEqual(actual, main.rage_targets(app._troop_drop_points, 3))
         self.assertNotEqual(actual, main.layout_points("RAGE_DROP_POINTS")[:3])
+
+    def test_rage_waits_for_count_animation_without_clicking_again(self):
+        app = app_without_gui()
+        app._wait = Mock()
+        app._battle_capture = Mock(return_value=Image.new('RGB',(1323,744)))
+        app._click = Mock(return_value=True)
+        app._troop_drop_points = [(28,26)]
+        app.stable_rage_count = Mock(side_effect=[2,None,1,0])
+        with patch.object(main,'rage_card_center',return_value=59.85):
+            self.assertEqual(app.deploy_rage_spells(object(),0),2)
+        self.assertEqual(app._click.call_count,4)
 
     def test_rage_is_cast_after_troops_before_heroes(self):
         app = app_without_gui()
@@ -144,7 +283,7 @@ class CancellationRegressions(unittest.TestCase):
         app.stable_troop_count = Mock(side_effect=[80, 0])
         window = type("WideWindow", (), {"width": 1765})()
         self.assertEqual(app.deploy_unit(window, "Dragon", (23, 92), [(18, 40)], burst=True), 1)
-        self.assertTrue(any("quantité configurée" in str(event) for event in app.events.queue))
+        self.assertTrue(any("issue de configuration" in str(event) for event in app.events.queue))
 
     def test_wide_live_client_uses_configured_count_when_counter_is_empty(self):
         app = app_without_gui()
@@ -338,6 +477,20 @@ class GeometryRegressions(unittest.TestCase):
         self.geometry = main.ClientGeometry(1280, 720, 8, 31, 1296, 759)
         self.event = threading.Event()
 
+    def test_partial_red_printwindow_frame_is_retried(self):
+        incomplete = Image.new('RGB', (1765,993), (80,90,70))
+        incomplete.paste((255,0,0), (0,510,1765,993))
+        complete = Image.new('RGB', (1765,993), (80,90,70))
+        self.assertTrue(main.capture_render_incomplete(incomplete))
+        self.assertFalse(main.capture_render_incomplete(complete))
+        app = app_without_gui()
+        app._wait = Mock()
+        with patch.object(main.WindowDriver, 'capture', side_effect=[incomplete,complete]) as capture, \
+             patch.object(main, 'connection_retry_point', return_value=None):
+            self.assertIs(app._capture(self.window), complete)
+        self.assertEqual(capture.call_count, 2)
+        app._wait.assert_called_once_with(.3)
+
     def test_zoom_uses_screen_coordinates_and_negative_wheel_delta(self):
         def translate(hwnd, point):
             self.assertEqual((point._obj.x, point._obj.y), (640, 360))
@@ -397,6 +550,16 @@ class GeometryRegressions(unittest.TestCase):
                 main.WindowDriver.click_percent(self.window, 50, 50)
         post.assert_not_called()
 
+    def test_custom_1280_by_780_calibration_maps_click_to_client(self):
+        geometry = main.ClientGeometry(1280, 780, 0, 0, 1280, 780)
+        settings = main.replace(main.Settings(), layout_aspect_ratio=1280 / 780)
+        with main.operation_context(self.event, settings), \
+             patch.object(main.WindowDriver, "client_geometry", return_value=geometry), \
+             patch.object(main.USER32, "PostMessageW", return_value=True) as post:
+            main._operation.last_capture = (self.window.hwnd, geometry)
+            self.assertTrue(main.WindowDriver.click_percent(self.window, 50, 50))
+        self.assertEqual(post.call_args_list[0].args[-1], (390 << 16) | 640)
+
     def test_closed_selected_window_does_not_switch_account(self):
         other = main.GameWindow(456, "Clash of Clans - autre compte", 1920, 1080)
         with patch.object(main.WindowDriver, "list_windows", return_value=[other]):
@@ -404,6 +567,52 @@ class GeometryRegressions(unittest.TestCase):
 
 
 class DeploymentRegressions(unittest.TestCase):
+    def test_compact_battle_counter_tracks_one_real_drop(self):
+        before = Image.open(Path(__file__).parent/'testdata/manual_battle_point_1323.png')
+        after = Image.open(Path(__file__).parent/'testdata/manual_drop_result_1323.png')
+        with before, after:
+            self.assertEqual(main.read_troop_count(before, main.ELECTRODRAGON_LABEL, -6.2), 10)
+            self.assertEqual(main.read_troop_count(after, main.ELECTRODRAGON_LABEL, -6.2), 9)
+
+    def test_compact_battle_counter_rejects_neighbor_badge(self):
+        with Image.open(Path(__file__).parent/'testdata/attack_adaptive_after_two_1323.png') as image:
+            self.assertEqual(main.read_troop_count(image, main.ELECTRODRAGON_LABEL, -6.2), 8)
+
+    def test_compact_battle_counter_reads_all_live_glyphs(self):
+        fixtures = {10:'manual_battle_point_1323.png', 9:'manual_drop_result_1323.png',
+                    8:'attack_adaptive_after_two_1323.png', 7:'attack_adaptive_after_three_1323.png'}
+        fixtures.update({count:f'battle_badge_x{count}.png' for count in range(7)})
+        for count, filename in fixtures.items():
+            with self.subTest(count=count), Image.open(Path(__file__).parent/'testdata'/filename) as image:
+                self.assertEqual(main.read_troop_count(image, main.ELECTRODRAGON_LABEL, -6.2), count)
+                if 1 <= count <= 6:
+                    scaled = image.resize((1387,780),Image.Resampling.BICUBIC)
+                    self.assertEqual(main.read_troop_count(scaled, main.ELECTRODRAGON_LABEL, -6.2), count)
+
+    def test_deployment_line_has_points_for_upper_left_probe(self):
+        points = main.layout_points('ELECTRODRAGON_PERIMETER_POINTS')
+        self.assertEqual(len(points), 16)
+        self.assertTrue(all(15 <= x <= 40 and 10 <= y <= 45 for x,y in points))
+
+    def test_compact_electro_probes_until_card_count_falls(self):
+        app = app_without_gui()
+        app._battle_capture = Mock(return_value=Image.new('RGB',(1323,744),'white'))
+        app._click = Mock(return_value=True)
+        app._wait = Mock()
+        app.stable_troop_count = Mock(side_effect=[10,9] + list(range(8,-1,-1)))
+        app._troop_drop_points = []
+        self.assertEqual(app._deploy_compact_electro(object(),(17,92.5),[(28,25.6)],10,-6.2),10)
+        self.assertEqual(app._confirmed_drop_point,(28,20.6))
+        self.assertEqual(len(app._troop_drop_points),10)
+
+    def test_compact_army_badge_x10_is_read_before_attack(self):
+        with Image.open(Path(__file__).parent/'testdata/army_wait_current_1323.png') as image:
+            settings = main.replace(main.load_settings(), electrodragon_count=10)
+            ready, detail, observed = main.army_readiness(image, settings)
+        self.assertTrue(ready, detail)
+        self.assertEqual(observed['electrodragon'], 10)
+        self.assertEqual(observed['rage'], 5)
+
     def test_zoom_precedes_deployment_on_every_chained_attack(self):
         app = app_without_gui()
         app.settings = main.replace(app.settings, upgrade_recommended=False)
@@ -424,10 +633,27 @@ class DeploymentRegressions(unittest.TestCase):
         with Image.open(captures / "suggested_menu.png") as before, \
              Image.open(captures / "wall_group_two_no_ten.png") as after:
             icons = main.find_collectible_icons(before)
-            self.assertEqual(len(icons), 12)
-            self.assertEqual({kind for kind, *_ in icons}, {"gold", "elixir"})
+            self.assertEqual(len(icons), 14)
+            self.assertEqual({kind for kind, *_ in icons}, {"gold", "elixir", "dark"})
             self.assertEqual(main.find_collectible_icons(after), [])
             self.assertFalse(main.collectible_icon_still_visible(after, "gold", 612, 322))
+            self.assertFalse(main.collectible_icon_still_visible(after, "dark", 400, 399))
+
+    def test_dark_drill_collection_is_counted_after_its_bubble_disappears(self):
+        app = app_without_gui()
+        app._capture = Mock(return_value=Image.new("RGB", (1920, 1080)))
+        app._click = Mock(return_value=True)
+        app._wait = Mock()
+        app.stable_reserves = Mock(return_value=(3_000_000, 4_000_000))
+        with patch.object(main, "village_home_ready", return_value=True), \
+             patch.object(main, "builders_menu_open", return_value=False), \
+             patch.object(main, "daily_reward_open", return_value=False), \
+             patch.object(main, "wall_selection_open", return_value=False), \
+             patch.object(main, "find_collectible_icons", return_value=[("dark", 400, 399, 0)]), \
+             patch.object(main, "collectible_icon_still_visible", side_effect=[True, False]):
+            self.assertEqual(app.collect_village_resources(object()), 1)
+        app._click.assert_called_once_with(unittest.mock.ANY, 400 * 100 / 1920, 399 * 100 / 1080)
+        self.assertTrue(any("1 foreuse" in str(event) for event in app.events.queue))
 
     def test_collection_does_not_click_through_builder_menu(self):
         app = app_without_gui()
@@ -436,6 +662,22 @@ class DeploymentRegressions(unittest.TestCase):
             app._click = Mock()
             self.assertEqual(app.collect_village_resources(object()), 0)
             app._click.assert_not_called()
+
+    def test_false_collectible_wall_selection_is_cleared_before_walls(self):
+        app = app_without_gui()
+        app._capture = Mock(return_value=Image.new("RGB", (1765, 993)))
+        app._click = Mock(return_value=True)
+        app._wait = Mock()
+        app.stable_reserves = Mock(return_value=(6_000_000, 6_000_000))
+        with patch.object(main, "village_home_ready", return_value=True), \
+             patch.object(main, "builders_menu_open", return_value=False), \
+             patch.object(main, "daily_reward_open", return_value=False), \
+             patch.object(main, "wall_selection_open", side_effect=[False, False, False, True, False]), \
+             patch.object(main, "find_collectible_icons", return_value=[("gold", 1176, 296, 1)]), \
+             patch.object(main, "collectible_icon_still_visible", return_value=True):
+            self.assertEqual(app.collect_village_resources(object()), 0)
+        self.assertEqual(app._click.call_count, 2)
+        self.assertEqual(app._click.call_args_list[0], app._click.call_args_list[1])
 
     def test_stop_interrupts_zoom_before_another_wheel_message(self):
         app = app_without_gui()
@@ -713,6 +955,12 @@ if __name__ == "__main__":
 
 
 class ConnectionRegressions(unittest.TestCase):
+    def test_village_takes_priority_over_a_spurious_battle_ocr_token(self):
+        image = Image.new("RGB", (1765, 993))
+        with patch.object(main, "village_home_ready", return_value=True), \
+             patch.object(main, "normalized_screen_text", return_value="degatsgeneraux"):
+            self.assertFalse(main.battle_hud_visible(image))
+
     def test_real_connection_dialog_returns_only_retry_button(self):
         with Image.open(Path(__file__).parent/'testdata/connection_lost.png') as image:
             point=main.connection_retry_point(image)

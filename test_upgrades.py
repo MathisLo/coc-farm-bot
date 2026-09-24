@@ -8,6 +8,26 @@ import upgrades
 
 
 class UpgradeTests(unittest.TestCase):
+    def test_two_unstable_building_rows_return_to_farming(self):
+        app = app_without_gui()
+        app._capture = Mock(return_value=Image.new('RGB',(1323,744)))
+        app._wait = Mock()
+        app._wall_click = Mock()
+        app.stable_reserves = Mock(return_value=(5_000_000,5_000_000))
+        choices = [('Tour A',30,4_000_000,'or'),('Tour B',35,3_000_000,'or')]
+        with patch.object(upgrades,'stable_builders',return_value=3), \
+             patch.object(main,'builders_menu_open',return_value=True), \
+             patch.object(upgrades,'find_payable_upgrade',side_effect=choices) as find, \
+             patch.object(upgrades,'builder_price_resource',return_value=None):
+            self.assertEqual(upgrades.upgrade_suggested(app,object()),0)
+        self.assertEqual(find.call_count,2)
+        app._wall_click.assert_not_called()
+
+    def test_wall_ocr_fragments_never_become_building_candidates(self):
+        for title in ('Rempart x218', 'mpart', 'lempart', '\\empart 218', 'x 182'):
+            self.assertTrue(upgrades.is_wall_row(title), title)
+        self.assertFalse(upgrades.is_wall_row('Catapulte explosive'))
+
     def test_many_running_builders_do_not_hide_suggested_section(self):
         with Image.open(Path(__file__).parent/'testdata/new_account_builder_menu.png') as im:
             app = app_without_gui()
@@ -16,6 +36,26 @@ class UpgradeTests(unittest.TestCase):
             with patch.object(main.WindowDriver, 'scroll_menu', return_value=True) as scroll:
                 upgrades.scroll_builders_to_top(app, 'window')
             scroll.assert_not_called()
+
+    def test_live_builder_header_enpours_is_already_at_top(self):
+        with Image.open(Path(__file__).parent/'testdata/builders_after_upgrade_1765.png') as image:
+            app = app_without_gui()
+            app._capture = Mock(return_value=image)
+            with patch.object(main.WindowDriver, 'scroll_menu', return_value=True) as scroll:
+                upgrades.scroll_builders_to_top(app, 'window')
+            scroll.assert_not_called()
+
+    def test_compact_builder_header_encours_is_already_at_top(self):
+        with Image.open(Path(__file__).parent/'testdata/builders_goblin_counter_1323.png') as image:
+            app = app_without_gui()
+            app._capture = Mock(return_value=image)
+            with patch.object(main.WindowDriver, 'scroll_menu', return_value=True) as scroll:
+                upgrades.scroll_builders_to_top(app, 'window')
+            scroll.assert_not_called()
+
+    def test_goblin_counter_is_not_village_builder_count(self):
+        with Image.open(Path(__file__).parent/'testdata/builders_goblin_counter_1323.png') as image:
+            self.assertEqual(upgrades.builder_count(image, with_total=True), (3, 6))
 
     def test_live_menu_accepts_stable_top_without_suggested_heading(self):
         with Image.open(Path(__file__).parent/'testdata/new_account_builder_menu.png') as im:
@@ -66,6 +106,19 @@ class UpgradeTests(unittest.TestCase):
             self.assertEqual(app.upgrade_walls_to_reserve('window', independent=True), 0)
         self.assertEqual(scroll.call_count, 20)
         app._wall_click.assert_called_once()
+
+    def test_wall_search_does_not_scroll_when_builder_menu_never_opens(self):
+        app = app_without_gui()
+        app._capture = Mock(return_value=Image.new("RGB", (1765, 993)))
+        app._wall_click = Mock()
+        app._wait = Mock(return_value=False)
+        app.stable_reserves = Mock(return_value=(6_000_000, 6_000_000))
+        with patch.object(main, "builders_menu_open", return_value=False), \
+             patch.object(main, "find_wall_menu_item", return_value=None), \
+             patch.object(upgrades, "scroll_builders_to_top") as scroll:
+            self.assertEqual(app.upgrade_walls_to_reserve("window", independent=True), 0)
+        app._wall_click.assert_called_once()
+        scroll.assert_not_called()
 
     def test_wall_row_is_selected_after_menu_slides_to_a_new_position(self):
         app = app_without_gui()
@@ -177,6 +230,15 @@ class UpgradeTests(unittest.TestCase):
             self.assertFalse(main.single_wall_confirmation_matches(im,750000,'or'))
             self.assertFalse(main.single_wall_confirmation_matches(im,500000,'élixir'))
         self.assertEqual(main.layout_values('WALL_CONFIRM_BUTTON'),(70,87))
+
+    def test_live_vm_single_wall_confirmation_reads_four_million_gold(self):
+        with Image.open(Path(__file__).parent / 'testdata' / 'wall_single_4m_1765.png') as image:
+            self.assertTrue(main.single_wall_confirmation_matches(image, 4_000_000, 'or'))
+            self.assertFalse(main.single_wall_confirmation_matches(image, 5_000_000, 'or'))
+            self.assertFalse(main.single_wall_confirmation_matches(image, 4_000_000, 'élixir'))
+            self.assertFalse(main.village_home_ready(image))
+            with patch.object(main, 'has_all_screen_text', return_value=False):
+                self.assertTrue(main.village_home_ready(image))
 
     def test_last_wall_without_x1_is_bought_with_individual_confirmation(self):
         app = app_without_gui()
@@ -411,16 +473,29 @@ class UpgradeTests(unittest.TestCase):
             return True
 
         def visible_items(image, include_others=False, include_town_hall=False):
+            if not include_others:
+                return []
             return [item for item in pages[position[0]]
                     if include_town_hall or not upgrades.is_town_hall(item[0])]
 
         with patch.object(main.WindowDriver, 'scroll_menu', side_effect=scroll), \
+                patch.object(main, 'builders_menu_open', return_value=True), \
                 patch.object(upgrades, 'scroll_builders_to_top', side_effect=lambda app,window: position.__setitem__(0,0)), \
                 patch.object(main, 'read_text', side_effect=lambda *args, **kwargs: str(position[0])), \
                 patch.object(upgrades, 'suggested_items', side_effect=visible_items):
             choice = upgrades.find_payable_upgrade(app, 'window', 3, (10_000_000, 2_100_000))
         self.assertEqual(choice, pages[1][0])
         self.assertEqual(position[0], 1)
+
+    def test_closed_builder_menu_never_scrolls_the_village(self):
+        app = app_without_gui()
+        app._capture = Mock(return_value=Image.new('RGB', (1323, 744)))
+        app._trace = Mock()
+        with patch.object(main, 'builders_menu_open', return_value=False), \
+             patch.object(main.WindowDriver, 'scroll_menu') as scroll:
+            with self.assertRaisesRegex(RuntimeError, 'Liste des ouvriers absente'):
+                upgrades.scroll_builders_to_top(app, 'window')
+        scroll.assert_not_called()
 
     def test_automatic_walls_require_a_confirmed_free_builder(self):
         for free in (None,0):
@@ -518,6 +593,62 @@ class UpgradeTests(unittest.TestCase):
             items=upgrades.suggested_items(im)
         self.assertEqual(len(items),1)
         self.assertEqual((items[0][0],items[0][2],items[0][3]),('Piège à ressort',500000,'or'))
+
+    def test_expensive_vm_builder_rows_keep_separate_price_and_icon_crops(self):
+        with Image.open(Path(__file__).parent / 'testdata' / 'builders_expensive_1765.png') as image:
+            items = upgrades.suggested_items(image, include_others=True)
+            suggested = upgrades.suggested_items(image)
+        self.assertTrue(any('sorciers' in title and cost == 5_500_000 and resource == 'or'
+                            for title, _, cost, resource in items))
+        self.assertTrue(any('Catapulte' in title and cost == 4_000_000 and resource == '\u00e9lixir'
+                            for title, _, cost, resource in items))
+        self.assertTrue(any('sorciers' in title and cost == 5_500_000 for title, _, cost, _ in suggested))
+
+    def test_compact_builder_price_excludes_elixir_icon(self):
+        with Image.open(Path(__file__).parent / 'testdata' / 'builders_current_1323.png') as image:
+            items = upgrades.suggested_items(image, include_others=True)
+        self.assertTrue(any('Catapulte explosive' in title and cost == 4_000_000
+                            and resource == 'élixir' for title, _, cost, resource in items))
+        self.assertFalse(any(cost == 4_400_000 for _, _, cost, _ in items))
+        self.assertFalse(any('mpart' in title.lower() for title, _, _, _ in items))
+
+    def test_compact_catapult_direct_upgrade_requires_matching_price_resource_and_green_button(self):
+        with Image.open(Path(__file__).parent / 'testdata' / 'catapult_selected_1323.png') as image:
+            self.assertEqual(upgrades.direct_upgrade_button(image, 'Catapulte explosive', 4_000_000, 'élixir'),
+                             (83.0, 58.0))
+            self.assertIsNone(upgrades.direct_upgrade_button(image, 'Catapulte explosive', 3_000_000, 'élixir'))
+            self.assertIsNone(upgrades.direct_upgrade_button(image, 'Catapulte explosive', 4_000_000, 'or'))
+            self.assertIsNone(upgrades.direct_upgrade_button(image, 'Tour de sorciers', 4_000_000, 'élixir'))
+
+    def test_compact_canon_panel_and_confirmation_require_exact_price(self):
+        with Image.open(Path(__file__).parent/'testdata/canon_selected_1323.png') as image:
+            self.assertTrue(upgrades.selected_panel_matches(image,'anon',3_000_000,'or'))
+            self.assertFalse(upgrades.selected_panel_matches(image,'anon',3_200_000,'or'))
+            self.assertFalse(upgrades.selected_panel_matches(image,'anon',3_000_000,'élixir'))
+        with Image.open(Path(__file__).parent/'testdata/canon_confirmation_1323.png') as image:
+            self.assertTrue(any(upgrades.title_matches_heading('anon', heading)
+                                for heading in upgrades.confirmation_headings(image)))
+            self.assertEqual(upgrades.confirmation_cost(image),3_000_000)
+
+    def test_compact_two_button_panel_has_a_different_price_position(self):
+        with Image.open(Path(__file__).parent/'testdata/bomb_aerial_overlay_1323.png') as image:
+            self.assertTrue(upgrades.selected_panel_matches(image,'ombe aérienne',3_000_000,'or'))
+            self.assertFalse(upgrades.selected_panel_matches(image,'ombe aérienne',3_200_000,'or'))
+
+    def test_selected_wizard_tower_requires_title_price_and_resource(self):
+        with Image.open(Path(__file__).parent / 'testdata' / 'wizard_selected_1765.png') as image:
+            self.assertTrue(upgrades.selected_panel_matches(image, 'our de sorciers', 5_500_000, 'or'))
+            self.assertFalse(upgrades.selected_panel_matches(image, "our d'archères", 5_500_000, 'or'))
+            self.assertFalse(upgrades.selected_panel_matches(image, 'our de sorciers', 4_000_000, 'or'))
+
+    def test_wizard_confirmation_cost_recovers_stylized_five(self):
+        with Image.open(Path(__file__).parent / 'testdata' / 'wizard_confirmation_1765.png') as image:
+            self.assertEqual(upgrades.confirmation_cost(image), 5_500_000)
+
+    def test_six_digit_gold_balance_after_building_upgrade(self):
+        with Image.open(Path(__file__).parent / 'testdata' / 'wizard_upgraded_1765.png') as image:
+            self.assertEqual(main.read_safe_reserve(image, 'gold'), 654_905)
+            self.assertEqual(upgrades.builder_count(image), 2)
 
     def test_reserves_survive_partial_and_conflicting_ocr(self):
         with Image.open(Path(__file__).parent/'testdata/reserves_one_million.png') as im:

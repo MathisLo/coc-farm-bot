@@ -35,6 +35,7 @@ class CalibrationDialog:
         self.selection = StringVar(value=next(iter(self.keys)))
         self.instructions = StringVar()
         self.coordinates = StringVar()
+        self.resolution = StringVar()
         body = ttk.Frame(self.window, padding=12)
         body.pack(fill="both", expand=True)
         ttk.Label(body, text="Choisir un élément, puis cliquer pour un point ou tracer un rectangle pour une zone de lecture.", wraplength=900).pack(anchor="w")
@@ -43,6 +44,7 @@ class CalibrationDialog:
         combo.pack(fill="x")
         combo.bind("<<ComboboxSelected>>", self.redraw)
         ttk.Label(body, textvariable=self.instructions).pack(anchor="w", pady=6)
+        ttk.Label(body, textvariable=self.resolution).pack(anchor="w")
         max_width = min(1000, parent.winfo_screenwidth() - 80)
         max_height = min(560, parent.winfo_screenheight() - 300)
         self.preview_size = (max(300, max_width), max(180, max_height))
@@ -66,6 +68,7 @@ class CalibrationDialog:
             messagebox.showerror("Format différent", "Les captures d’un même calibrage doivent avoir le même format. Annuler puis rouvrir le calibrage pour changer de format.", parent=self.window)
             return
         self.image = image.copy()
+        self.resolution.set(f"Fenêtre de jeu : {image.width} x {image.height} pixels (format enregistré avec le calibrage)")
         preview = image.copy()
         preview.thumbnail(self.preview_size)
         self.photo = ImageTk.PhotoImage(preview, master=self.window)

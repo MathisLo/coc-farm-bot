@@ -225,6 +225,7 @@ HERO_DROP_POINTS = ((15.0, 40.0), (85.0, 40.0), (15.0, 49.0))
 ELECTRODRAGON_LABEL = "\u00c9lectro-dragon"
 RAGE_SLOT = (59.85, 92.5)
 RAGE_DROP_POINTS = ((24.0, 33.0), (31.0, 25.0), (37.0, 17.0), (20.0, 38.0), (34.0, 21.0))
+ARMY_REQUIRED_RAGE = 5
 # The regular builder counter is left of the laboratory counter on the
 # current Google Play Games render. 49% lands on the laboratory panel and
 # makes the upgrade scan see troops/spells instead of buildings.
@@ -244,8 +245,8 @@ WALL_ADD_ONE_BUTTON = (50.0, 80.0)
 WALL_MULTI_GOLD_BUTTON = (58.3, 80.0)
 WALL_MULTI_ELIXIR_BUTTON = (66.5, 80.0)
 WALL_MULTI_CONFIRM_BUTTON = (59.0, 62.0)
-# A single upper-left attack edge, away from the central no-deploy area.
-# Every unit and hero uses this same straight line, never the opposite edge.
+# A single upper-left attack edge. Compact clients verify the first usable
+# point against the live troop counter before deploying the rest of the army.
 ELECTRODRAGON_PERIMETER_POINTS = [
     (18.0 + 20.0*i/15, 40.0 - 27.0*i/15) for i in range(16)
 ]
@@ -465,6 +466,8 @@ def read_safe_reserve(image: Image.Image, resource: str) -> int | None:
                 if value is not None and 0 <= value <= 20_000_000:
                     values.append(value)
         if values:
+            if any(value >= 1_000_000 for value in values):
+                values = [value for value in values if value >= 1_000_000]
             agreed = [value for value in set(values) if values.count(value) >= 2]
             if len(agreed) == 1:
                 return agreed[0]
@@ -491,11 +494,13 @@ def read_safe_reserve(image: Image.Image, resource: str) -> int | None:
 
 
 def parse_reserve_number(text: str) -> int | None:
-    corrected = text.translate(str.maketrans({"O": "0", "o": "0", "I": "1", "l": "1", "i": "1", "S": "5", "s": "5", "B": "8", "g": "9", "G": "9", "-": " ", "*": " ", ",": " ", "x": " ", "L": " "}))
+    corrected = text.translate(str.maketrans({"O": "0", "o": "0", "I": "1", "l": "1", "i": "1", "S": "5", "s": "5", "B": "8", "g": "9", "G": "9", "-": " ", "*": " ", ",": " ", ".": " ", "x": " ", "L": " "}))
     match = re.search(r"(?<!\d)(\d{1,2})\s+(\d{3})\s+(\d{3})(?!\d)", corrected)
     if match: return int("".join(match.groups()))
     stripped = corrected.strip(" ,-.")
     digits = re.sub(r"\s+", "", stripped)
+    if re.fullmatch(r"\d{3}\s+\d{3}|\d{6}", stripped):
+        return int(digits)
     return int(digits) if re.fullmatch(r"\d{7,8}|\d{1,2}\s+\d{6}", stripped) else None
 
 
@@ -532,6 +537,11 @@ def wall_batch_size(balance: int, unit_cost: int, available: int) -> int:
     return max(0, min(available, (balance - WALL_RESERVE) // unit_cost)) if unit_cost > 0 else 0
 
 
+def wall_spend_preserves_reserve(balances: tuple[int, int] | None, resource: str, amount: int) -> bool:
+    return (balances is not None and resource in ("or", "élixir")
+            and balances[0 if resource == "or" else 1] - amount >= WALL_RESERVE)
+
+
 def troop_card_kind(image: Image.Image, roi: Roi) -> str | None:
     """Recognize the two supported troop cards by their distinctive artwork colors."""
     pixels = crop_percent(image, roi).convert("RGB").get_flattened_data()
@@ -544,6 +554,79 @@ def troop_card_kind(image: Image.Image, roi: Roi) -> str | None:
     if magenta >= .28 and blue < .5:
         return "dragon"
     return None
+
+
+def army_fraction(image: Image.Image, roi: Roi) -> tuple[int, int] | None:
+    for scale in (2, 3, 4, 5):
+        raw = read_text(crop_percent(image, roi), scale=scale).casefold()
+        raw = raw.translate(str.maketrans({"o": "0", "i": "1", "l": "1"}))
+        match = re.search(r"(\d{1,3})\s*/\s*(\d{1,3})", raw)
+        if match and 0 < int(match.group(2)) and int(match.group(1)) <= int(match.group(2)):
+            return int(match.group(1)), int(match.group(2))
+    return None
+
+
+def army_card_count(image: Image.Image, roi: Roi) -> int | None:
+    for scale in (2, 3, 5):
+        raw = read_text(crop_percent(image, roi), scale=scale).casefold()
+        raw = raw.translate(str.maketrans({"o": "0", "i": "1", "l": "1", "×": "x"}))
+        match = re.search(r"\bx\s*(\d{1,2})\b", raw)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def compact_electro_counter(image: Image.Image, roi: Roi) -> int | None:
+    """Read the small white digit using verified compact-client glyphs."""
+    badge = crop_percent(image, Roi(roi.x1 + 1.7, 85.25, roi.x1 + 2.75, 87.65)).convert('RGB')
+    mask = Image.frombytes('L', badge.size, bytes(
+        255 if min(pixel) > 170 else 0 for pixel in badge.get_flattened_data()
+    )).resize((14, 18), Image.Resampling.NEAREST)
+    with Image.open(ASSET_DIR / 'electro_counter_compact.png') as sprite:
+        scores = sorted((ImageStat.Stat(ImageChops.difference(
+            mask, sprite.crop((0, (count-1)*18, 14, count*18))
+        )).mean[0], count) for count in range(1, 11))
+    if scores[0][0] <= 35 and scores[1][0] - scores[0][0] >= 8:
+        return scores[0][1]
+    return None
+
+
+def army_readiness(image: Image.Image, settings: Settings) -> tuple[bool, str, dict[str, int]]:
+    """Read the actual prepared army before the matchmaking click."""
+    troops = army_fraction(image, Roi(44, 22, 51, 28))
+    heroes = army_fraction(image, Roi(8, 23, 13, 28))
+    if heroes is None and image.width < 1500:
+        heroes = army_fraction(image, Roi(7, 23, 14, 28))
+    spells = army_fraction(image, Roi(45, 46, 51, 51))
+    troop_cards = {}
+    for index in range(7):
+        left = 44.3 + index * 7.3
+        kind = troop_card_kind(image, Roi(left, 33, left + 6.8, 41))
+        if kind:
+            count = army_card_count(image, Roi(left - .3, 28, left + 6.8, 42))
+            if count is None and image.width < 1500:
+                count = army_card_count(image, Roi(left - .3, 29, left + 2.7, 34))
+            troop_cards[kind] = count
+    rage_count = None
+    for index in range(5):
+        left = 44.3 + index * 7.3
+        if rage_card_score(image, Roi(left + .7, 54, left + 6.7, 63)) >= .3:
+            rage_count = army_card_count(image, Roi(left - .3, 51, left + 7.7, 65))
+            break
+    observed: dict[str, int | None] = {"electrodragon": troop_cards.get("electrodragon"),
+                "dragon": troop_cards.get("dragon"), "rage": rage_count}
+    if troops is None or troops[0] != troops[1]:
+        return False, f"places de troupe {troops or 'illisibles'}", observed
+    if settings.electrodragon_count and (observed["electrodragon"] is None or
+                                         observed["electrodragon"] < settings.electrodragon_count):
+        return False, f"électro-dragons {observed['electrodragon']} / {settings.electrodragon_count}", observed
+    if settings.dragon_count and "dragon" not in troop_cards:
+        return False, "carte Dragon absente", observed
+    if settings.deploy_heroes and (heroes is None or heroes[0] < 4):
+        return False, f"héros {heroes or 'illisibles'}", observed
+    if spells is None or spells[0] < ARMY_REQUIRED_RAGE * 2 or rage_count is None or rage_count < ARMY_REQUIRED_RAGE:
+        return False, f"Rage {rage_count} / {ARMY_REQUIRED_RAGE}, places de sort {spells or 'illisibles'}", observed
+    return True, f"troupes {troops[0]}/{troops[1]}, héros {heroes}, Rage x{rage_count}", observed
 
 
 def troop_card_frame_visible(image: Image.Image, center: float) -> bool:
@@ -662,6 +745,16 @@ def read_troop_count(image: Image.Image, label: str, slot_offset: float | None =
     if ImageStat.Stat(icon).mean[0] < 30:
         return 0
     roi = shifted_roi(layout_roi("TROOP_COUNT_ROIS", label), slot_offset)
+    if image.width < 1500 and label == ELECTRODRAGON_LABEL:
+        badge = crop_percent(image, Roi(roi.x1 - .3, roi.y1 - .69,
+                                        roi.x1 + 3.2, roi.y2 - 1.15))
+        for scale in (2, 3, 4):
+            raw = read_text(badge, scale=scale).casefold()
+            raw = raw.translate(str.maketrans({'o': '0', 'i': '1', 'l': '1'}))
+            match = re.fullmatch(r'x\s*(\d{1,2})', raw.strip())
+            if match:
+                return int(match.group(1))
+        return compact_electro_counter(image, roi)
     # The counter moves down when the deployment controls appear. Include
     # that motion and remove the blue card before asking OCR to read x1/x2.
     counter = crop_percent(image, Roi(max(0, roi.x1 - .5), max(0, roi.y1 - .6),
@@ -672,7 +765,7 @@ def read_troop_count(image: Image.Image, label: str, slot_offset: float | None =
     for scale in (2, 4):
         raw = read_text(counter, scale=scale).casefold().replace("xi", "x8").replace("xb", "x8")
         match = re.fullmatch(r"[x×]\s*(\d{1,2})", raw.strip())
-        if match:
+        if match and int(match.group(1)) <= 50:
             return int(match.group(1))
     # A tight crop removes the next card; Windows OCR sometimes adds one
     # spurious digit before an otherwise clear x8 on this render.
@@ -680,17 +773,19 @@ def read_troop_count(image: Image.Image, label: str, slot_offset: float | None =
     if tight.valid():
         raw = read_text(crop_percent(image, tight), scale=4).casefold().replace("xi", "x8").replace("xb", "x8")
         match = re.search(r"[x×]\s*(\d{1,2})$", raw.strip())
-        if match:
+        if match and int(match.group(1)) <= 50:
             return int(match.group(1))
         masked = read_text(white_text_mask(crop_percent(image, tight)), scale=3).casefold().replace("xi", "x8").replace("xb", "x8")
         # The game's stylised 2 is sometimes reported as z on the mask.
         match = re.fullmatch(r"[x×]\s*(\d{1,2}|z)", masked.strip())
         if match:
-            return 2 if match.group(1) == "z" else int(match.group(1))
+            count = 2 if match.group(1) == "z" else int(match.group(1))
+            if count <= 50:
+                return count
     for scale in (3, 5):
         raw = read_text(white_text_mask(counter), scale=scale).casefold().replace("xi", "x8").replace("xb", "x8").translate(str.maketrans({"o": "0", "l": "1", "i": "1"}))
         match = re.fullmatch(r"[x×]\s*(\d{1,2})", raw.strip())
-        if match:
+        if match and int(match.group(1)) <= 50:
             return int(match.group(1))
     if label == "Électro-dragon":
         # The selected card can shift the counter to the right. Its border
@@ -701,7 +796,7 @@ def read_troop_count(image: Image.Image, label: str, slot_offset: float | None =
             inner = crop_percent(image, inner_roi)
             raw = read_text(white_text_mask(inner), scale=5).casefold().replace("xi", "x8").replace("xb", "x8")
             match = re.fullmatch(r"[x×]\s*(\d{1,2})", raw.strip())
-            if match:
+            if match and int(match.group(1)) <= 50:
                 return int(match.group(1))
     for shift in (0, .5, 1, -.5, -1):
         for top in (roi.y1, roi.y1 - .46):
@@ -711,7 +806,7 @@ def read_troop_count(image: Image.Image, label: str, slot_offset: float | None =
             for variant in (crop, ImageOps.grayscale(crop)):
                 raw = read_text(variant, scale=5).casefold().replace("xi", "x8").replace("xb", "x8").translate(str.maketrans({"o": "0", "l": "1", "i": "1"}))
                 match = re.search(r"x\s*(\d{1,2})", raw)
-                if match:
+                if match and int(match.group(1)) <= 50:
                     return int(match.group(1))
     return None
 
@@ -724,7 +819,7 @@ def read_rage_count(image: Image.Image, slot_center: float | None = None) -> int
         return 0
     for offset in (0, -.25, -.5, .25):
         tight = Roi(center - .15 + offset, 85.1, center + 3.15 + offset, 88.2)
-        raw = read_text(white_text_mask(crop_percent(image, tight)), scale=5).casefold()
+        raw = read_text(white_text_mask(crop_percent(image, tight)), scale=5).casefold().replace("s", "5")
         match = re.fullmatch(r"x\s*(\d{1,2})[^0-9]?", raw.strip())
         if match and int(match.group(1)) <= 12:
             return int(match.group(1))
@@ -740,7 +835,61 @@ def read_rage_count(image: Image.Image, slot_center: float | None = None) -> int
             match = re.fullmatch(r"x\s*(\d{1,2})", raw.strip())
             if match:
                 return int(match.group(1))
+    if rage_counter_is_two(image, center):
+        return 2
     return None
+
+
+def rage_counter_is_two(image: Image.Image, center: float) -> bool:
+    """Recover the stylized x2 when Windows OCR returns no counter text."""
+    templates = (
+        (
+            ".###....###.", ".###....####", ".####..####.", ".####..####.",
+            ".##########.", ".#########..", "..########..", "..########..",
+            "..#######...", "...#####....", "...#####....", "..#######...",
+            "..#######...", "..########..", ".#########..", ".####..####.",
+            "#####..####.", "####...####.", "####....###.", ".##.........",
+        ),
+        (
+            "..#########.", ".##########.", ".###########", ".###########",
+            ".###...#####", ".......#####", ".......#####", "......######",
+            ".....#######", "....########", "..########..", ".#######....",
+            "#######.....", "######......", "######......", "######......",
+            "############", "############", "############", ".##########.",
+        ),
+    )
+    mask = white_text_mask(crop_percent(image, Roi(center - 2.1, 84, center + 3.9, 90)))
+    pixels = mask.load()
+    pending = {(x, y) for y in range(8, mask.height - 8)
+               for x in range(8, mask.width - 8) if pixels[x, y] == 0}
+    glyphs = []
+    while pending:
+        seed = pending.pop()
+        stack, component = [seed], [seed]
+        while stack:
+            x, y = stack.pop()
+            for neighbour in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+                if neighbour in pending:
+                    pending.remove(neighbour)
+                    stack.append(neighbour)
+                    component.append(neighbour)
+        xs, ys = zip(*component)
+        box = min(xs), min(ys), max(xs) + 1, max(ys) + 1
+        width, height = box[2] - box[0], box[3] - box[1]
+        if not .18 * mask.height <= height <= .5 * mask.height or not .45 <= width / height <= 1.3:
+            continue
+        bits = tuple(value < 128 for value in mask.crop(box).resize((12, 20)).get_flattened_data())
+        scores = tuple(sum(bit != (pixel == "#") for bit, pixel in
+                           zip(bits, "".join(template))) / 240 for template in templates)
+        glyphs.append((box, scores))
+    for left, left_scores in glyphs:
+        for right, right_scores in glyphs:
+            height = left[3] - left[1]
+            if (left_scores[0] < .2 and right_scores[1] < .2
+                    and 0 <= right[0] - left[2] <= height * .35
+                    and abs(right[3] - left[3]) <= height * .35):
+                return True
+    return False
 
 
 def counter_is_one(counter: Image.Image) -> bool:
@@ -818,6 +967,11 @@ def hero_layout_shift(image: Image.Image) -> float:
     if all(f"{group}.{index}" in overrides for group in ("HERO_SLOTS", "HERO_HEALTH_ROIS", "HERO_ICON_ROIS")
            for index in range(len(layout_points("HERO_SLOTS")))):
         return 0.0  # Explicit calibrated slots/regions already include the shift.
+    compact_first = hero_region("HERO_ICON_ROIS", 0, -6.25)
+    if (hero_card_present(image, 0, -6.25)
+            and hero_icon_saturation(image, 0, -6.25) >= 90
+            and rage_card_score(image, compact_first) < .18):
+        return -6.25
     def skin_pixels(roi):
         pixels = crop_percent(image, roi).convert("RGB").get_flattened_data()
         return sum(r > 140 and 75 < g < 210 and b < 110 and r > g * 1.12 and g > b * 1.2 for r, g, b in pixels)
@@ -920,6 +1074,14 @@ def has_all_screen_text(image: Image.Image, *needles: str) -> bool:
     return all((token := re.sub(r"[^a-z0-9]", "", unicodedata.normalize("NFKD", needle.casefold()).encode("ascii", "ignore").decode("ascii"))) in text or token[:max(4, len(token)-3)] in text for needle in needles)
 
 
+def multiplayer_menu_ready(image: Image.Image) -> bool:
+    return has_screen_text(image, "multijoueur", "mon armée", "formez", "puissante armée")
+
+
+def army_selection_ready(image: Image.Image) -> bool:
+    return has_screen_text(image, "mon armée", "recettes")
+
+
 def _normalized_ocr_value(raw: str) -> str:
     """Normalize OCR text without requiring a reliable full-frame pass."""
     return re.sub(
@@ -938,6 +1100,8 @@ def battle_hud_visible(image: Image.Image) -> bool:
     enemy loot screen as an active battle.
     """
     if not isinstance(image, Image.Image):
+        return False
+    if village_home_ready(image) or multiplayer_menu_ready(image) or army_selection_ready(image):
         return False
     full = normalized_screen_text(image)
     if any(token in full for token in ("terminerlabataille", "degatsgeneraux", "troupesdeployees")):
@@ -978,6 +1142,8 @@ def battle_result_return_ready(image: Image.Image) -> bool:
 
 def village_home_ready(image: Image.Image) -> bool:
     if connection_retry_point(image) is not None:
+        return False
+    if has_all_screen_text(crop_percent(image, Roi(15, 3, 85, 10)), "rempart", "niveau"):
         return False
     # The full-screen OCR pass is unreliable on the reduced VM capture. Read
     # the two fixed village controls independently and accept the same
@@ -1121,6 +1287,15 @@ class WindowDriver:
         return bool(pressed and released)
 
 
+def capture_render_incomplete(image: Image.Image) -> bool:
+    pixels = image.convert("RGB")
+    for x,y in ((.1,.7),(.5,.7),(.9,.7),(.5,.9)):
+        r,g,b = pixels.getpixel((round(image.width*x), round(image.height*y)))
+        if r < 245 or g >= 10 or b >= 10:
+            return False
+    return True
+
+
 def crop_percent(image: Image.Image, roi: Roi) -> Image.Image:
     if not roi.valid(): raise ValueError("Zone de lecture invalide.")
     return image.crop((round(image.width * roi.x1 / 100), round(image.height * roi.y1 / 100), round(image.width * roi.x2 / 100), round(image.height * roi.y2 / 100)))
@@ -1183,8 +1358,9 @@ def trace_ocr(step, image, scale, result=None):
         journal.record("OCR", json.dumps(details, ensure_ascii=False))
 
 
-def _collector_reference(resource):
-    with Image.open(ASSET_DIR / f"collector_{resource}.png") as asset:
+def _collector_reference(resource, live=False):
+    suffix = "_live" if live else ""
+    with Image.open(ASSET_DIR / f"collector_{resource}{suffix}.png") as asset:
         return asset.convert("RGB")
 
 
@@ -1194,7 +1370,7 @@ def _collector_score(pixels, x, y, samples):
 
 
 def find_collectible_icons(image: Image.Image):
-    """Locate the gold/elixir bubbles over village collectors, excluding dark elixir."""
+    """Locate collectible gold, elixir, and dark-elixir bubbles."""
     normal = image.convert("RGB").resize((1920, 1080), Image.Resampling.BILINEAR)
     pixels = normal.load()
     found = []
@@ -1203,40 +1379,50 @@ def find_collectible_icons(image: Image.Image):
         r, g, b = rgb
         return 145 < r < 245 and r - 17 < g < r + 26 and 75 < b < r - 17
 
-    for resource in ("gold", "elixir"):
-        reference = _collector_reference(resource).load()
-        samples = [(dx, dy, reference[dx + 14, dy + 14])
-                   for dx in range(-14, 15, 4) for dy in range(-14, 15, 4)]
-        coarse = samples[::4]
-        for y in range(80, 900, 4):
-            for x in range(192, 1720, 4):
-                r, g, b = pixels[x, y]
-                center = (r > 170 and g > 110 and b < 110) if resource == "gold" else (
-                    r > 130 and b > 120 and g < 130 and r > g * 1.35 and b > g * 1.3)
-                if not center:
-                    continue
-                if not (any(pale_border(pixels[x - 18 + shift, y]) for shift in (-4, 0, 4))
-                        and any(pale_border(pixels[x + 18 + shift, y]) for shift in (-4, 0, 4))):
-                    continue
-                if _collector_score(pixels, x, y, coarse) > 80:
-                    continue
-                score, point = min((_collector_score(pixels, x + dx, y + dy, samples), (x + dx, y + dy))
-                                   for dy in range(-4, 5) for dx in range(-4, 5))
-                if score < 34 and not any(kind == resource and abs(point[0] - px) < 25 and abs(point[1] - py) < 25
-                                          for kind, px, py, _ in found):
-                    found.append((resource, *point, score))
+    for resource in ("gold", "elixir", "dark"):
+        for live in (False, True):
+            reference = _collector_reference(resource, live=live).load()
+            samples = [(dx, dy, reference[dx + 14, dy + 14])
+                       for dx in range(-14, 15, 4) for dy in range(-14, 15, 4)]
+            coarse = samples[::4]
+            for y in range(80, 900, 4):
+                for x in range(192, 1720, 4):
+                    r, g, b = pixels[x, y]
+                    if resource == "gold":
+                        center = r > 170 and g > 110 and b < 110
+                    elif resource == "elixir":
+                        center = r > 130 and b > 120 and g < 130 and r > g * 1.35 and b > g * 1.3
+                    else:
+                        center = 20 < r < 130 and 20 < g < 130 and 20 < b < 145 and b >= g
+                    if not center:
+                        continue
+                    if not live and resource != "dark" and not (
+                        any(pale_border(pixels[x - 18 + shift, y]) for shift in (-4, 0, 4))
+                        and any(pale_border(pixels[x + 18 + shift, y]) for shift in (-4, 0, 4))
+                    ):
+                        continue
+                    coarse_limit = 30 if live else (40 if resource == "dark" else 60)
+                    if _collector_score(pixels, x, y, coarse) >= coarse_limit:
+                        continue
+                    score, point = min((_collector_score(pixels, x + dx, y + dy, samples), (x + dx, y + dy))
+                                       for dy in range(-4, 5) for dx in range(-4, 5))
+                    if score < 34 and not any(kind == resource and abs(point[0] - px) < 25 and abs(point[1] - py) < 25
+                                              for kind, px, py, _ in found):
+                        found.append((resource, *point, score))
     return sorted(found, key=lambda icon: icon[3])
 
 
 def collectible_icon_still_visible(image, resource, x, y):
     normal = image.convert("RGB").resize((1920, 1080), Image.Resampling.BILINEAR)
-    reference = _collector_reference(resource)
-    template = reference.load()
-    samples = [(dx, dy, template[dx + 14, dy + 14])
-               for dx in range(-14, 15, 4) for dy in range(-14, 15, 4)]
     pixels = normal.load()
-    return min(_collector_score(pixels, x + dx, y + dy, samples)
-               for dx in (-2, 0, 2) for dy in (-2, 0, 2)) < 38
+    for live in (False, True):
+        template = _collector_reference(resource, live=live).load()
+        samples = [(dx, dy, template[dx + 14, dy + 14])
+                   for dx in range(-14, 15, 4) for dy in range(-14, 15, 4)]
+        if min(_collector_score(pixels, x + dx, y + dy, samples)
+               for dx in (-2, 0, 2) for dy in (-2, 0, 2)) < 38:
+            return True
+    return False
 
 
 def wall_menu_row_matches(image,y):
@@ -1300,7 +1486,8 @@ def builders_menu_open(image: Image.Image) -> bool:
     # remain visible and distinguish its rows from labels in the village.
     rgb=image.convert("RGB")
     for xs, ys, brightness, spread in (((38.65,63.45),range(15,61),140,60),
-                                       ((36.85,65.15),range(13,63),130,70)):
+                                       ((36.85,65.15),range(13,63),130,70),
+                                       ((37.65,64.4),range(13,63),100,70)):
         borders=[]
         for x in xs:
             hits=0
@@ -1350,6 +1537,11 @@ def find_wall_remove_button(image, shift=0):
 
 def wall_selected(image: Image.Image) -> bool:
     return find_wall_more_button(image) is not None
+
+
+def wall_selection_open(image: Image.Image) -> bool:
+    return (has_all_screen_text(crop_percent(image, Roi(29, 66, 71, 76)), "rempart", "niveau")
+            or find_wall_more_button(image) is not None)
 
 
 def find_wall_more_button(image: Image.Image):
@@ -1414,6 +1606,9 @@ def wall_group_controls(image, single=False, expected_price=None, expected_resou
     button moves. Resource icons distinguish gold/elixir from wall rings.
     """
     from upgrades import normal, resource_icon
+    if image.height < 900 or image.height > 1200:
+        width = round(image.width * 1080 / image.height)
+        image = image.resize((width, 1080), Image.Resampling.LANCZOS)
     compact_panel = (not single and not wall_multi_mode(image)
                      and find_wall_more_button(image) is not None)
     if single:
@@ -1614,12 +1809,15 @@ def wall_group_controls(image, single=False, expected_price=None, expected_resou
 def single_wall_confirmation_matches(image,total,resource):
     from upgrades import resource_icon
     heading=crop_percent(image,Roi(15,3,85,10))
-    prices=[]
-    for scale in (2,3):
-        raw=read_text(crop_percent(image,Roi(64,85,74,89)),scale=scale).casefold().translate(str.maketrans({'s':'5','o':'0','l':'1'}))
-        if re.fullmatch(r"[0-9\s]+",raw.strip()):
-            prices.append(int(re.sub(r"\s","",raw)))
-    price=prices[0] if len(prices)==2 and prices[0]==prices[1] else None
+    price_crop=crop_percent(image,Roi(62,85,75,91))
+    price=read_result_amount(price_crop,main_result=True)
+    if price is None:
+        prices=[]
+        for scale in (3,4):
+            raw=read_text(price_crop,scale=scale).casefold().translate(str.maketrans({'s':'5','o':'0','l':'1'}))
+            if re.fullmatch(r"[0-9\s]+",raw.strip()):
+                prices.append(int(re.sub(r"\s","",raw)))
+        price=prices[0] if len(prices)==2 and prices[0]==prices[1] else None
     return (has_all_screen_text(heading,"rempart","niveau") and price==total and
             resource_icon(image,Roi(74.5,85.5,77.5,92))==resource)
 
@@ -1684,7 +1882,17 @@ def read_resource_number(image: Image.Image) -> tuple[int | None, str]:
     # The mask can lose a thin leading 1. Do not replace a complete reading
     # with its truncated suffix merely because it came from the mask.
     if valid:
-        return max(valid, key=lambda reading: reading[0])
+        best = max(valid, key=lambda reading: reading[0])
+        if best[0] < 1000:
+            # At small client sizes the high-contrast mask can turn a six-digit
+            # amount into a two-digit fragment. Prefer a complete numeric read.
+            raw = read_text(image, scale=2)
+            cleaned = raw.strip().translate(str.maketrans({"o": "0", "O": "0", "l": "1", "I": "1"}))
+            if re.fullmatch(r"[0-9\s]+", cleaned):
+                value = int(re.sub(r"\s", "", cleaned))
+                if best[0] < value <= 20_000_000:
+                    return value, raw
+        return best
     # Different font sizes/backgrounds can defeat both original OCR passes.
     values = []
     for variant in (image, white_text_mask(image)):
@@ -1859,9 +2067,10 @@ def read_bonus_amount(image):
     """
     readings = []
     stripped_leading_four = []
-    for scale in (1, 2, 3):
+    for scale in (1, 2, 3, 4):
         raw = read_text(image, scale=scale).strip(" +.,'\"*")
-        raw = raw.translate(str.maketrans({"O": "0", "o": "0", "Ç": "4", "ç": "4"}))
+        raw = raw.translate(str.maketrans({"O": "0", "o": "0", "Ç": "4", "ç": "4",
+                                           "S": "5", "s": "5", "b": "0", "g": "9"}))
         digits = re.sub(r"\D", "", raw)
         if not digits or (len(digits) > 1 and digits.startswith("0")):
             continue
@@ -1883,7 +2092,10 @@ def read_bonus_amount(image):
 def read_battle_earnings(image):
     result_heading = False
     for roi in (Roi(40,24,59,33), Roi(10,0,50,22)):
-        if any(has_screen_text(crop_percent(image, roi), "victoire", "défaite") for _ in range(2)):
+        heading = crop_percent(image, roi)
+        if has_screen_text(heading, "victoire", "défaite") or any(
+                token in _normalized_ocr_value(read_text(heading, scale=scale))
+                for scale in (1, 2, 3) for token in ("victoire", "defaite")):
             result_heading = True
             break
     if not result_heading and image.width >= 1200:
@@ -1930,7 +2142,7 @@ def read_battle_earnings(image):
     # A tighter crop starts inside that sign and can verify the actual digits.
     bonus_inner_rois = ((Roi(73,49.4,79,52), Roi(73,54,79,58), Roi(73,59,79,63))
                         if image.width >= 1200 else bonus_rois)
-    bonus_wide_fallback_rois = (Roi(70,48,80,53), Roi(70,53,80,59), Roi(70,58,80,64))
+    bonus_wide_fallback_rois = (Roi(69,48,80,53), Roi(70,53,80,59), Roi(71,58,80,64))
     bonus_compact_fallback_rois = (Roi(78,62,97,70), Roi(78,70,97,78), Roi(78,82,97,90))
     bonus = []
     for index, (outer, inner) in enumerate(zip(bonus_rois, bonus_inner_rois)):
@@ -1943,8 +2155,13 @@ def read_battle_earnings(image):
             inner_value = read_result_amount(crop_percent(image, outer), main_result=True)
         if inner_value is None and image.width < 1200:
             inner_value = read_result_amount(crop_percent(image, bonus_compact_fallback_rois[index]), main_result=True)
-        if inner_value is None and 1600 <= image.width < 1850:
-            inner_value = read_result_amount(crop_percent(image, bonus_wide_fallback_rois[index]), main_result=True)
+        if 1600 <= image.width < 1850:
+            wide = crop_percent(image, bonus_wide_fallback_rois[index])
+            wide_value = read_bonus_amount(wide)
+            if wide_value is not None and (inner_value is None or wide_value >= inner_value * 2):
+                inner_value = wide_value
+            if inner_value is None:
+                inner_value = read_result_amount(wide, main_result=True)
         bonus.append(inner_value)
     if all(value is None for value in bonus) and not has_screen_text(crop_percent(image, Roi(67,42,83,64)), "bonus"):
         bonus = [0, 0, 0]
@@ -2232,6 +2449,14 @@ class BotApp:
             if refreshed is None:
                 raise
             image = WindowDriver.capture(refreshed)
+        for attempt in range(8):
+            if not capture_render_incomplete(image):
+                break
+            self._trace("CAPTURE", f"Rendu rouge incomplet : nouvelle lecture {attempt+1}/8")
+            self._wait(.3)
+            image = WindowDriver.capture(window)
+        else:
+            raise RuntimeError("Capture Windows incomplète après huit essais : aucune action envoyée.")
         self._last_capture = image
         self._trace("CAPTURE", f"Image reçue : {image.width}x{image.height}")
         self._check_stopped()
@@ -2633,14 +2858,15 @@ class BotApp:
     def collect_village_resources(self, window):
         """Collect only visually confirmed mine/extractor bubbles in the home village."""
         def village_clear(image):
-            return village_home_ready(image) and not builders_menu_open(image) and not daily_reward_open(image)
+            return (village_home_ready(image) and not builders_menu_open(image)
+                    and not daily_reward_open(image) and not wall_selection_open(image))
 
         if not all(village_clear(self._capture(window)) for _ in range(2)):
             self.events.put("Collecte reportée : village non confirmé.")
             return 0
         before = self.stable_reserves(window)
         icons = find_collectible_icons(self._capture(window))
-        collected = {"gold": 0, "elixir": 0}
+        collected = {"gold": 0, "elixir": 0, "dark": 0}
         for resource, x, y, _score in icons:
             fresh = self._capture(window)
             if not village_clear(fresh):
@@ -2652,6 +2878,14 @@ class BotApp:
                 raise RuntimeError("Clic de collecte refusé.")
             self._wait(.6)
             after_click = self._capture(window)
+            if wall_selection_open(after_click):
+                self.events.put(f"Collecte {resource} écartée : un rempart a été sélectionné à {x},{y}.")
+                if not self._click(window, x * 100 / 1920, y * 100 / 1080):
+                    raise RuntimeError("Désélection du rempart refusée.")
+                self._wait(.6)
+                if wall_selection_open(self._capture(window)):
+                    raise RuntimeError("Rempart encore sélectionné après la collecte : cycle arrêté.")
+                break
             if collectible_icon_still_visible(after_click, resource, x, y):
                 self.events.put(f"Collecte {resource} non confirmée à {x},{y} : arrêt prudent.")
                 break
@@ -2659,7 +2893,7 @@ class BotApp:
         after = self.stable_reserves(window) if sum(collected.values()) else before
         if sum(collected.values()):
             changes = (after[0] - before[0], after[1] - before[1]) if before and after else None
-            self.events.put(f"Collecte des mines/extracteurs : {collected['gold']} action(s) or, {collected['elixir']} action(s) élixir ; variation des réserves : {changes}.")
+            self.events.put(f"Collecte des mines/extracteurs : {collected['gold']} action(s) or, {collected['elixir']} action(s) élixir, {collected['dark']} foreuse(s) d'élixir noir ; variation or/élixir : {changes}.")
         return sum(collected.values())
 
     def _wall_click(self, window, point, label):
@@ -2718,6 +2952,15 @@ class BotApp:
             menu = self._capture(window)
             if not builders_menu_open(menu) and find_wall_menu_item(menu) is None:
                 self._wall_click(window, layout_values("BUILDERS_BUTTON"), "ouvriers")
+                if isinstance(menu, Image.Image):
+                    for _ in range(4):
+                        menu = self._capture(window)
+                        if builders_menu_open(menu) or find_wall_menu_item(menu) is not None:
+                            break
+                        self._wait(.35)
+                    else:
+                        self.events.put("Menu ouvriers non confirmé : remparts reportés au prochain cycle.")
+                        return upgraded
             from upgrades import scroll_builders_to_top
             scroll_builders_to_top(self,window)
             available = None
@@ -2919,8 +3162,11 @@ class BotApp:
             total = selected_count*unit_cost
             fresh = self.stable_reserves(window)
             self._trace("REMPARTS", f"Avant paiement : lot={selected_count}, total={total} {resource}, réserves relues={fresh}, plancher={WALL_RESERVE}")
-            if fresh is None or min(fresh) < WALL_RESERVE or fresh[0 if resource=='or' else 1]-total < WALL_RESERVE:
-                raise RuntimeError("Réserves insuffisantes ou incertaines : aucune dépense envoyée, cycle arrêté avant l’attaque.")
+            if fresh is None:
+                raise RuntimeError("Réserves incertaines : aucune dépense envoyée, cycle arrêté avant l’attaque.")
+            if not wall_spend_preserves_reserve(fresh, resource, total):
+                self.events.put("Réserve de paiement insuffisante : remparts reportés, attaque conservée.")
+                return upgraded
             gold, elixir = fresh
             controls = None
             payment = None
@@ -2935,8 +3181,15 @@ class BotApp:
                 self.events.put("Bouton de paiement instable : remparts reportés au prochain cycle.")
                 return upgraded
             self._wall_click(window, payment[0], f"amélioration groupée {resource} identifiée")
-            confirmation=self._capture(window)
-            matches = single_wall_confirmation_matches(confirmation,total,resource) if single else wall_batch_confirmation_matches(confirmation,total,resource)
+            matches = False
+            for attempt in range(3):
+                confirmation = self._capture(window)
+                matches = (single_wall_confirmation_matches(confirmation,total,resource) if single
+                           else wall_batch_confirmation_matches(confirmation,total,resource))
+                if matches:
+                    break
+                if attempt < 2:
+                    self._wait(.2)
             self._trace("REMPARTS", f"Confirmation affichée : groupe={not single}, coût={total} {resource}, correspondance={matches}")
             if self.stop_event.is_set() or not matches:
                 raise RuntimeError("Montant, rempart ou ressource de la confirmation non vérifié : cycle arrêté avant l’attaque.")
@@ -2949,8 +3202,8 @@ class BotApp:
             self._trace("REMPARTS", f"Après paiement : réserves avant={(gold,elixir)}, après={after}, variation attendue={total} {resource}")
             if after_spend is None or abs(before_spend - after_spend - total) > 50_000:
                 raise RuntimeError("Dépense groupée non vérifiée sur les réserves : cycle arrêté avant l’attaque.")
-            if after[0] < WALL_RESERVE or after[1] < WALL_RESERVE:
-                raise RuntimeError("Une réserve est passée sous le plancher : cycle arrêté avant l’attaque.")
+            if not wall_spend_preserves_reserve(after, resource, 0):
+                raise RuntimeError("La réserve dépensée est passée sous le plancher : cycle arrêté avant l’attaque.")
             upgraded += count
             batches += 1
             rejected_rows.clear()
@@ -2980,28 +3233,75 @@ class BotApp:
         live_sized_client = hasattr(window, "width") and getattr(window, "width", 0) >= 1500
         expected = self.settings.electrodragon_count if label == "Électro-dragon" else self.settings.dragon_count
         count_recovered_from_impossible_ocr = False
+        preview = getattr(self, "_army_preview_counts", {}).get(
+            "electrodragon" if label == ELECTRODRAGON_LABEL else "dragon")
+        if preview is not None and (remaining is None or (remaining == 1 and preview >= 10)):
+            self.events.put(f"{label} : compteur de combat {remaining}, lecture avant attaque x{preview} retenue.")
+            remaining = preview
         if remaining is None and (live_scaled_client or live_sized_client):
             count_recovered_from_impossible_ocr = True
-            remaining = expected
-            self.events.put(f"{label} : compteur OCR illisible sur la fenêtre live ; quantité configurée {remaining} utilisée pour la pose.")
+            remaining = preview if preview is not None else expected
+            source = "armée vérifiée" if preview is not None else "configuration"
+            self.events.put(f"{label} : compteur OCR illisible sur la fenêtre live ; quantité {remaining} issue de {source} utilisée pour la pose.")
         if remaining is not None and expected and remaining > max(expected + 20, expected * 4):
             count_recovered_from_impossible_ocr = True
-            self.events.put(f"{label} : compteur OCR incohérent ({remaining}) ; quantité configurée {expected} utilisée pour la pose.")
-            remaining = expected
+            fallback = preview if preview is not None else expected
+            source = "armée vérifiée" if preview is not None else "configuration"
+            self.events.put(f"{label} : compteur OCR incohérent ({remaining}) ; quantité {fallback} issue de {source} utilisée pour la pose.")
+            remaining = fallback
         if remaining is None: raise RuntimeError(f"Quantité de {label} illisible : pose non vérifiable.")
         if remaining == 0: return 0
         self._check_stopped()
         if slot_offset:
             self.events.put(f"{label} détecté à {selected_slot[0]:.1f} % dans la barre d'armée.")
         initial = remaining
+        verify_final_card = isinstance(position_image, Image.Image) and hasattr(window, "width")
+        residual_retries = 0
         if remaining != expected: self.events.put(f"{label} : {remaining} disponible(s), {expected} prévu(s) ; toutes les unités visibles seront envoyées.")
         if not self._click(window, *selected_slot): raise RuntimeError(f"Sélection {label} refusée.")
         self._wait(.08)
+        if burst and live_scaled_client and label == ELECTRODRAGON_LABEL and isinstance(position_image, Image.Image):
+            return self._deploy_compact_electro(window, selected_slot, points, remaining, slot_offset)
         placed = 0
         rejected = set()
-        while remaining and not self.stop_event.is_set():
+        candidate_points = list(points)
+        outside_points = [(max(5.0, x - 5.0), y) for x, y in points]
+        outside_added = False
+        while not self.stop_event.is_set():
+            if remaining == 0:
+                if not verify_final_card:
+                    return placed
+                self._wait(.25)
+                final_image = self._battle_capture(window)
+                if not battle_hud_visible(final_image):
+                    raise RuntimeError(f"Combat terminé avant la confirmation de la carte {label}.")
+                icon = crop_percent(final_image, shifted_roi(layout_roi("TROOP_ICON_ROIS", label), slot_offset or 0.0))
+                if ImageStat.Stat(ImageOps.grayscale(icon)).stddev[0] < 12:
+                    raise RuntimeError(f"Carte {label} illisible après la pose.")
+                active = ImageStat.Stat(icon.convert("HSV").getchannel(1)).mean[0] >= 30
+                if not active:
+                    self._wait(.1)
+                    confirm = self._battle_capture(window)
+                    icon = crop_percent(confirm, shifted_roi(layout_roi("TROOP_ICON_ROIS", label), slot_offset or 0.0))
+                    if ImageStat.Stat(icon.convert("HSV").getchannel(1)).mean[0] < 30:
+                        self.events.put(f"{label} : carte vide confirmée après déploiement.")
+                        return initial
+                residual_retries += 1
+                if residual_retries > initial + 2:
+                    raise RuntimeError(f"Carte {label} toujours active après {residual_retries - 1} reprises.")
+                point = outside_points[(residual_retries - 1) % len(outside_points)]
+                if not self._click(window, *selected_slot) or not self._click(window, *point):
+                    raise RuntimeError(f"Pose résiduelle {label} refusée.")
+                self._troop_drop_points = getattr(self, "_troop_drop_points", []) + [point]
+                self.events.put(f"{label} : carte encore active ; pose résiduelle {residual_retries} envoyée.")
+                continue
             if burst:
-                candidates = [p for p in points if p not in rejected]
+                candidates = [p for p in candidate_points if p not in rejected]
+                if not candidates and not outside_added:
+                    candidate_points.extend(p for p in outside_points if p not in candidate_points)
+                    outside_added = True
+                    candidates = [p for p in candidate_points if p not in rejected]
+                    self.events.put(f"{label} : ligne de pose extérieure essayée après refus des points initiaux.")
                 if not candidates:
                     raise RuntimeError(f"Aucun point accepté pour {label} ; {remaining} unité(s) restante(s).")
                 drops = []
@@ -3016,6 +3316,14 @@ class BotApp:
                     drops.append(point)
                     self._wait(.06)
                 observed = self.stable_troop_count(window, label, slot_offset)
+                if (initial == 1 and placed == 0 and remaining == 1 and len(drops) == 1 and observed is not None and
+                        1 < observed < expected):
+                    initial = observed + 1
+                    self._troop_drop_points = getattr(self, "_troop_drop_points", []) + drops
+                    placed += 1
+                    remaining = observed
+                    self.events.put(f"{label} : x{initial} initial lu x1 ; première pose confirmée par x{observed}.")
+                    continue
                 if (live_scaled_client or count_recovered_from_impossible_ocr) and (observed is None or not remaining-len(drops) <= observed <= remaining):
                     # The compact client can briefly OCR the neighbouring
                     # troop card (often as zero) while the selected card is
@@ -3034,7 +3342,7 @@ class BotApp:
                         self._troop_drop_points = getattr(self, "_troop_drop_points", []) + drops
                     placed += deployed
                     remaining = observed
-                    self.events.put(f"{label} : {deployed} pose(s) confirmée(s) en ligne ; {remaining} restant(s).")
+                    self.events.put(f"{label} : {deployed} pose(s) suivie(s) provisoirement ; {remaining} estimé(s) restant(s).")
                 continue
             accepted = False
             for offset in range(len(points)):
@@ -3206,6 +3514,11 @@ class BotApp:
                 raise RuntimeError("Clic de déploiement du sort Rage refusé.")
             self._wait(.18)
             observed = self.stable_rage_count(window, slot_center)
+            for _ in range(3):
+                if observed is not None:
+                    break
+                self._wait(.45)
+                observed = self.stable_rage_count(window, slot_center)
             if observed is None or not remaining - 1 <= observed <= remaining:
                 raise RuntimeError("Compteur du sort Rage non confirmé après le clic.")
             if observed == remaining:
@@ -3217,11 +3530,67 @@ class BotApp:
             self.events.put(f"Rage confirmé à {point[0]:.1f} %, {point[1]:.1f} % ; {remaining} restant(s).")
         return placed
 
+    def _deploy_compact_electro(self, window, slot, points, remaining, slot_offset):
+        """Find one legal edge point, using the actual card count as feedback."""
+        initial = remaining
+        indices = (len(points)//2, len(points)//4, 3*len(points)//4)
+        anchor = None
+        tried = set()
+        for vertical_shift in (0, -5, -10, -15, -20, 5):
+            for index in indices:
+                x, y = points[index]
+                point = (x, max(9, min(60, y + vertical_shift)))
+                if point in tried:
+                    continue
+                tried.add(point)
+                self._check_stopped()
+                self._battle_capture(window)
+                if not self._click(window, *slot) or not self._click(window, *point):
+                    raise RuntimeError('Clic de recherche du point de pose refusé.')
+                self._wait(.18)
+                observed = self.stable_troop_count(window, ELECTRODRAGON_LABEL, slot_offset)
+                if observed == remaining - 1:
+                    anchor = point
+                    remaining = observed
+                    self._troop_drop_points = getattr(self, '_troop_drop_points', []) + [point]
+                    self.events.put(f'Point de pose confirmé à {x:.1f} %, {point[1]:.1f} % ; {remaining} électro-dragons restants.')
+                    break
+                if observed != remaining:
+                    raise RuntimeError(f'Compteur électro-dragon ambigu après recherche : {remaining} → {observed}.')
+            if anchor is not None:
+                break
+        if anchor is None:
+            raise RuntimeError('Aucun point de pose confirmé par le compteur électro-dragon.')
+        self._confirmed_drop_point = anchor
+        while remaining:
+            self._check_stopped()
+            self._battle_capture(window)
+            if not self._click(window, *slot) or not self._click(window, *anchor):
+                raise RuntimeError('Clic de pose électro-dragon refusé.')
+            self._wait(.18)
+            observed = self.stable_troop_count(window, ELECTRODRAGON_LABEL, slot_offset)
+            if observed != remaining - 1:
+                raise RuntimeError(f'Électro-dragon non confirmé après pose : {remaining} → {observed}.')
+            remaining = observed
+            self._troop_drop_points.append(anchor)
+            self.events.put(f'Électro-dragon posé au point confirmé ; {remaining} restant(s).')
+        for _ in range(2):
+            image = self._battle_capture(window)
+            icon = crop_percent(image, shifted_roi(layout_roi('TROOP_ICON_ROIS', ELECTRODRAGON_LABEL), slot_offset or 0))
+            if ImageStat.Stat(icon.convert('HSV').getchannel(1)).mean[0] >= 30:
+                raise RuntimeError('Carte électro-dragon encore active après les poses confirmées.')
+            self._wait(.1)
+        self.events.put('Électro-dragon : carte vide confirmée après déploiement.')
+        return initial
+
     def deploy_attack_composition(self, window):
         self._check_stopped()
         self._troop_drop_points = []
+        self._confirmed_drop_point = None
         perimeter = layout_points("ELECTRODRAGON_PERIMETER_POINTS")
         electro = self.deploy_unit(window, "Électro-dragon", layout_values("ELECTRODRAGON_SLOT"), perimeter, burst=True)
+        if self._confirmed_drop_point is not None:
+            perimeter = [self._confirmed_drop_point] + [point for point in perimeter if point != self._confirmed_drop_point]
         dragons = self.deploy_unit(window, "Dragon", layout_values("DRAGON_SLOT"), perimeter, burst=True)
         heroes = 0
         shift = hero_layout_shift(self._battle_capture(window)) if self.settings.deploy_heroes else None
@@ -3335,6 +3704,27 @@ class BotApp:
         archived = stats.defer_result(result_image)
         self.events.put(f'Butin final illisible : capture conservée dans {archived}. Gains non ajoutés aux statistiques ; reprise du cycle.')
 
+    def wait_for_army_ready(self, window):
+        last_note = None
+        last_report = 0.0
+        if not self.settings.deploy_heroes:
+            self.events.put("Héros désactivés dans les réglages : ils ne seront pas posés.")
+        while not self.stop_event.is_set():
+            if time.monotonic() >= getattr(self, "_soak_deadline", float("inf")):
+                return False
+            image = self._capture(window)
+            ready, detail, counts = army_readiness(image, self.settings)
+            if ready:
+                self._army_preview_counts = counts
+                self.events.put(f"Armée prête avant recherche : {detail}.")
+                return True
+            now = time.monotonic()
+            if detail != last_note or now - last_report >= 60:
+                self.events.put(f"Armée incomplète ; attente avant attaque : {detail}.")
+                last_note, last_report = detail, now
+            self._wait(15)
+        return False
+
     def open_search(self, window):
         initial = self._capture(window)
         if battle_hud_visible(initial):
@@ -3349,10 +3739,12 @@ class BotApp:
                 self.events.put("Fenêtre de récompense quotidienne fermée.")
 
         dismiss_daily_reward()
-        for point, label, expected in (
+        stages = (
             (layout_values("ATTACK_HOME_BUTTON"), "Ouverture du menu Attaquer", "multijoueur"),
             (layout_values("FIND_MATCH_BUTTON"), "Ouverture de la s?lection d'arm?e", "mon arm?e"),
-        ):
+        )
+        first_stage = 2 if army_selection_ready(initial) else 1 if multiplayer_menu_ready(initial) else 0
+        for point, label, expected in stages[first_stage:]:
             header = Roi(2,2,50,12) if expected == "multijoueur" else Roi(20,0,80,20)
             confirmed = False
             for click_attempt in range(2):
@@ -3369,13 +3761,9 @@ class BotApp:
                         return True
                     screen_ready = has_screen_text(screen, expected) or has_screen_text(crop_percent(screen, header), expected)
                     if expected == "multijoueur":
-                        # Recent Google Play Games builds open the army panel first
-                        # and omit the literal "Multijoueur" heading.
-                        screen_ready = screen_ready or any(has_screen_text(screen, marker) for marker in ("mon armee", "formez", "puissante armee", "attaquer"))
+                        screen_ready = screen_ready or multiplayer_menu_ready(screen)
                     elif expected == "mon arm?e":
-                        # OCR may miss the heading while the army panel is open;
-                        # its recipe controls remain a reliable secondary marker.
-                        screen_ready = screen_ready or has_screen_text(screen, "recettes")
+                        screen_ready = screen_ready or army_selection_ready(screen)
                     if screen_ready:
                         confirmed = True
                         break
@@ -3383,6 +3771,8 @@ class BotApp:
                     break
             if not confirmed:
                 raise RuntimeError(f"?cran attendu absent apr?s : {label}.")
+        if not self.wait_for_army_ready(window):
+            return False
         if not self._click(window, *layout_values("START_SEARCH_BUTTON")): raise RuntimeError("Clic de recherche refusé.")
         self.events.put("Recherche d'une base adverse")
         deadline = time.monotonic() + 35
@@ -3403,6 +3793,9 @@ class BotApp:
         """Prepare, find a valid base, deploy the configured army, then repeat."""
         try:
             while not self.stop_event.is_set():
+                if time.monotonic() >= getattr(self, "_soak_deadline", float("inf")):
+                    self.events.put("Durée de validation atteinte ; cycle terminé au village.")
+                    return
                 window=WindowDriver.resolve(self.settings.window_title)
                 if not window: raise RuntimeError("Fenêtre Clash introuvable.")
                 self._trace("CYCLE", f"Fenêtre sélectionnée : {getattr(window,'title','?')!r}, {getattr(window,'width','?')}x{getattr(window,'height','?')}; simulation={self.settings.dry_run}")
@@ -3447,6 +3840,7 @@ class BotApp:
                         self.events.put("Cycle reporté : le village n'est pas encore revenu après la bataille.")
                         self._wait(2)
                         continue
+                self._army_preview_counts = {}
                 if self.stop_event.is_set() or not self.open_search(window): return
                 if not self.find_suitable_base(window): return
                 self._check_stopped()
