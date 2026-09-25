@@ -230,6 +230,8 @@ ELECTRODRAGON_LABEL = "\u00c9lectro-dragon"
 RAGE_SLOT = (59.85, 92.5)
 RAGE_DROP_POINTS = ((24.0, 33.0), (31.0, 25.0), (37.0, 17.0), (20.0, 38.0), (34.0, 21.0))
 ARMY_REQUIRED_RAGE = 5
+ELECTRODRAGON_HOUSING = 30
+DRAGON_HOUSING = 20
 EVENT_EXTRA_TROOP_CENTERS = (17.0, 23.2, 29.4)
 # The regular builder counter is left of the laboratory counter on the
 # current Google Play Games render. 49% lands on the laboratory panel and
@@ -598,6 +600,8 @@ def army_fraction(image: Image.Image, roi: Roi) -> tuple[int, int] | None:
     for scale in (2, 3, 4, 5):
         raw = read_text(crop_percent(image, roi), scale=scale).casefold()
         raw = raw.translate(str.maketrans({"o": "0", "i": "1", "l": "1"}))
+        # The last zero of a compact capacity badge is often read as t or c.
+        raw = re.sub(r"(?<=\d)[tc](?!\w)", "0", raw)
         match = re.search(r"(\d{1,3})\s*/\s*(\d{1,3})", raw)
         if match and 0 < int(match.group(2)) and int(match.group(1)) <= int(match.group(2)):
             return int(match.group(1)), int(match.group(2))
@@ -655,16 +659,25 @@ def army_readiness(image: Image.Image, settings: Settings) -> tuple[bool, str, d
                 "dragon": troop_cards.get("dragon"), "rage": rage_count}
     if troops is None or troops[0] != troops[1]:
         return False, f"places de troupe {troops or 'illisibles'}", observed
-    if settings.electrodragon_count and (observed["electrodragon"] is None or
-                                         observed["electrodragon"] < settings.electrodragon_count):
-        return False, f"électro-dragons {observed['electrodragon']} / {settings.electrodragon_count}", observed
+    possible_electrodragons = max(0, (troops[1] - settings.dragon_count * DRAGON_HOUSING)
+                                  // ELECTRODRAGON_HOUSING)
+    required_electrodragons = min(settings.electrodragon_count, possible_electrodragons)
+    if settings.electrodragon_count and not required_electrodragons:
+        return False, f"composition impossible dans {troops[1]} places avec {settings.dragon_count} dragon(s)", observed
+    if required_electrodragons and (observed["electrodragon"] is None or
+                                    observed["electrodragon"] < required_electrodragons):
+        capacity_note = (f" (capacité {troops[1]}, réglage {settings.electrodragon_count})"
+                         if required_electrodragons < settings.electrodragon_count else "")
+        return False, f"électro-dragons {observed['electrodragon']} / {required_electrodragons}{capacity_note}", observed
     if settings.dragon_count and "dragon" not in troop_cards:
         return False, "carte Dragon absente", observed
     if settings.deploy_heroes and (heroes is None or heroes[0] < 4):
         return False, f"héros {heroes or 'illisibles'}", observed
     if spells is None or spells[0] < ARMY_REQUIRED_RAGE * 2 or rage_count is None or rage_count < ARMY_REQUIRED_RAGE:
         return False, f"Rage {rage_count} / {ARMY_REQUIRED_RAGE}, places de sort {spells or 'illisibles'}", observed
-    return True, f"troupes {troops[0]}/{troops[1]}, héros {heroes}, Rage x{rage_count}", observed
+    capacity_note = (f", électro-dragons attendus x{required_electrodragons} au lieu du réglage x{settings.electrodragon_count}"
+                     if required_electrodragons < settings.electrodragon_count else "")
+    return True, f"troupes {troops[0]}/{troops[1]}, héros {heroes}, Rage x{rage_count}{capacity_note}", observed
 
 
 def troop_card_frame_visible(image: Image.Image, center: float) -> bool:
@@ -896,9 +909,10 @@ def read_rage_count(image: Image.Image, slot_center: float | None = None) -> int
     icon = crop_percent(image, rage_region("RAGE_ICON_ROI", center))
     if ImageStat.Stat(ImageOps.grayscale(icon)).stddev[0] >= 12 and ImageStat.Stat(icon.convert("HSV").getchannel(1)).mean[0] < 30:
         return 0
-    for offset in (0, -.25, -.5, .25):
+    for offset in (-1.25, -.75, 0, -.25, -.5, .25):
         tight = Roi(center - .15 + offset, 85.1, center + 3.15 + offset, 88.2)
-        raw = read_text(white_text_mask(crop_percent(image, tight)), scale=5).casefold().replace("s", "5")
+        raw = read_text(white_text_mask(crop_percent(image, tight)), scale=5).casefold()
+        raw = raw.translate(str.maketrans({"s": "5", "l": "1", "i": "1"}))
         match = re.fullmatch(r"x\s*(\d{1,2})[^0-9]?", raw.strip())
         if match and int(match.group(1)) <= 12:
             return int(match.group(1))
@@ -2417,6 +2431,15 @@ class DiagnosticJournal:
             self.record("RÉCOMPENSE", f"Capture du choix final non reconnu : {screenshot}")
             return screenshot
 
+    def save_army_screen(self, image: Image.Image) -> Path | None:
+        with self._lock:
+            if self.run_path is None:
+                return None
+            screenshot = self.run_path.with_name(f"{self.run_path.stem}-army.png")
+            image.save(screenshot)
+            self.record("ARMÉE", f"Capture de l'armée en attente : {screenshot}")
+            return screenshot
+
     def export(self, destination: Path):
         source_path = self.last_run_path or self.path
         if destination.resolve() in (self.path.resolve(), source_path.resolve()):
@@ -2452,6 +2475,9 @@ class DiagnosticJournal:
                     archive.write(screenshot,arcname=screenshot.name)
                 for screenshot in sorted(source_path.parent.glob(f"{source_path.stem}-reward-*.png")):
                     archive.write(screenshot,arcname=screenshot.name)
+                army_screenshot = source_path.with_name(f"{source_path.stem}-army.png")
+                if army_screenshot.exists():
+                    archive.write(army_screenshot,arcname=army_screenshot.name)
 
     def close(self):
         with self._lock:
@@ -3547,9 +3573,10 @@ class BotApp:
                     observed = read_rage_count(image, slot_center) if isinstance(image, Image.Image) else None
                     self._trace("COMPTEUR", f"Sort Rage : {observed}")
                     self._check_stopped()
-                    if observed is not None and observed == previous:
-                        return observed
-                    previous = observed
+                    if observed is not None:
+                        if observed == previous:
+                            return observed
+                        previous = observed
                     self._wait(.04)
         except TimeoutError:
             return None
@@ -4013,6 +4040,8 @@ class BotApp:
                 return True
             now = time.monotonic()
             if detail != last_note or now - last_report >= 60:
+                if detail != last_note:
+                    self.journal.save_army_screen(image)
                 self.events.put(f"Armée incomplète ; attente avant attaque : {detail}.")
                 last_note, last_report = detail, now
             self._wait(15)

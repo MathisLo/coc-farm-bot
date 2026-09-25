@@ -8,6 +8,54 @@ import upgrades
 
 
 class UpgradeTests(unittest.TestCase):
+    def test_rejected_selected_panel_is_closed_before_builder_menu_reopens(self):
+        app = app_without_gui()
+        app._capture = Mock(return_value=Image.new('RGB', (1323, 744)))
+        app._wall_click = Mock()
+        app._trace = Mock()
+        app.stable_reserves = Mock(return_value=(6_000_000, 6_000_000))
+        with patch.object(upgrades, 'stable_builders', return_value=2), \
+             patch.object(main, 'builders_menu_open', side_effect=[True, False, True]), \
+             patch.object(upgrades, 'find_payable_upgrade', return_value=('Catapulte explosive', 54.2, 5_000_000, 'élixir')), \
+             patch.object(upgrades, 'stable_upgrade_row', return_value=54.2), \
+             patch.object(upgrades, 'direct_upgrade_button', return_value=None), \
+             patch.object(upgrades, 'selected_panel_matches', return_value=False), \
+             patch.object(upgrades, 'selected_panel_title_matches', return_value=False):
+            self.assertEqual(upgrades.upgrade_suggested(app, object(), max_upgrades=1), 0)
+        self.assertEqual(app._wall_click.call_args_list[-1].args[1:],
+                         ((88.4, 7.5), 'fermer la sélection refusée'))
+        self.assertFalse(any('confirmer l’amélioration conseillée' in str(call)
+                             for call in app._wall_click.call_args_list))
+
+    def test_shifted_panel_never_spends_when_dialog_price_differs(self):
+        app = app_without_gui()
+        app._capture = Mock(return_value=Image.new('RGB', (1920, 1080)))
+        app._wall_click = Mock()
+        app._trace = Mock()
+        app._wait = Mock()
+        app.stable_reserves = Mock(return_value=(10_000_000, 10_000_000))
+        with patch.object(upgrades, 'stable_builders', return_value=3), \
+             patch.object(main, 'builders_menu_open', side_effect=[True, False]), \
+             patch.object(upgrades, 'find_payable_upgrade', return_value=('Caserne', 41.2, 2_800_000, 'élixir')), \
+             patch.object(upgrades, 'stable_upgrade_row', return_value=41.2), \
+             patch.object(upgrades, 'direct_upgrade_button', return_value=None), \
+             patch.object(upgrades, 'selected_panel_matches', return_value=False), \
+             patch.object(upgrades, 'selected_panel_title_matches', return_value=True), \
+             patch.object(main, 'read_word_centers', return_value=[('Améliorer', 50, 50)]), \
+             patch.object(upgrades, 'confirmation_headings', return_value=['Caserne (niveau 13)']), \
+             patch.object(upgrades, 'confirmation_cost', return_value=2_900_000), \
+             patch.object(upgrades, 'resource_icon', return_value='élixir'):
+            with self.assertRaisesRegex(RuntimeError, 'Coût ou ressource non confirmé'):
+                upgrades.upgrade_suggested(app, object(), max_upgrades=1)
+        self.assertFalse(any('confirmer l’amélioration conseillée' in str(call)
+                             for call in app._wall_click.call_args_list))
+
+    def test_shifted_caserne_panel_title_allows_dialog_verification(self):
+        image = Image.new('RGB', (1920, 1080))
+        with patch.object(main, 'read_text', return_value='tCaSetRNe5(Niveau 13) INFOS AMéIi0ReR'):
+            self.assertTrue(upgrades.selected_panel_title_matches(image, 'Caserne'))
+            self.assertFalse(upgrades.selected_panel_title_matches(image, 'Caserne noire'))
+
     def test_moving_building_row_is_relocated_before_click(self):
         app = app_without_gui()
         app._wait = Mock()

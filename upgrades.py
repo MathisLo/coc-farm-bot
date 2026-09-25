@@ -125,6 +125,24 @@ def selected_panel_matches(image, title, cost, resource):
         for token in tokens))
 
 
+def selected_panel_title_matches(image, title):
+    """Permit opening a dialog when a shifted button price cannot be read."""
+    m = engine()
+    expected = canonical_title(title)
+    if len(expected) < 6:
+        return False
+    for scale in (1, 2):
+        raw = normal(m.read_text(m.crop_percent(image, m.Roi(20,65,80,82)), scale=scale))
+        if 'niveau' not in raw:
+            continue
+        observed = canonical_title(raw.split('niveau', 1)[0])
+        if any(SequenceMatcher(None, expected, observed[start:start+length]).ratio() >= .78
+               for length in range(max(4, len(expected)-1), len(expected)+3)
+               for start in range(max(0, len(observed)-length+1))):
+            return True
+    return False
+
+
 def confirmation_cost(image):
     m = engine()
     readings = []
@@ -609,6 +627,9 @@ def upgrade_suggested(app, window, max_upgrades=5):
                            'Ouvriers indisponibles ou illisibles : aucune amélioration longue lancée.')
             return completed
         balances = app.stable_reserves(window)
+        if balances is None and m.builders_menu_open(app._capture(window)):
+            app._wall_click(window, m.BUILDERS_BUTTON, 'fermer la liste avant nouvelle lecture des réserves')
+            balances = app.stable_reserves(window)
         app._trace('BÂTIMENTS',f'Réserves avant recherche : {balances}')
         if balances is None:
             return completed
@@ -677,10 +698,12 @@ def upgrade_suggested(app, window, max_upgrades=5):
             completed += 1
             failed_choices = 0
             continue
-        if not selected_panel_matches(selected,title,cost,resource):
+        panel_verified = selected_panel_matches(selected,title,cost,resource)
+        if not panel_verified and not selected_panel_title_matches(selected,title):
             app.events.put(f'Sélection vérifiée différente de {title} : aucune dépense envoyée.')
             skipped_titles.add(title)
             failed_choices += 1
+            app._wall_click(window,(88.4,7.5),'fermer la sélection refusée')
             if not m.builders_menu_open(app._capture(window)):
                 app._wall_click(window, m.BUILDERS_BUTTON, 'rouvrir la liste après sélection refusée')
                 if not m.builders_menu_open(app._capture(window)):
@@ -690,6 +713,8 @@ def upgrade_suggested(app, window, max_upgrades=5):
                 app.events.put('Deux lignes de bâtiments instables : reprise des remparts et des attaques.')
                 return completed
             continue
+        if not panel_verified:
+            app._trace('BÂTIMENTS', f'Titre {title!r} confirmé sur le panneau ; prix à confirmer dans la boîte de dialogue.')
         # The world-space building label is occluded by the open builder menu.
         # Verify its identity on the confirmation dialog before any spending.
         labels = m.crop_percent(selected,m.Roi(25,81,76,87))

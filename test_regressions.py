@@ -27,6 +27,60 @@ def app_without_gui():
 
 
 class CancellationRegressions(unittest.TestCase):
+    def test_rage_counter_accepts_matching_readings_across_blank_frames(self):
+        app = app_without_gui()
+        app._battle_capture = Mock(return_value=Image.new('RGB', (1323, 744)))
+        app._wait = Mock()
+        app._trace = Mock()
+        with patch.object(main, 'read_rage_count', side_effect=[1, None, 1, None]):
+            self.assertEqual(app.stable_rage_count(object(), 22), 1)
+
+    def test_compact_rage_x1_badge_is_read_left_of_detected_card_center(self):
+        image = Image.new('RGB', (1323, 744))
+        with Image.open(Path(__file__).parent / 'testdata' / 'vps_rage_x1_badge_1323.png') as badge:
+            image.paste(badge, (705, 625))
+        self.assertEqual(main.read_rage_count(image, 57.6), 1)
+
+    def test_waiting_army_screen_is_exported_with_diagnostic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = main.DiagnosticJournal(Path(directory) / 'bot.log')
+            journal.start_run('army probe')
+            app = app_without_gui()
+            app.journal = journal
+            app._capture = Mock(return_value=Image.new('RGB', (1920, 1080)))
+            app._wait = Mock(side_effect=lambda _: app.stop_event.set())
+            with patch.object(main, 'army_readiness', return_value=(False, 'Rage 0 / 5', {})):
+                self.assertFalse(app.wait_for_army_ready(object()))
+            screenshot = journal.run_path.with_name(f'{journal.run_path.stem}-army.png')
+            self.assertTrue(screenshot.exists())
+            journal.end_run('arrêtée')
+            bundle = Path(directory) / 'diagnostic.zip'
+            journal.export_bundle(bundle)
+            with zipfile.ZipFile(bundle) as archive:
+                self.assertIn(screenshot.name, archive.namelist())
+            journal.close()
+
+    def test_full_260_space_army_uses_capacity_limited_electrodragon_target(self):
+        image = Image.new('RGB', (1920, 1080))
+        settings = main.replace(main.Settings(), electrodragon_count=10, dragon_count=1)
+        for spell_count, expected_ready in ((10, True), (0, False)):
+            with self.subTest(spell_count=spell_count), \
+                 patch.object(main, 'army_fraction', side_effect=[(260, 260), (4, 4), (spell_count, 11)]), \
+                 patch.object(main, 'troop_card_kind', side_effect=['electrodragon', 'dragon'] + [None] * 5), \
+                 patch.object(main, 'army_card_count', side_effect=[8, 1, 5]), \
+                 patch.object(main, 'rage_card_score', return_value=.5):
+                ready, detail, observed = main.army_readiness(image, settings)
+            self.assertEqual(ready, expected_ready, detail)
+            self.assertEqual(observed['electrodragon'], 8)
+            if not ready:
+                self.assertIn('Rage', detail)
+
+    def test_army_fraction_recovers_zero_rendered_as_t_or_c(self):
+        image = Image.new('RGB', (1920, 1080))
+        with patch.object(main, 'read_text', side_effect=['260/26t', '260/26c']):
+            self.assertEqual(main.army_fraction(image, main.Roi(44, 22, 51, 28)), (260, 260))
+            self.assertEqual(main.army_fraction(image, main.Roi(44, 22, 51, 28)), (260, 260))
+
     def test_temporary_x40_card_is_detected_only_while_visible(self):
         captures = Path(__file__).parent / 'testdata'
         with Image.open(captures / 'event_extra_troop_x40_1323.png') as event:
