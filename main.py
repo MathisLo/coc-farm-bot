@@ -7,6 +7,7 @@ import codecs
 import ctypes
 from ctypes import wintypes
 from datetime import datetime
+import hashlib
 import json
 import math
 import queue
@@ -2380,6 +2381,13 @@ class DiagnosticJournal:
             self.last_run_path = self.run_path
             self._run_failed = False
             self.record("DÉBUT", f"Action={label}; version={APP_VERSION}; journal={self.run_path}; programme={sys.executable}")
+            if getattr(sys, "frozen", False):
+                try:
+                    with open(sys.executable, "rb") as executable:
+                        digest = hashlib.file_digest(executable, "sha256").hexdigest()
+                    self.record("VERSION", f"SHA-256 de l'EXE lancé : {digest}")
+                except OSError as error:
+                    self.record("VERSION", f"Empreinte de l'EXE indisponible : {error}")
             if settings is not None:
                 self.record("CONFIG", json.dumps(asdict(settings), ensure_ascii=False, sort_keys=True))
             return self.run_path
@@ -2440,6 +2448,15 @@ class DiagnosticJournal:
             self.record("ARMÉE", f"Capture de l'armée en attente : {screenshot}")
             return screenshot
 
+    def save_upgrade_screen(self, image: Image.Image) -> Path | None:
+        with self._lock:
+            if self.run_path is None:
+                return None
+            screenshot = self.run_path.with_name(f"{self.run_path.stem}-upgrade.png")
+            image.save(screenshot)
+            self.record("BÂTIMENTS", f"Capture du panneau d'amélioration ambigu : {screenshot}")
+            return screenshot
+
     def export(self, destination: Path):
         source_path = self.last_run_path or self.path
         if destination.resolve() in (self.path.resolve(), source_path.resolve()):
@@ -2478,6 +2495,9 @@ class DiagnosticJournal:
                 army_screenshot = source_path.with_name(f"{source_path.stem}-army.png")
                 if army_screenshot.exists():
                     archive.write(army_screenshot,arcname=army_screenshot.name)
+                upgrade_screenshot = source_path.with_name(f"{source_path.stem}-upgrade.png")
+                if upgrade_screenshot.exists():
+                    archive.write(upgrade_screenshot,arcname=upgrade_screenshot.name)
 
     def close(self):
         with self._lock:
@@ -4009,16 +4029,19 @@ class BotApp:
             return
         self._wait(1.5)  # Let the result counters finish their animation.
         previous = None
+        readings = []
         for _ in range(5):
             result_image = self._battle_capture(window)
             amounts = read_battle_earnings(result_image)
             self._trace("BUTIN FINAL", f"Lecture des gains : {amounts}")
-            if amounts is not None and amounts == previous:
-                if stats.finish(amounts):
-                    self.events.put(StatsEvent(dict(stats.data)))
-                    self.events.put(f"Récolte comptabilisée : {amounts[0]:,} or, {amounts[1]:,} élixir, {amounts[2]:,} élixir noir (bonus inclus).")
-                return
-            previous = amounts
+            if amounts is not None:
+                readings.append(amounts)
+                if amounts == previous or readings.count(amounts) >= 3:
+                    if stats.finish(amounts):
+                        self.events.put(StatsEvent(dict(stats.data)))
+                        self.events.put(f"Récolte comptabilisée : {amounts[0]:,} or, {amounts[1]:,} élixir, {amounts[2]:,} élixir noir (bonus inclus).")
+                    return
+                previous = amounts
             self._wait(.35)
         self._check_stopped()
         archived = stats.defer_result(result_image)

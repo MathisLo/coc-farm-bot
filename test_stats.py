@@ -10,6 +10,24 @@ from test_regressions import app_without_gui
 
 
 class StatisticsTests(unittest.TestCase):
+    def test_result_uses_matching_readings_across_blank_or_wrong_frames(self):
+        correct = (592_937, 733_074, 3_769)
+        wrong = (592_937, 733_074, 2_769)
+        for readings in ((correct, None, correct),
+                         (correct, wrong, correct, wrong, correct)):
+            with self.subTest(readings=readings), tempfile.TemporaryDirectory() as directory:
+                app = app_without_gui()
+                app.farm_stats = FarmStats(Path(directory) / 'stats.json')
+                app.farm_stats.begin('account')
+                app._battle_capture = Mock(return_value=Image.new('RGB', (1323, 744)))
+                app._trace = Mock()
+                app._wait = Mock()
+                with patch.object(main, 'read_battle_earnings', side_effect=readings):
+                    app.record_battle_earnings(object())
+                self.assertEqual(app.farm_stats.data['battles'], 1)
+                self.assertEqual(tuple(app.farm_stats.data[key] for key in
+                                       ('gold', 'elixir', 'dark_elixir')), correct)
+
     def test_stylized_bonus_is_counted_on_real_vm_result(self):
         with Image.open(Path(__file__).parent / 'testdata' / 'result_bonus_stylized_1765.png') as image:
             self.assertEqual(main.read_battle_earnings(image), (461_924, 657_042, 5_256))

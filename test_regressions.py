@@ -60,6 +60,19 @@ class CancellationRegressions(unittest.TestCase):
                 self.assertIn(screenshot.name, archive.namelist())
             journal.close()
 
+    def test_ambiguous_upgrade_panel_is_exported_with_diagnostic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = main.DiagnosticJournal(Path(directory) / 'bot.log')
+            journal.start_run('upgrade probe')
+            screenshot = journal.save_upgrade_screen(Image.new('RGB', (1920, 1080)))
+            self.assertTrue(screenshot.exists())
+            journal.end_run('terminée')
+            bundle = Path(directory) / 'diagnostic.zip'
+            journal.export_bundle(bundle)
+            with zipfile.ZipFile(bundle) as archive:
+                self.assertIn(screenshot.name, archive.namelist())
+            journal.close()
+
     def test_full_260_space_army_uses_capacity_limited_electrodragon_target(self):
         image = Image.new('RGB', (1920, 1080))
         settings = main.replace(main.Settings(), electrodragon_count=10, dragon_count=1)

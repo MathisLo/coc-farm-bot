@@ -703,7 +703,9 @@ def upgrade_suggested(app, window, max_upgrades=5):
             app.events.put(f'Sélection vérifiée différente de {title} : aucune dépense envoyée.')
             skipped_titles.add(title)
             failed_choices += 1
-            app._wall_click(window,(88.4,7.5),'fermer la sélection refusée')
+            # This is a selected village building, not a confirmation dialog.
+            # The dialog close point overlaps the resource bar in the village.
+            app._wall_click(window,(6,55),'désélectionner le bâtiment refusé')
             if not m.builders_menu_open(app._capture(window)):
                 app._wall_click(window, m.BUILDERS_BUTTON, 'rouvrir la liste après sélection refusée')
                 if not m.builders_menu_open(app._capture(window)):
@@ -725,36 +727,41 @@ def upgrade_suggested(app, window, max_upgrades=5):
             if buttons:
                 break
         if len(buttons) != 1:
-            app.events.put('Bâtiment sélectionné sans bouton Améliorer unique : sélection reportée.')
-            skipped_titles.add(title)
-            app._wall_click(window,(88.4,7.5),'close selection without upgrade button')
-            failed_choices += 1
-            if failed_choices >= 2:
-                app.events.put('Deux lignes de bâtiments instables : reprise des remparts et des attaques.')
-                return completed
-            continue
-        app._wall_click(window, buttons[0], 'ouvrir la confirmation')
-        dialog = app._capture(window)
-        headings = confirmation_headings(dialog)
-        for _ in range(2):
-            if any(title_matches_heading(title, heading) for heading in headings):
-                break
-            app._wait(.45)
+            journal = getattr(app, 'journal', None)
+            if journal is not None:
+                journal.save_upgrade_screen(selected)
+            app._trace('BÂTIMENTS', f'Boutons Améliorer visibles : {buttons!r}')
+        chosen_button = None
+        for button in buttons[:3]:
+            app._wall_click(window, button, 'ouvrir la confirmation')
             dialog = app._capture(window)
             headings = confirmation_headings(dialog)
-        app._trace('BÂTIMENTS',f'Titres de confirmation : {headings!r}')
-        if any(is_town_hall(heading) for heading in headings) and not allow_town_hall:
-            app._wall_click(window,(88.4,7.5),'fermer la confirmation HDV interdite')
-            raise RuntimeError('HDV exclu des améliorations automatiques : aucune dépense envoyée.')
-        if not any(title_matches_heading(title,heading) for heading in headings):
-            app._wall_click(window,(88.4,7.5),'fermer la confirmation inattendue')
-            app.events.put('Confirmation de bâtiment différente de la ligne lue : aucune dépense envoyée.')
+            for _ in range(2):
+                if any(title_matches_heading(title, heading) for heading in headings):
+                    break
+                app._wait(.45)
+                dialog = app._capture(window)
+                headings = confirmation_headings(dialog)
+            app._trace('BÂTIMENTS',f'Titres de confirmation pour {button!r} : {headings!r}')
+            if any(is_town_hall(heading) for heading in headings) and not allow_town_hall:
+                app._wall_click(window,(88.4,7.5),'fermer la confirmation HDV interdite')
+                raise RuntimeError('HDV exclu des améliorations automatiques : aucune dépense envoyée.')
+            if not any(title_matches_heading(title,heading) for heading in headings):
+                if any('niveau' in heading for heading in headings):
+                    app._wall_click(window,(88.4,7.5),'fermer la confirmation inattendue')
+                    continue
+                break
+            confirmed_cost = confirmation_cost(dialog)
+            confirmed_resource = resource_icon(dialog,m.Roi(74.5,85.5,77.5,92))
+            app._trace('BÂTIMENTS',f'Confirmation : {confirmed_cost} {confirmed_resource}; attendus={cost} {resource}')
+            if confirmed_cost == cost and confirmed_resource == resource:
+                chosen_button = button
+                break
+            app._wall_click(window,(88.4,7.5),'fermer la confirmation au prix différent')
+        if chosen_button is None:
+            app.events.put('Amélioration ambiguë : panneau conservé dans le diagnostic ; reprise du cycle sans dépense.')
+            app._wall_click(window,(6,55),'désélectionner le bâtiment ambigu')
             return completed
-        confirmed_cost = confirmation_cost(dialog)
-        confirmed_resource = resource_icon(dialog,m.Roi(74.5,85.5,77.5,92))
-        app._trace('BÂTIMENTS',f'Confirmation : {confirmed_cost} {confirmed_resource}; attendus={cost} {resource}')
-        if confirmed_cost != cost or confirmed_resource!=resource:
-            raise RuntimeError('Coût ou ressource non confirmé : aucune dépense envoyée.')
         # Re-open the same dialog after a fresh builder/reserve check; a user
         # or another client may have assigned a builder during inspection.
         app._wall_click(window,(88.4,7.5),'fermer la confirmation')
@@ -764,7 +771,7 @@ def upgrade_suggested(app, window, max_upgrades=5):
         if balances is None or not can_start_upgrade(free,balances[0 if resource=='or' else 1],cost):
             app.events.put(f'Contrôle avant dépense non validé : ouvriers={free}, réserves={balances}, coût={cost}.')
             return completed
-        app._wall_click(window,buttons[0],'rouvrir la confirmation')
+        app._wall_click(window,chosen_button,'rouvrir la confirmation')
         final = app._capture(window)
         if not any(title_matches_heading(title,heading) for heading in confirmation_headings(final)):
             raise RuntimeError('La confirmation a changé : arrêt.')

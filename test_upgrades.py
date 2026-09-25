@@ -23,7 +23,7 @@ class UpgradeTests(unittest.TestCase):
              patch.object(upgrades, 'selected_panel_title_matches', return_value=False):
             self.assertEqual(upgrades.upgrade_suggested(app, object(), max_upgrades=1), 0)
         self.assertEqual(app._wall_click.call_args_list[-1].args[1:],
-                         ((88.4, 7.5), 'fermer la sélection refusée'))
+                         ((6, 55), 'désélectionner le bâtiment refusé'))
         self.assertFalse(any('confirmer l’amélioration conseillée' in str(call)
                              for call in app._wall_click.call_args_list))
 
@@ -45,10 +45,37 @@ class UpgradeTests(unittest.TestCase):
              patch.object(upgrades, 'confirmation_headings', return_value=['Caserne (niveau 13)']), \
              patch.object(upgrades, 'confirmation_cost', return_value=2_900_000), \
              patch.object(upgrades, 'resource_icon', return_value='élixir'):
-            with self.assertRaisesRegex(RuntimeError, 'Coût ou ressource non confirmé'):
-                upgrades.upgrade_suggested(app, object(), max_upgrades=1)
+            self.assertEqual(upgrades.upgrade_suggested(app, object(), max_upgrades=1), 0)
         self.assertFalse(any('confirmer l’amélioration conseillée' in str(call)
                              for call in app._wall_click.call_args_list))
+        self.assertEqual(app._wall_click.call_args_list[-1].args[1], (6, 55))
+
+    def test_two_upgrade_buttons_probe_dialogs_and_pay_only_matching_price(self):
+        app = app_without_gui()
+        app._capture = Mock(return_value=Image.new('RGB', (1920, 1080)))
+        app._wall_click = Mock()
+        app._trace = Mock()
+        app._wait = Mock()
+        app.stable_reserves = Mock(return_value=(10_000_000, 10_000_000))
+        app.journal = Mock()
+        with patch.object(upgrades, 'stable_builders', return_value=3), \
+             patch.object(main, 'builders_menu_open', side_effect=[True, False]), \
+             patch.object(upgrades, 'find_payable_upgrade', return_value=('Caserne noire', 48.3, 2_880_000, 'élixir')), \
+             patch.object(upgrades, 'stable_upgrade_row', return_value=48.3), \
+             patch.object(upgrades, 'direct_upgrade_button', return_value=None), \
+             patch.object(upgrades, 'selected_panel_matches', return_value=True), \
+             patch.object(main, 'read_word_centers', return_value=[('Améliorer', 41, 45), ('Améliorer', 57, 45)]), \
+             patch.object(upgrades, 'confirmation_headings', return_value=['Caserne noire (niveau 38)']), \
+             patch.object(upgrades, 'confirmation_cost', side_effect=[2_900_000, 2_880_000, 2_880_000]), \
+             patch.object(upgrades, 'resource_icon', return_value='élixir'), \
+             patch.object(upgrades, 'verify_building_spend') as verify:
+            self.assertEqual(upgrades.upgrade_suggested(app, object(), max_upgrades=1), 1)
+        app.journal.save_upgrade_screen.assert_called_once()
+        self.assertTrue(any('fermer la confirmation au prix différent' in str(call)
+                            for call in app._wall_click.call_args_list))
+        self.assertEqual(sum('confirmer l’amélioration conseillée' in str(call)
+                             for call in app._wall_click.call_args_list), 1)
+        verify.assert_called_once()
 
     def test_shifted_caserne_panel_title_allows_dialog_verification(self):
         image = Image.new('RGB', (1920, 1080))
