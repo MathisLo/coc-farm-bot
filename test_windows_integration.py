@@ -476,7 +476,8 @@ class WindowsIntegrationTests(unittest.TestCase):
                 with patch.object(main.filedialog, 'asksaveasfilename', return_value=str(destination)):
                     app.export_log_button.invoke()
                 with zipfile.ZipFile(destination) as archive:
-                    self.assertEqual(len(archive.namelist()),2)
+                    self.assertIn('diagnostic.json', archive.namelist())
+                    self.assertIn('bot.log', archive.namelist())
                     self.assertTrue(any(name.endswith('.png') for name in archive.namelist()))
                     exported = archive.read(next(name for name in archive.namelist() if name.endswith('.txt'))).decode('utf-8')
                 self.assertIn('Étape de diagnostic', exported)

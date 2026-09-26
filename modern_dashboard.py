@@ -24,7 +24,8 @@ FIELDS = {
     "delay_between_dragons": "delay_between_dragons",
     "and_rule": "and_rule", "dry_run": "dry_run",
     "deploy_heroes": "deploy_heroes", "upgrade_wall": "upgrade_wall",
-    "upgrade_recommended": "upgrade_recommended", "chain_attacks": "chain_attacks",
+    "upgrade_recommended": "upgrade_recommended", "upgrade_heroes": "upgrade_heroes",
+    "chain_attacks": "chain_attacks",
 }
 
 
@@ -147,7 +148,7 @@ class Bridge:
             if destination.suffix.lower() != ".zip":
                 destination = destination.with_suffix(".zip")
             try:
-                app.journal.export_bundle(destination)
+                app.export_diagnostic(destination)
             except (OSError, ValueError) as exc:
                 app._trace("ERREUR", f"Export impossible : {exc}")
                 return {"ok": False, "error": "Export impossible. Consultez le diagnostic du bot."}

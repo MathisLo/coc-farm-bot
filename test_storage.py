@@ -2,11 +2,24 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import main
+from modern_dashboard import FIELDS
 
 
 class StorageTests(unittest.TestCase):
+    def test_hero_upgrade_choice_is_saved_and_old_configs_keep_previous_behavior(self):
+        self.assertEqual(FIELDS['upgrade_heroes'], 'upgrade_heroes')
+        with tempfile.TemporaryDirectory() as parent:
+            directory = Path(parent)
+            config = directory / 'config-v2.json'
+            with patch.object(main, 'APP_DIR', directory), patch.object(main, 'CONFIG_PATH', config):
+                config.write_text('{"version":8,"upgrade_recommended":true}', encoding='utf-8')
+                self.assertTrue(main.load_settings().upgrade_heroes)
+                main.save_settings(main.replace(main.load_settings(), upgrade_heroes=False))
+                self.assertFalse(main.load_settings().upgrade_heroes)
+
     def test_new_version_erases_all_old_data_once(self):
         with tempfile.TemporaryDirectory() as parent:
             directory = Path(parent) / "CoCFarmBot"

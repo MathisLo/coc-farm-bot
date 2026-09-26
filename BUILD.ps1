@@ -5,13 +5,15 @@ $projectPython = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
 
 if (-not (Test-Path $projectPython)) {
     py -3 -m venv (Join-Path $PSScriptRoot '.venv')
-    if ($LASTEXITCODE -ne 0) { throw 'Création de l’environnement Python échouée.' }
+    if ($LASTEXITCODE -ne 0) { throw "Création de l’environnement Python échouée." }
 }
 
 if (-not $SkipDependencyInstall) {
     & $projectPython -m pip install -r (Join-Path $PSScriptRoot 'requirements.txt')
     if ($LASTEXITCODE -ne 0) { throw 'Installation des dépendances échouée.' }
 }
+& $projectPython -c 'import webview; assert callable(webview.create_window)'
+if ($LASTEXITCODE -ne 0) { throw 'pywebview absent : installer les dépendances avant de construire le lanceur.' }
 
 Push-Location $PSScriptRoot
 try {
@@ -22,10 +24,8 @@ try {
     $stagingDirectory = Join-Path $buildDirectory 'release'
     New-Item -ItemType Directory -Path $buildDirectory -Force | Out-Null
     $sourceNames = @('main.py', 'app_meta.py', 'calibration.py', 'farm_stats.py', 'dashboard.py', 'dashboard_layout.py', 'ui_theme.py', 'ui_widgets.py', 'modern_dashboard.py', 'web_dashboard.html', 'upgrades.py', 'requirements.txt')
-    $sourceNames += Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'assets') -Filter 'collector_*.png' -File | ForEach-Object { $_.FullName.Substring($PSScriptRoot.Length + 1).Replace('\','/') }
-    $sourceNames += 'assets/electro_counter_compact.png'
+    $sourceNames += Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'assets') -File -Recurse | ForEach-Object { $_.FullName.Substring($PSScriptRoot.Length + 1).Replace('\','/') }
     $sourceNames += Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'ui') -File -Recurse | ForEach-Object { $_.FullName.Substring($PSScriptRoot.Length + 1).Replace('\','/') }
-    $sourceNames += Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'assets\kit') -File -Recurse | ForEach-Object { $_.FullName.Substring($PSScriptRoot.Length + 1).Replace('\','/') }
     $sourceNames = @($sourceNames | Sort-Object -Unique)
     $sourceHashes = [ordered]@{}
     foreach ($sourceName in $sourceNames) {
@@ -53,10 +53,10 @@ try {
     if (-not $releaseCheck.WaitForExit(45000)) {
         # This is only the verification process started here, never a running bot.
         $releaseCheck.Kill()
-        throw 'Autotest de l’exécutable expiré : ancien exécutable conservé.'
+        throw "Autotest de l’exécutable expiré : ancien exécutable conservé."
     }
     $releaseCheck.Refresh()
-    if ($releaseCheck.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $reportPath)) { throw 'Autotest de l’exécutable échoué.' }
+    if ($releaseCheck.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $reportPath)) { throw "Autotest de l’exécutable échoué." }
     $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
     if (-not $report.ok -or -not $report.frozen) { throw 'Rapport de validation invalide.' }
     foreach ($sourceName in $sourceNames) {

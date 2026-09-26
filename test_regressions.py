@@ -1,5 +1,6 @@
 """Regression checks using fake windows: never send input to a real game."""
 import asyncio
+import json
 import queue
 import tempfile
 import threading
@@ -27,6 +28,16 @@ def app_without_gui():
 
 
 class CancellationRegressions(unittest.TestCase):
+    def test_builder_menu_must_not_supply_partial_gold_balance(self):
+        app = app_without_gui()
+        app._capture = Mock(return_value=Image.new('RGB', (1920, 1080)))
+        app._wait = Mock(return_value=False)
+        app._trace = Mock()
+        with patch.object(main, 'builders_menu_open', return_value=True), \
+             patch.object(main, 'read_safe_reserve') as read_balance:
+            self.assertIsNone(app.stable_reserves(object()))
+        read_balance.assert_not_called()
+
     def test_rage_counter_accepts_matching_readings_across_blank_frames(self):
         app = app_without_gui()
         app._battle_capture = Mock(return_value=Image.new('RGB', (1323, 744)))
@@ -40,6 +51,11 @@ class CancellationRegressions(unittest.TestCase):
         with Image.open(Path(__file__).parent / 'testdata' / 'vps_rage_x1_badge_1323.png') as badge:
             image.paste(badge, (705, 625))
         self.assertEqual(main.read_rage_count(image, 57.6), 1)
+
+    def test_mini_venom_rage_x1_is_not_misread_as_eleven(self):
+        fixture = Path(__file__).parent / 'testdata/mini_venom_rage_one_1920.png'
+        with Image.open(fixture) as image:
+            self.assertEqual(main.read_rage_count(image, 51.6), 1)
 
     def test_waiting_army_screen_is_exported_with_diagnostic(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -57,7 +73,7 @@ class CancellationRegressions(unittest.TestCase):
             bundle = Path(directory) / 'diagnostic.zip'
             journal.export_bundle(bundle)
             with zipfile.ZipFile(bundle) as archive:
-                self.assertIn(screenshot.name, archive.namelist())
+                self.assertIn(f'runs/{screenshot.name}', archive.namelist())
             journal.close()
 
     def test_ambiguous_upgrade_panel_is_exported_with_diagnostic(self):
@@ -70,7 +86,7 @@ class CancellationRegressions(unittest.TestCase):
             bundle = Path(directory) / 'diagnostic.zip'
             journal.export_bundle(bundle)
             with zipfile.ZipFile(bundle) as archive:
-                self.assertIn(screenshot.name, archive.namelist())
+                self.assertIn(f'runs/{screenshot.name}', archive.namelist())
             journal.close()
 
     def test_full_260_space_army_uses_capacity_limited_electrodragon_target(self):
@@ -87,6 +103,31 @@ class CancellationRegressions(unittest.TestCase):
             self.assertEqual(observed['electrodragon'], 8)
             if not ready:
                 self.assertIn('Rage', detail)
+
+    def test_mini_venom_army_with_unfillable_spare_places_is_ready(self):
+        fixture = Path(__file__).parent / 'testdata/mini_venom_army_ready_1920.png'
+        settings = main.replace(main.Settings(), electrodragon_count=10, dragon_count=1)
+        with Image.open(fixture) as image:
+            ready, detail, counts = main.army_readiness(image, settings)
+            self.assertTrue(ready, detail)
+            self.assertEqual(counts, {'electrodragon': 8, 'dragon': 1, 'rage': 5})
+            missing_hero = image.copy()
+            missing_hero.paste((80, 60, 50), (172, 263, 222, 292))
+            self.assertFalse(main.army_readiness(missing_hero, settings)[0])
+            missing_electro = image.copy()
+            missing_electro.paste((80, 60, 50), (991, 319, 1051, 352))
+            self.assertFalse(main.army_readiness(missing_electro, settings)[0])
+
+    def test_three_available_heroes_and_one_rage_are_ready(self):
+        image = Image.new('RGB', (1920, 1080))
+        settings = main.replace(main.Settings(), electrodragon_count=10, dragon_count=1)
+        with patch.object(main, 'army_fraction', side_effect=[(320, 320), (3, 4), (11, 11)]), \
+             patch.object(main, 'troop_card_kind', side_effect=['electrodragon', 'dragon'] + [None] * 5), \
+             patch.object(main, 'army_card_count', side_effect=[10, 1, None, 1]), \
+             patch.object(main, 'rage_card_score', side_effect=[0, .5, 0, 0, 0]):
+            ready, detail, observed = main.army_readiness(image, settings)
+        self.assertTrue(ready, detail)
+        self.assertEqual(observed['rage'], 1)
 
     def test_army_fraction_recovers_zero_rendered_as_t_or_c(self):
         image = Image.new('RGB', (1920, 1080))
@@ -146,7 +187,7 @@ class CancellationRegressions(unittest.TestCase):
             destination = Path(directory) / 'diagnostic.zip'
             journal.export_bundle(destination)
             with zipfile.ZipFile(destination) as archive:
-                self.assertIn(screenshot.name, archive.namelist())
+                self.assertIn(f'runs/{screenshot.name}', archive.namelist())
             journal.close()
 
     def test_all_forty_temporary_troops_are_deployed_and_verified(self):
@@ -464,6 +505,17 @@ class CancellationRegressions(unittest.TestCase):
             app.deploy_attack_composition(object())
         self.assertEqual(order[:4], ['troop', 'troop', 'rage', 'hero'])
 
+    def test_only_available_heroes_are_deployed(self):
+        app = app_without_gui()
+        app._army_preview_heroes = 3
+        app.deploy_unit = Mock(return_value=1)
+        app.deploy_rage_spells = Mock(return_value=1)
+        app._battle_capture = Mock(return_value=object())
+        with patch.object(main, 'hero_layout_shift', return_value=0), \
+             patch.object(main, 'hero_health_visible', return_value=True) as health:
+            app.deploy_attack_composition(object())
+        self.assertEqual(health.call_count, 3)
+
     def test_temporary_troops_follow_regular_army_and_heroes(self):
         app = app_without_gui()
         order = []
@@ -584,8 +636,9 @@ class CancellationRegressions(unittest.TestCase):
         clicks = app._click.call_args_list
         perimeter = main.layout_points("ELECTRODRAGON_PERIMETER_POINTS")
         slot = main.layout_points("HERO_SLOTS")[0]
-        self.assertEqual(len(clicks), len(perimeter) * 2)
-        for i in range(len(perimeter)):
+        self.assertEqual(len(clicks), len(perimeter) * 4)
+        self.assertEqual(clicks[1].args[1:], (13.0, 40.0))
+        for i in range(len(perimeter) * 2):
             self.assertEqual(clicks[i * 2].args[1:], slot)
         self.assertFalse(any("confirmé à" in str(e) for e in app.events.queue))
 
@@ -1316,6 +1369,63 @@ class ConnectionRegressions(unittest.TestCase):
 
 
 class DiagnosticLogRegressions(unittest.TestCase):
+    def test_launcher_export_reads_current_window_and_unsaved_options_without_clicking(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app = app_without_gui()
+            app.journal = main.DiagnosticJournal(root / 'bot.log')
+            for name in ('status', 'run_state', 'window_title', 'min_gold', 'min_elixir',
+                         'loot_margin', 'electrodragon_count', 'dragon_count',
+                         'delay_between_dragons', 'and_rule', 'dry_run', 'deploy_heroes',
+                         'upgrade_wall', 'upgrade_recommended', 'upgrade_heroes', 'chain_attacks'):
+                setattr(app, name, Mock())
+                getattr(app, name).get.return_value = False if name == 'upgrade_heroes' else 'ready'
+            app.window_title.get.return_value = 'Clash of Clans'
+            window = main.GameWindow(12, 'Clash of Clans', 1920, 1080)
+            target = root / 'diagnostic.zip'
+            with patch.object(main.WindowDriver, 'list_windows', return_value=[window]), \
+                 patch.object(main.WindowDriver, 'capture', return_value=Image.new('RGB', (15, 10))), \
+                 patch.object(main, 'self_test'), patch.object(main, 'validate_layout'):
+                app.export_diagnostic(target)
+            app.journal.close()
+            with zipfile.ZipFile(target) as archive:
+                manifest = json.loads(archive.read('diagnostic.json'))
+                self.assertIn('last_capture.png', archive.namelist())
+            self.assertFalse(manifest['context']['launcher_values']['upgrade_heroes'])
+            self.assertEqual(manifest['context']['capture_source'], 'capture actuelle sans clic')
+            self.assertEqual(manifest['context']['checks'], {'ocr': 'ok', 'layout': 'ok'})
+
+    def test_one_zip_contains_context_history_state_and_current_capture(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'config-v2.json').write_text('{"upgrade_heroes": false}', encoding='utf-8')
+            (root / 'farm-stats.json').write_text('{"battles": 3}', encoding='utf-8')
+            (root / 'account_snapshot.json').write_text('{"account_name": "NewAccount"}', encoding='utf-8')
+            (root / 'startup-error.txt').write_text('ModuleNotFoundError: webview', encoding='utf-8')
+            (root / 'unread-enemies').mkdir()
+            Image.new('RGB', (8, 8), 'red').save(root / 'unread-enemies' / 'enemy.png')
+            journal = main.DiagnosticJournal(root / 'bot.log')
+            first = journal.start_run('attack', main.Settings())
+            journal.record('ERREUR', 'first battle failed')
+            journal.end_run('erreur')
+            second = journal.start_run('upgrade', main.Settings())
+            journal.record('ÉTAPE', 'builder reserved')
+            journal.end_run('terminée')
+            target = root / 'support.zip'
+            journal.export_bundle(target, context={'selected_window': 'Clash of Clans', 'busy': False},
+                                  capture=Image.new('RGB', (12, 9), 'blue'))
+            journal.close()
+            with zipfile.ZipFile(target) as archive:
+                names = set(archive.namelist())
+                self.assertTrue({'diagnostic.json', 'bot.log', 'config-v2.json',
+                                 'farm-stats.json', 'account_snapshot.json', 'startup-error.txt',
+                                 'last_capture.png', f'runs/{first.name}', f'runs/{second.name}',
+                                 'unread-enemies/enemy.png'} <= names)
+                manifest = json.loads(archive.read('diagnostic.json'))
+                self.assertEqual(manifest['context']['selected_window'], 'Clash of Clans')
+                self.assertEqual(manifest['app_version'], main.APP_VERSION)
+                self.assertIn('first battle failed', archive.read('bot.log').decode('utf-8'))
+
     def test_unreadable_final_reward_screen_is_in_diagnostic_zip(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1326,8 +1436,11 @@ class DiagnosticLogRegressions(unittest.TestCase):
             journal.export_bundle(bundle)
             journal.close()
             with zipfile.ZipFile(bundle) as archive:
-                self.assertEqual(set(archive.namelist()), {run.name, screenshot.name})
-                self.assertIn('Capture du choix final non reconnu', archive.read(run.name).decode('utf-8'))
+                self.assertIn(f'runs/{run.name}', archive.namelist())
+                self.assertIn(f'runs/{screenshot.name}', archive.namelist())
+                self.assertIn('diagnostic.json', archive.namelist())
+                self.assertIn('bot.log', archive.namelist())
+                self.assertIn('Capture du choix final non reconnu', archive.read(f'runs/{run.name}').decode('utf-8'))
 
     def test_each_action_has_an_exportable_log_and_error_screen(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1346,8 +1459,9 @@ class DiagnosticLogRegressions(unittest.TestCase):
             journal.close()
             self.assertNotEqual(first,second)
             with zipfile.ZipFile(bundle) as archive:
-                self.assertEqual(set(archive.namelist()),{first.name,first.with_suffix('.png').name})
-                text = archive.read(first.name).decode('utf-8')
+                self.assertIn(f'runs/{first.name}', archive.namelist())
+                self.assertIn(f'runs/{first.with_suffix(".png").name}', archive.namelist())
+                text = archive.read(f'runs/{first.name}').decode('utf-8')
             self.assertIn('Rempart x203',text)
             self.assertIn('Statut=erreur',text)
             self.assertNotIn('ouvrier réservé',text)

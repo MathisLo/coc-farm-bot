@@ -1,8 +1,12 @@
 """Focused regressions for the farm decisions; no game window is needed."""
 
 import queue
+import json
+import sys
+import tempfile
 import threading
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -11,6 +15,17 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 class FarmLogicTests(unittest.TestCase):
+    def test_package_report_rejects_missing_webview(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(main, "self_test"), \
+             patch.object(main, "validate_layout"), \
+             patch.dict(sys.modules, {"webview": None}):
+            report_path = Path(directory) / "report.json"
+            self.assertEqual(main.self_test_report(report_path), 1)
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertFalse(report["ok"])
+        self.assertIn("webview", report["error"])
+
     def test_loot_does_not_prefer_truncated_mask_reading(self):
         with patch.object(main, "read_text", side_effect=["1 256 104", "256 104"]):
             self.assertEqual(main.read_resource_number(Image.new("RGB", (100, 40)))[0], 1256104)

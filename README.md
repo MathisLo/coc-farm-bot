@@ -1,4 +1,12 @@
-# CoC Farm Bot v2.0.8
+# CoC Farm Bot v2.0.11
+
+## Diagnostic complet (v2.0.11)
+
+Dans le lanceur, ouvrir **Outils** ou **Journal**, puis cliquer sur **Exporter le diagnostic**. Enregistrer le ZIP et le joindre seul au signalement du problème. Il contient les journaux récents et complets, les captures disponibles, les réglages enregistrés et affichés, l'état de la fenêtre du jeu, les contrôles OCR, la version et l'empreinte de l'EXE. Une panne au démarrage affiche un écran de secours avec le même export.
+
+Le ZIP peut contenir le nom du compte, des captures du jeu et des chemins locaux : le transmettre uniquement à la personne chargée du dépannage. L'export n'envoie rien automatiquement.
+
+Validation du 26 septembre 2026 sur PC-FIXE : 284 tests passent et un ZIP créé à partir des données du bot a été ouvert et contrôlé. Cette vérification du diagnostic est distincte des essais en jeu sur TCD_VeNom.
 
 ## Validation du 24 septembre 2026 (v2.0.8)
 

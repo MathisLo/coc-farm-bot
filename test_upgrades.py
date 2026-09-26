@@ -8,6 +8,63 @@ import upgrades
 
 
 class UpgradeTests(unittest.TestCase):
+    def test_hero_upgrade_labels_exclude_hero_hall_and_hero_eradicator(self):
+        for title in ('Roi des barbares', 'oi des barbare', 'Reine des archères',
+                      ';rand gardien', 'Championne royale', 'Prince gargouille'):
+            with self.subTest(title=title):
+                self.assertTrue(upgrades.is_hero_upgrade(title))
+        for title in ('Hall des Héros', 'Éradicateur de héros', 'Tour d’archères', 'Tesla camouflée'):
+            with self.subTest(title=title):
+                self.assertFalse(upgrades.is_hero_upgrade(title))
+
+    def test_disabled_hero_upgrade_never_selects_a_hero_row(self):
+        app = app_without_gui()
+        app.settings = main.replace(app.settings, upgrade_heroes=False)
+        app._capture = Mock(return_value=Image.new('RGB', (1920, 1080)))
+        app._wait = Mock()
+        app._trace = Mock()
+        rows = [(';rand gardien', 30, 17_500_000, 'élixir'),
+                ('Tesla camouflée', 40, 6_500_000, 'or')]
+        with patch.object(upgrades, 'scroll_builders_to_top'), \
+             patch.object(upgrades, 'suggested_items', return_value=rows), \
+             patch.object(upgrades, 'menu_anchor_rows', return_value=[]), \
+             patch.object(main, 'builders_menu_open', return_value=True), \
+             patch.object(main, 'read_text', return_value='same'), \
+             patch.object(main.WindowDriver, 'scroll_menu', return_value=True):
+            choice = upgrades.find_payable_upgrade(app, 'window', 3,
+                                                   (10_000_000, 19_000_000))
+            app.settings = main.replace(app.settings, upgrade_heroes=True)
+            enabled_choice = upgrades.find_payable_upgrade(app, 'window', 3,
+                                                           (10_000_000, 19_000_000))
+        self.assertEqual(choice, rows[1])
+        self.assertEqual(enabled_choice, rows[0])
+
+    def test_tcd_venom_grand_warden_direct_dialog_requires_exact_price(self):
+        self.assertTrue(upgrades.same_building_title('Frand gardien Hall des HeROS', ';rand gardien'))
+        with Image.open(Path(__file__).parent / 'testdata' / 'tcd_venom_grand_warden_direct_1920.png') as image:
+            self.assertEqual(upgrades.direct_upgrade_button(image, ';rand gardien', 17_500_000, 'élixir'), (70, 87))
+            self.assertIsNone(upgrades.direct_upgrade_button(image, ';rand gardien', 7_500_000, 'élixir'))
+            self.assertIsNone(upgrades.direct_upgrade_button(image, 'Caserne noire', 17_500_000, 'élixir'))
+
+    def test_tcd_venom_builder_menu_top_recovers_available_heading(self):
+        with Image.open(Path(__file__).parent / 'testdata' / 'tcd_venom_builder_top_1920.png') as image:
+            app = app_without_gui()
+            app._capture = Mock(return_value=image)
+            app._trace = Mock()
+            with patch.object(main.WindowDriver, 'scroll_menu') as scroll:
+                upgrades.scroll_builders_to_top(app, object())
+            scroll.assert_not_called()
+
+    def test_tcd_venom_hero_roster_is_detected_beneath_confirmation(self):
+        with Image.open(Path(__file__).parent / 'testdata' / 'tcd_venom_hero_roster_1920.png') as image:
+            self.assertTrue(upgrades.hero_roster_open(image))
+
+    def test_mini_venom_confirmation_reads_current_price_above_old_price(self):
+        image = Image.new('RGB', (1920, 1080), 'white')
+        price = Image.open(Path(__file__).with_name('testdata') / 'mini_venom_upgrade_price.png')
+        image.paste(price, (1210, 918))
+        self.assertEqual(upgrades.confirmation_cost(image), 2_880_000)
+
     def test_rejected_selected_panel_is_closed_before_builder_menu_reopens(self):
         app = app_without_gui()
         app._capture = Mock(return_value=Image.new('RGB', (1323, 744)))
@@ -629,7 +686,7 @@ class UpgradeTests(unittest.TestCase):
             self.assertAlmostEqual((x-x0)*(y1-y0), (y-y0)*(x1-x0))
         drops=[c.args[1:] for c in app._click.call_args_list][1::2]
         self.assertEqual(len(drops), 4)
-        self.assertTrue(all(p in line for p in drops))
+        self.assertTrue(all(p == (max(5.0, x0 - 5.0), y0) for p in drops))
         self.assertTrue(all(c.args[0] <= .12 for c in app._wait.call_args_list))
 
     def test_hdv_waits_for_other_rows_and_running_builders(self):
@@ -721,6 +778,17 @@ class UpgradeTests(unittest.TestCase):
              patch.object(main.WindowDriver, 'scroll_menu') as scroll:
             with self.assertRaisesRegex(RuntimeError, 'Liste des ouvriers absente'):
                 upgrades.scroll_builders_to_top(app, 'window')
+        scroll.assert_not_called()
+
+    def test_all_builders_free_menu_is_already_at_top(self):
+        app = app_without_gui()
+        app._capture = Mock(return_value=Image.new('RGB', (1920, 1080)))
+        app._trace = Mock()
+        heading = "disponible ! disponible ameliorations suggerees : extracteur d'elixir x6"
+        with patch.object(main, 'builders_menu_open', return_value=True), \
+             patch.object(main, 'read_text', return_value=heading), \
+             patch.object(main.WindowDriver, 'scroll_menu') as scroll:
+            upgrades.scroll_builders_to_top(app, 'window')
         scroll.assert_not_called()
 
     def test_automatic_walls_require_a_confirmed_free_builder(self):
@@ -875,7 +943,8 @@ class UpgradeTests(unittest.TestCase):
                                                               6_000_000,'élixir'),
                              (2,(3_466_604,7_320_672)))
         app._wait.assert_called_once_with(.4)
-        self.assertEqual(app._wall_click.call_args_list[-1].args[1],(83,43))
+        self.assertIn((83,43), [call.args[1] for call in app._wall_click.call_args_list])
+        self.assertEqual(app._wall_click.call_args_list[-1].args[1], main.BUILDERS_BUTTON)
 
     def test_compact_canon_panel_and_confirmation_require_exact_price(self):
         with Image.open(Path(__file__).parent/'testdata/canon_selected_1323.png') as image:

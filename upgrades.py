@@ -4,7 +4,8 @@ import unicodedata
 import sys
 from collections import Counter
 from difflib import SequenceMatcher
-from PIL import ImageChops, ImageStat
+from pathlib import Path
+from PIL import Image, ImageChops, ImageStat
 
 def engine():
     module = sys.modules.get("main") or sys.modules["__main__"]
@@ -25,6 +26,9 @@ def canonical_title(text):
 
 def same_building_title(a, b):
     a, b = canonical_title(a), canonical_title(b)
+    # Adjacent Hall of Heroes text can bleed into the Grand Warden row.
+    a = a[:a.index('hall')] if 'gardien' in a and 'hall' in a and a.index('gardien') < a.index('hall') else a
+    b = b[:b.index('hall')] if 'gardien' in b and 'hall' in b and b.index('gardien') < b.index('hall') else b
     return bool(a and b and (a == b or (min(len(a), len(b)) >= 9 and
                                  SequenceMatcher(None, a, b).ratio() >= .83)))
 
@@ -51,6 +55,19 @@ def is_town_hall(title):
     return any(word in label for word in ('hotel', 'hobel', 'ville', 'hdv'))
 
 
+def is_hero_upgrade(title):
+    """Recognize hero rows despite the clipped first letter in builder OCR."""
+    label = canonical_title(title)
+    return ('gardien' in label or 'champion' in label or 'hampion' in label or
+            'gargou' in label or
+            ('barbar' in label and ('roi' in label or 'oides' in label)) or
+            ('archer' in label and ('reine' in label or 'einedes' in label)))
+
+
+def hero_upgrades_enabled(app):
+    return getattr(app.settings, 'upgrade_heroes', True)
+
+
 def is_wall_row(title):
     label = canonical_title(title)
     return 'mpart' in label or bool(re.fullmatch(r'x\d+', label))
@@ -62,11 +79,24 @@ def confirmation_headings(image):
             for roi, scale in ((m.Roi(15,3,85,10),1), (m.Roi(20,4,80,9),2))]
 
 
+def hero_roster_open(image):
+    if not isinstance(image, Image.Image):
+        return False
+    m = engine()
+    return 'aventure' in normal(m.read_text(m.crop_percent(image,m.Roi(20,10,80,19)),scale=2))
+
+
 def direct_upgrade_button(image, title, cost, resource):
     """Find a verified direct confirmation on special building panels."""
     m = engine()
     if not any(title_matches_heading(title, heading) for heading in confirmation_headings(image)):
         return None
+    # Some Hall of Heroes rows open the full confirmation immediately.
+    # Require the heading, current price, resource icon and Confirm label.
+    if (confirmation_cost(image) == cost and
+            resource_icon(image, m.Roi(74.5,85.5,77.5,92)) == resource and
+            m.has_screen_text(m.crop_percent(image, m.Roi(61,80,78,87)), 'confirmer')):
+        return (70, 87)
     roi = m.Roi(75,18,90,67)
     buttons = []
     for word, x, y in m.read_word_centers(m.crop_percent(image, roi)):
@@ -131,12 +161,17 @@ def selected_panel_title_matches(image, title):
     expected = canonical_title(title)
     if len(expected) < 6:
         return False
-    for scale in (1, 2):
-        raw = normal(m.read_text(m.crop_percent(image, m.Roi(20,65,80,82)), scale=scale))
+    # The wide crop includes action buttons whose lettering can overwhelm the
+    # stylized building name at 1920x1080. Read that heading alone as well.
+    for roi, scale in ((m.Roi(30,67,70,76), 3),
+                       (m.Roi(20,65,80,82), 1),
+                       (m.Roi(20,65,80,82), 2)):
+        raw = normal(m.read_text(m.crop_percent(image, roi), scale=scale))
         if 'niveau' not in raw:
             continue
         observed = canonical_title(raw.split('niveau', 1)[0])
-        if any(SequenceMatcher(None, expected, observed[start:start+length]).ratio() >= .78
+        if abs(len(observed) - len(expected)) <= 3 and any(
+               SequenceMatcher(None, expected, observed[start:start+length]).ratio() >= .78
                for length in range(max(4, len(expected)-1), len(expected)+3)
                for start in range(max(0, len(observed)-length+1))):
             return True
@@ -146,7 +181,8 @@ def selected_panel_title_matches(image, title):
 def confirmation_cost(image):
     m = engine()
     readings = []
-    rois = (m.Roi(63,87,76,93), m.Roi(63,87,75,93)) if image.width < 1500 else (m.Roi(63,86,75,91),)
+    rois = ((m.Roi(63,87,76,93), m.Roi(63,87,75,93)) if image.width < 1500 else
+            (m.Roi(63,85,75,89), m.Roi(63,87,76,93), m.Roi(63,87,75,93)))
     for roi in rois:
         price = m.crop_percent(image,roi)
         for scale in (1,2,3,4):
@@ -355,14 +391,22 @@ def scroll_builders_to_top(app, window):
         # before scrolling; otherwise an already-top menu is needlessly
         # scrolled twenty times and the wall/building pass aborts.
         heading = normal(m.read_text(m.crop_percent(menu,m.Roi(37,11,65,65)),scale=2))
-        has_running_header = any(marker in heading for marker in ('en cours', 'encours', 'enpours'))
         app._trace('MENU OUVRIERS',f'Retour en haut {attempt+1}/20 : texte={heading[:500]!r}')
-        if 'sugger' in heading and has_running_header and 'disponible' in heading:
+        # When every builder is free the menu has no "En cours" section.
+        # The suggested heading itself proves that the list is at its top.
+        available = 'disponible' in heading
+        if not available and 'sugger' in heading:
+            # The selected-building label can make full-panel OCR omit this
+            # heading even though it is visibly between running and suggested.
+            available = 'disponible' in normal(m.read_text(
+                m.crop_percent(menu,m.Roi(39,29,51,35)),scale=2))
+        if 'sugger' in heading and available:
             app._trace('MENU OUVRIERS','Début de la liste confirmé.')
             return
         # The live VM can omit the suggested heading for one OCR pass even
         # after the menu reached the top. Require a stable frame and the
         # fixed in-progress/available header before accepting that state.
+        has_running_header = any(marker in heading for marker in ('en cours', 'encours', 'enpours'))
         if (previous_menu is not None and _menu_image_is_stable(previous_menu, menu)
                 and has_running_header and 'disponible' in heading):
             app._trace('MENU OUVRIERS','DÃ©but de la liste confirmÃ© par image stable.')
@@ -435,7 +479,8 @@ def find_payable_upgrade(app, window, free, balances, include_town_hall=False, e
     for _ in range(5):
         seen_top = set()
         for item in suggested_items(app._capture(window), include_town_hall=include_town_hall):
-            if (any(same_building_title(item[0], title) for title in excluded_titles or ())
+            if ((not hero_upgrades_enabled(app) and is_hero_upgrade(item[0]))
+                    or any(same_building_title(item[0], title) for title in excluded_titles or ())
                     or not can_start_upgrade(free, balances[0 if item[3]=='or' else 1], item[2])):
                 continue
             index = next((index for index, record in enumerate(observations)
@@ -453,6 +498,8 @@ def find_payable_upgrade(app, window, free, balances, include_town_hall=False, e
         app._trace('BÂTIMENTS',f'Page {page+1}/20 : lignes={items!r}')
         seen = set()
         for item in items:
+            if not hero_upgrades_enabled(app) and is_hero_upgrade(item[0]):
+                continue
             if excluded_titles and any(same_building_title(item[0], title) for title in excluded_titles):
                 continue
             if not can_start_upgrade(free, balances[0 if item[3]=='or' else 1], item[2]):
@@ -512,6 +559,8 @@ def find_payable_upgrade(app, window, free, balances, include_town_hall=False, e
         for _ in range(4 if page == 0 else 1):
             menu = app._capture(window)
             for item in suggested_items(menu,include_others=True,include_town_hall=include_town_hall):
+                if not hero_upgrades_enabled(app) and is_hero_upgrade(item[0]):
+                    continue
                 if excluded_titles and any(same_building_title(item[0], title) for title in excluded_titles):
                     continue
                 if same_building_title(item[0], best[0]) and item[2:] == best[2:]:
@@ -539,7 +588,11 @@ def perform_direct_upgrade(app, window, title, cost, resource):
     """Reopen and recheck a special panel before its direct payment click."""
     m = engine()
     app._wall_click(window,(88.4,7.5),'fermer la confirmation directe')
+    if hero_roster_open(app._capture(window)):
+        app._wall_click(window,(95,14),'fermer la liste des héros avant contrôle')
     free = stable_builders(app,window)
+    if m.builders_menu_open(app._capture(window)):
+        app._wall_click(window,m.BUILDERS_BUTTON,'fermer la liste avant lecture des réserves')
     balances = app.stable_reserves(window)
     app._trace('BÂTIMENTS',f'Contrôle direct avant achat : {title!r}, coût={cost} {resource}, ouvriers={free}, réserves={balances}')
     if balances is None or not can_start_upgrade(free,balances[0 if resource=='or' else 1],cost):
@@ -575,6 +628,10 @@ def perform_direct_upgrade(app, window, title, cost, resource):
         # Special building panels remain open after the purchase and hide the
         # worker and resource counters used to verify the actual spend.
         app._wall_click(window,(88.4,7.5),'fermer le panneau après confirmation')
+    if hero_roster_open(app._capture(window)):
+        app._wall_click(window,(95,14),'fermer la liste des héros après achat')
+    if m.builders_menu_open(app._capture(window)):
+        app._wall_click(window,m.BUILDERS_BUTTON,'fermer la liste après achat direct')
     return free, balances
 
 
@@ -658,6 +715,10 @@ def upgrade_suggested(app, window, max_upgrades=5):
             return completed
         title, y, cost, resource = choice
         app._trace('BÂTIMENTS',f'Sélection : {title!r} à y={y:.2f} %, coût={cost} {resource}')
+        if not hero_upgrades_enabled(app) and is_hero_upgrade(title):
+            app.events.put('Amélioration des héros désactivée : aucune dépense envoyée.')
+            app._wall_click(window, m.BUILDERS_BUTTON, 'fermer la liste des héros exclus')
+            return completed
         if is_town_hall(title) and not allow_town_hall:
             raise RuntimeError('Hôtel de ville exclu des améliorations automatiques.')
         # The list can move after the row is found; confirm its current
@@ -690,6 +751,10 @@ def upgrade_suggested(app, window, max_upgrades=5):
             if m.builders_menu_open(selected):
                 app.events.put('Liste des ouvriers encore ouverte après sélection : aucune dépense envoyée.')
                 return completed
+        if not hero_upgrades_enabled(app) and any(is_hero_upgrade(h) for h in confirmation_headings(selected)):
+            app._wall_click(window,(88.4,7.5),'fermer la confirmation de héros exclue')
+            app.events.put('Amélioration des héros désactivée : aucune dépense envoyée.')
+            return completed
         if direct_upgrade_button(selected,title,cost,resource) is not None:
             checked = perform_direct_upgrade(app,window,title,cost,resource)
             if checked is None:
@@ -699,7 +764,20 @@ def upgrade_suggested(app, window, max_upgrades=5):
             failed_choices = 0
             continue
         panel_verified = selected_panel_matches(selected,title,cost,resource)
-        if not panel_verified and not selected_panel_title_matches(selected,title):
+        title_verified = selected_panel_title_matches(selected,title)
+        for _ in range(4):
+            if panel_verified or title_verified:
+                break
+            # The selected-name banner animates after the builder list closes.
+            # Re-read it before treating a correct selection as a wrong one.
+            app._wait(.35)
+            selected = app._capture(window)
+            panel_verified = selected_panel_matches(selected,title,cost,resource)
+            title_verified = selected_panel_title_matches(selected,title)
+        if not panel_verified and not title_verified:
+            journal = getattr(app, 'journal', None)
+            if journal is not None:
+                journal.save_upgrade_screen(selected)
             app.events.put(f'Sélection vérifiée différente de {title} : aucune dépense envoyée.')
             skipped_titles.add(title)
             failed_choices += 1
@@ -732,7 +810,7 @@ def upgrade_suggested(app, window, max_upgrades=5):
                 journal.save_upgrade_screen(selected)
             app._trace('BÂTIMENTS', f'Boutons Améliorer visibles : {buttons!r}')
         chosen_button = None
-        for button in buttons[:3]:
+        for button_index, button in enumerate(buttons[:3], 1):
             app._wall_click(window, button, 'ouvrir la confirmation')
             dialog = app._capture(window)
             headings = confirmation_headings(dialog)
@@ -743,6 +821,10 @@ def upgrade_suggested(app, window, max_upgrades=5):
                 dialog = app._capture(window)
                 headings = confirmation_headings(dialog)
             app._trace('BÂTIMENTS',f'Titres de confirmation pour {button!r} : {headings!r}')
+            if not hero_upgrades_enabled(app) and any(is_hero_upgrade(h) for h in headings):
+                app._wall_click(window,(88.4,7.5),'fermer la confirmation de héros exclue')
+                app.events.put('Amélioration des héros désactivée : aucune dépense envoyée.')
+                return completed
             if any(is_town_hall(heading) for heading in headings) and not allow_town_hall:
                 app._wall_click(window,(88.4,7.5),'fermer la confirmation HDV interdite')
                 raise RuntimeError('HDV exclu des améliorations automatiques : aucune dépense envoyée.')
@@ -754,6 +836,12 @@ def upgrade_suggested(app, window, max_upgrades=5):
             confirmed_cost = confirmation_cost(dialog)
             confirmed_resource = resource_icon(dialog,m.Roi(74.5,85.5,77.5,92))
             app._trace('BÂTIMENTS',f'Confirmation : {confirmed_cost} {confirmed_resource}; attendus={cost} {resource}')
+            if confirmed_cost != cost or confirmed_resource != resource:
+                journal = getattr(app, 'journal', None)
+                if journal is not None and isinstance(journal.run_path, Path):
+                    dialog_path = journal.run_path.with_name(journal.run_path.stem + f'-dialog-{button_index}.png')
+                    dialog.save(dialog_path)
+                    app._trace('BÂTIMENTS', f'Confirmation ambiguë enregistrée : {dialog_path}')
             if confirmed_cost == cost and confirmed_resource == resource:
                 chosen_button = button
                 break
@@ -773,7 +861,10 @@ def upgrade_suggested(app, window, max_upgrades=5):
             return completed
         app._wall_click(window,chosen_button,'rouvrir la confirmation')
         final = app._capture(window)
-        if not any(title_matches_heading(title,heading) for heading in confirmation_headings(final)):
+        final_headings = confirmation_headings(final)
+        if not hero_upgrades_enabled(app) and any(is_hero_upgrade(h) for h in final_headings):
+            raise RuntimeError('Amélioration des héros désactivée : aucune dépense envoyée.')
+        if not any(title_matches_heading(title,heading) for heading in final_headings):
             raise RuntimeError('La confirmation a changé : arrêt.')
         final_cost = confirmation_cost(final)
         app._trace('BÂTIMENTS',f'Prix final={final_cost}, ressource finale={resource_icon(final,m.Roi(74.5,85.5,77.5,92))}')

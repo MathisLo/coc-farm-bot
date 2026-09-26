@@ -8,8 +8,10 @@ import ctypes
 from ctypes import wintypes
 from datetime import datetime
 import hashlib
+import io
 import json
 import math
+import platform
 import queue
 import re
 import shutil
@@ -162,6 +164,7 @@ class Settings:
     deploy_heroes: bool = True
     upgrade_wall_between_attacks: bool = True
     upgrade_recommended: bool = True
+    upgrade_heroes: bool = True
     chain_attacks: bool = True
     delay_between_dragons_ms: int = 180
     dry_run: bool = False
@@ -464,6 +467,15 @@ def white_text_mask(image: Image.Image) -> Image.Image:
 def read_safe_reserve(image: Image.Image, resource: str) -> int | None:
     """Read a home-village reserve conservatively; invalid OCR stops upgrades."""
     calibrated = f"PROFILE_ROIS.{resource}" in getattr(getattr(_operation, "settings", None), "layout_overrides", {})
+    if resource == 'gold' and image.size == (1920, 1080) and not calibrated:
+        # The outer strip can lose the leading "16" on TCD_VeNom while the
+        # narrower numeric strip still shows the complete eight digits.
+        tight = crop_percent(image, Roi(87, 3.1, 95.3, 6.1))
+        readings = [parse_reserve_number(read_text(tight, scale=scale)) for scale in (2, 3, 5)]
+        full = [value for value in readings if value is not None and 1_000_000 <= value <= 20_000_000]
+        agreed = [value for value in set(full) if full.count(value) >= 2]
+        if len(agreed) == 1:
+            return agreed[0]
     if resource == "gold" and image.width < 1500 and not calibrated:
         strip = ImageOps.grayscale(crop_percent(image, Roi(87.1, 3.0, 95.1, 6.4)))
         threshold_readings = [parse_reserve_number(read_text(
@@ -610,6 +622,35 @@ def army_fraction(image: Image.Image, roi: Roi) -> tuple[int, int] | None:
 
 
 def army_card_count(image: Image.Image, roi: Roi) -> int | None:
+    if image.size == (1323, 744) and roi.y1 < 40:
+        badge = crop_percent(image, Roi(roi.x1, 29.4, roi.x1 + 2.5, 33.0)).convert('RGB')
+        mask = Image.frombytes('L', badge.size, bytes(
+            0 if min(pixel) > 180 and max(pixel)-min(pixel) < 65 else 255
+            for pixel in badge.get_flattened_data()))
+        template_path = ASSET_DIR / 'army_x1_1323_mask.png'
+        if template_path.is_file():
+            with Image.open(template_path) as template:
+                if template.size == mask.size and ImageStat.Stat(
+                        ImageChops.difference(mask, template)).mean[0] <= 8:
+                    return 1
+    if image.size == (1920, 1080) and roi.y1 < 40:
+        # Windows OCR drops the tiny x1/x8 badges in the Mini-VeNom army.
+        # Match only the white badge lettering; card artwork is excluded.
+        badge = crop_percent(image, Roi(roi.x1 + .3, 29.54, roi.x1 + 3.43, 32.59)).convert('RGB')
+        mask = Image.frombytes('L', badge.size, bytes(
+            0 if min(pixel) > 180 and max(pixel)-min(pixel) < 65 else 255
+            for pixel in badge.get_flattened_data()))
+        scores = []
+        for name, count in (('army_dragon_x1_1920_mask.png', 1),
+                            ('army_electro_x8_1920_mask.png', 8)):
+            path = ASSET_DIR / name
+            if path.is_file():
+                with Image.open(path) as template:
+                    if template.size == mask.size:
+                        scores.append((ImageStat.Stat(ImageChops.difference(mask, template)).mean[0], count))
+        scores.sort()
+        if len(scores) == 2 and scores[0][0] <= 8 and scores[1][0] - scores[0][0] >= 20:
+            return scores[0][1]
     for scale in (2, 3, 5):
         raw = read_text(crop_percent(image, roi), scale=scale).casefold()
         raw = raw.translate(str.maketrans({"o": "0", "i": "1", "l": "1", "×": "x"}))
@@ -640,6 +681,17 @@ def army_readiness(image: Image.Image, settings: Settings) -> tuple[bool, str, d
     heroes = army_fraction(image, Roi(8, 23, 13, 28))
     if heroes is None and image.width < 1500:
         heroes = army_fraction(image, Roi(7, 23, 14, 28))
+    if heroes is None and image.size == (1920, 1080):
+        badge = image.crop((172, 263, 222, 292)).convert('RGB')
+        mask = Image.frombytes('L', badge.size, bytes(
+            0 if min(pixel) > 180 and max(pixel)-min(pixel) < 65 else 255
+            for pixel in badge.get_flattened_data()))
+        template_path = ASSET_DIR / 'army_heroes_3of3_1920_mask.png'
+        if template_path.is_file():
+            with Image.open(template_path) as template:
+                if template.size == mask.size and ImageStat.Stat(
+                        ImageChops.difference(mask, template)).mean[0] <= 8:
+                    heroes = (3, 3)
     spells = army_fraction(image, Roi(45, 46, 51, 51))
     troop_cards = {}
     for index in range(7):
@@ -655,11 +707,20 @@ def army_readiness(image: Image.Image, settings: Settings) -> tuple[bool, str, d
         left = 44.3 + index * 7.3
         if rage_card_score(image, Roi(left + .7, 54, left + 6.7, 63)) >= .3:
             rage_count = army_card_count(image, Roi(left - .3, 51, left + 7.7, 65))
+            if rage_count is None:
+                rage_count = army_card_count(image, Roi(left - .2, 51, left + 2.3, 55))
             break
     observed: dict[str, int | None] = {"electrodragon": troop_cards.get("electrodragon"),
                 "dragon": troop_cards.get("dragon"), "rage": rage_count}
-    if troops is None or troops[0] != troops[1]:
+    if troops is None or troops[0] > troops[1]:
         return False, f"places de troupe {troops or 'illisibles'}", observed
+    if (observed["dragon"] is None and "dragon" in troop_cards and
+            observed["electrodragon"] is not None and settings.dragon_count > 0 and
+            troops[0] - observed["electrodragon"] * ELECTRODRAGON_HOUSING ==
+            settings.dragon_count * DRAGON_HOUSING):
+        # The card artwork confirms a dragon; some scaled clients drop its
+        # x1 badge. Exact remaining housing supplies the missing count.
+        observed["dragon"] = settings.dragon_count
     possible_electrodragons = max(0, (troops[1] - settings.dragon_count * DRAGON_HOUSING)
                                   // ELECTRODRAGON_HOUSING)
     required_electrodragons = min(settings.electrodragon_count, possible_electrodragons)
@@ -670,12 +731,19 @@ def army_readiness(image: Image.Image, settings: Settings) -> tuple[bool, str, d
         capacity_note = (f" (capacité {troops[1]}, réglage {settings.electrodragon_count})"
                          if required_electrodragons < settings.electrodragon_count else "")
         return False, f"électro-dragons {observed['electrodragon']} / {required_electrodragons}{capacity_note}", observed
-    if settings.dragon_count and "dragon" not in troop_cards:
-        return False, "carte Dragon absente", observed
-    if settings.deploy_heroes and (heroes is None or heroes[0] < 4):
+    if settings.dragon_count and (observed["dragon"] is None or
+                                  observed["dragon"] < settings.dragon_count):
+        return False, f"dragons {observed['dragon']} / {settings.dragon_count}", observed
+    required_housing = (required_electrodragons * ELECTRODRAGON_HOUSING +
+                        settings.dragon_count * DRAGON_HOUSING)
+    if troops[0] < required_housing:
+        return False, f"places de troupe {troops}, composition attendue {required_housing}", observed
+    # One hero can be under upgrade while the other three are battle-ready.
+    if settings.deploy_heroes and (heroes is None or heroes[1] < 1 or
+                                   heroes[0] < min(3, heroes[1])):
         return False, f"héros {heroes or 'illisibles'}", observed
-    if spells is None or spells[0] < ARMY_REQUIRED_RAGE * 2 or rage_count is None or rage_count < ARMY_REQUIRED_RAGE:
-        return False, f"Rage {rage_count} / {ARMY_REQUIRED_RAGE}, places de sort {spells or 'illisibles'}", observed
+    if spells is None or spells[0] < ARMY_REQUIRED_RAGE * 2 or rage_count is None or rage_count < 1:
+        return False, f"Rage {rage_count} / 1 minimum, places de sort {spells or 'illisibles'}", observed
     capacity_note = (f", électro-dragons attendus x{required_electrodragons} au lieu du réglage x{settings.electrodragon_count}"
                      if required_electrodragons < settings.electrodragon_count else "")
     return True, f"troupes {troops[0]}/{troops[1]}, héros {heroes}, Rage x{rage_count}{capacity_note}", observed
@@ -915,7 +983,7 @@ def read_rage_count(image: Image.Image, slot_center: float | None = None) -> int
         raw = read_text(white_text_mask(crop_percent(image, tight)), scale=5).casefold()
         raw = raw.translate(str.maketrans({"s": "5", "l": "1", "i": "1"}))
         match = re.fullmatch(r"x\s*(\d{1,2})[^0-9]?", raw.strip())
-        if match and int(match.group(1)) <= 12:
+        if match and int(match.group(1)) <= 5:
             return int(match.group(1))
     for offset in (0, -2, .5, -1.5, -1, -.5, 1):
         roi = rage_region("RAGE_COUNT_ROI", center + offset)
@@ -927,7 +995,7 @@ def read_rage_count(image: Image.Image, slot_center: float | None = None) -> int
             raw = read_text(counter, scale=scale).casefold().replace("×", "x")
             raw = raw.translate(str.maketrans({"o": "0", "i": "1", "l": "1", "s": "5", "b": "8"}))
             match = re.fullmatch(r"x\s*(\d{1,2})", raw.strip())
-            if match:
+            if match and int(match.group(1)) <= 5:
                 return int(match.group(1))
     if rage_counter_is_two(image, center):
         return 2
@@ -2252,6 +2320,25 @@ def read_battle_earnings(image):
                          for x in (41,42,43,44)]
         dark_agreed = [value for value in set(dark_readings) if value is not None and dark_readings.count(value)>=2]
         amounts[2] = dark_agreed[0] if len(dark_agreed)==1 else None
+    if image.size == (1920, 1080):
+        # On this client the outlined leading "11" can OCR as "ii", and
+        # the small dark-elixir digits need a larger scale. Require the same
+        # reading from two separate crop boundaries before using either.
+        def paired_digits(rois, scale):
+            readings = []
+            for roi in rois:
+                raw = read_text(crop_percent(image, roi), scale=scale)
+                raw = raw.translate(str.maketrans({'i': '1', 'I': '1', 'l': '1', 'O': '0', 'o': '0'}))
+                if re.fullmatch(r'\s*\d[\d\s]*\s*', raw):
+                    readings.append(int(re.sub(r'\s', '', raw)))
+            return readings[0] if len(readings) == 2 and readings[0] == readings[1] else None
+        if amounts[0] is None or amounts[0] < 1_000:
+            recovered_gold = paired_digits((Roi(39, 43.5, 52.5, 49), Roi(42, 42, 55, 49)), 3)
+            if recovered_gold is not None and (amounts[0] is None or
+                                               str(recovered_gold).endswith(str(amounts[0]))):
+                amounts[0] = recovered_gold
+        if amounts[2] is None:
+            amounts[2] = paired_digits((Roi(46, 57, 53, 63), Roi(47, 57, 53, 63)), 5)
     # A defeat with no dark-elixir reward omits the third row entirely on the
     # large VM render. Once gold and elixir are both read, that omitted row is
     # an explicit zero rather than an unreadable result.
@@ -2477,27 +2564,75 @@ class DiagnosticJournal:
                 remaining -= len(block)
                 output.write(decoder.decode(block, final=not remaining).translate(legacy).encode("utf-8"))
 
-    def export_bundle(self, destination: Path):
-        source_path = self.last_run_path or self.path
-        if destination.resolve() == source_path.resolve():
-            raise ValueError("Le diagnostic exporté doit être différent du journal actif.")
+    def export_bundle(self, destination: Path, *, context=None, capture=None):
+        """Write one self-contained, consistent support ZIP without touching the game."""
+        destination = Path(destination)
+        if destination.suffix.lower() != ".zip":
+            raise ValueError("Le diagnostic doit être un fichier ZIP.")
+        if destination.resolve() == self.path.resolve():
+            raise ValueError("Le diagnostic doit être différent du journal actif.")
         with self._lock:
             self._file.flush()
             if self._run_file is not None:
                 self._run_file.flush()
-            with zipfile.ZipFile(destination,"w",compression=zipfile.ZIP_DEFLATED) as archive:
-                archive.write(source_path,arcname=source_path.name)
-                screenshot = source_path.with_suffix(".png")
-                if screenshot.exists():
-                    archive.write(screenshot,arcname=screenshot.name)
-                for screenshot in sorted(source_path.parent.glob(f"{source_path.stem}-reward-*.png")):
-                    archive.write(screenshot,arcname=screenshot.name)
-                army_screenshot = source_path.with_name(f"{source_path.stem}-army.png")
-                if army_screenshot.exists():
-                    archive.write(army_screenshot,arcname=army_screenshot.name)
-                upgrade_screenshot = source_path.with_name(f"{source_path.stem}-upgrade.png")
-                if upgrade_screenshot.exists():
-                    archive.write(upgrade_screenshot,arcname=upgrade_screenshot.name)
+            runs_dir = self.path.parent / "runs"
+            runs = sorted(runs_dir.glob("CoCFarmBot-*.txt"), key=lambda path: path.stat().st_mtime, reverse=True)[:10] if runs_dir.exists() else []
+            if self.run_path is not None and self.run_path not in runs:
+                runs.insert(0, self.run_path)
+            candidates = [self.path]
+            for name in ("config-v2.json", "farm-stats.json", "account_snapshot.json", "startup-error.txt"):
+                candidates.append(self.path.parent / name)
+            build_info = Path(__file__).with_name("build_info.json")
+            if build_info.exists():
+                candidates.append(build_info)
+            for run in runs:
+                candidates.append(run)
+                candidates.extend(sorted(run.parent.glob(f"{run.stem}*.png")))
+            for folder in ("unread-enemies", "unread-results"):
+                directory = self.path.parent / folder
+                if directory.exists():
+                    candidates.extend(sorted(directory.glob("*.png"), key=lambda path: path.stat().st_mtime, reverse=True)[:5])
+            executable_hash = None
+            if getattr(sys, "frozen", False):
+                try:
+                    with open(sys.executable, "rb") as executable:
+                        executable_hash = hashlib.file_digest(executable, "sha256").hexdigest()
+                except OSError:
+                    pass
+            manifest = {
+                "format": 2, "created_at": datetime.now().astimezone().isoformat(),
+                "computer": platform.node(), "windows": platform.platform(),
+                "app_version": APP_VERSION, "frozen": bool(getattr(sys, "frozen", False)),
+                "executable": sys.executable, "executable_sha256": executable_hash,
+                "current_run": self.run_path.name if self.run_path else None,
+                "last_run": self.last_run_path.name if self.last_run_path else (runs[0].name if runs else None),
+                "context": context or {}, "included_files": [], "unavailable_files": [],
+            }
+            with tempfile.TemporaryDirectory(prefix="coc-diagnostic-", dir=destination.parent) as temporary:
+                staged = Path(temporary) / destination.name
+                with zipfile.ZipFile(staged, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                    seen = set()
+                    for path in candidates:
+                        if path in seen or path.resolve() == destination.resolve():
+                            continue
+                        seen.add(path)
+                        if not path.is_file():
+                            manifest["unavailable_files"].append(path.name)
+                            continue
+                        name = (f"runs/{path.name}" if path.parent == runs_dir else
+                                f"{path.parent.name}/{path.name}" if path.parent != self.path.parent and path != build_info else path.name)
+                        try:
+                            archive.write(path, arcname=name)
+                            manifest["included_files"].append(name)
+                        except OSError as error:
+                            manifest["unavailable_files"].append(f"{name}: {error}")
+                    if capture is not None:
+                        image_bytes = io.BytesIO()
+                        capture.save(image_bytes, format="PNG")
+                        archive.writestr("last_capture.png", image_bytes.getvalue())
+                        manifest["included_files"].append("last_capture.png")
+                    archive.writestr("diagnostic.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+                staged.replace(destination)
 
     def close(self):
         with self._lock:
@@ -2570,6 +2705,7 @@ class BotApp:
         self.deploy_heroes = BooleanVar(value=self.settings.deploy_heroes)
         self.upgrade_wall = BooleanVar(value=self.settings.upgrade_wall_between_attacks)
         self.upgrade_recommended = BooleanVar(value=self.settings.upgrade_recommended)
+        self.upgrade_heroes = BooleanVar(value=self.settings.upgrade_heroes)
         self.chain_attacks = BooleanVar(value=self.settings.chain_attacks)
         self.status = StringVar(value="Prêt à lire la fenêtre du jeu.")
         self.run_state = StringVar(value="PRÊT")
@@ -2619,6 +2755,7 @@ class BotApp:
         else:
             raise RuntimeError("Capture Windows incomplète après huit essais : aucune action envoyée.")
         self._last_capture = image
+        self._last_capture_at = datetime.now().astimezone().isoformat()
         self._trace("CAPTURE", f"Image reçue : {image.width}x{image.height}")
         self._check_stopped()
         if connection_retry_point(image) is not None:
@@ -2789,12 +2926,62 @@ class BotApp:
             path = Path(str(path) + ".zip")
         try:
             self._trace("EXPORT", f"Copie du diagnostic vers {path}")
-            self.journal.export_bundle(path)
+            self.export_diagnostic(path)
         except (OSError, ValueError) as exc:
             self._trace("ERREUR", f"Export du journal impossible : {exc}")
             messagebox.showerror("Export impossible", str(exc), parent=self.root)
             return
         self.write(f"Diagnostic enregistré : {path}. Envoyez ce ZIP pour analyser un blocage.")
+
+    def export_diagnostic(self, destination: Path):
+        """Gather current launcher and game state without issuing a game click."""
+        try:
+            windows = [asdict(window) for window in WindowDriver.list_windows()
+                       if window.title.casefold().startswith("clash of clans")]
+            window_error = None
+        except Exception as error:
+            windows, window_error = [], f"{type(error).__name__}: {error}"
+        image = getattr(self, "_last_capture", None)
+        capture_source = "dernière capture du bot" if image is not None else None
+        capture_at = getattr(self, "_last_capture_at", None)
+        capture_error = None
+        if not self._busy() and windows:
+            try:
+                selected = self.window_title.get()
+                window = next((window for window in WindowDriver.list_windows()
+                               if window.title == selected), None) if selected else WindowDriver.resolve("")
+                if window is not None:
+                    image = WindowDriver.capture(window)
+                    capture_source = "capture actuelle sans clic"
+                    capture_at = datetime.now().astimezone().isoformat()
+            except Exception as error:
+                capture_error = f"{type(error).__name__}: {error}"
+        checks = {}
+        if not self._busy():
+            for name, check in (("ocr", self_test), ("layout", lambda: validate_layout(self.settings))):
+                try:
+                    check()
+                    checks[name] = "ok"
+                except Exception as error:
+                    checks[name] = f"{type(error).__name__}: {error}"
+        else:
+            checks["ocr"] = "reporté : opération en cours"
+        context = {
+            "status": self.status.get(), "run_state": self.run_state.get(),
+            "busy": self._busy(), "selected_window": self.window_title.get(),
+            "game_windows": windows, "game_window_error": window_error,
+            "settings": asdict(self.settings), "checks": checks,
+            "launcher_values": {name: getattr(self, name).get() for name in (
+                "min_gold", "min_elixir", "loot_margin", "electrodragon_count",
+                "dragon_count", "delay_between_dragons", "and_rule", "dry_run",
+                "deploy_heroes", "upgrade_wall", "upgrade_recommended",
+                "upgrade_heroes", "chain_attacks")},
+            "capture_source": capture_source, "capture_error": capture_error,
+            "capture_at": capture_at,
+            "last_capture_size": list(image.size) if image is not None else None,
+        }
+        self.journal.export_bundle(destination, context=context,
+                                   capture=image.copy() if image is not None else None)
 
     def _build(self):
         from dashboard import build
@@ -2918,7 +3105,8 @@ class BotApp:
                 electrodragon_count=int(self.electrodragon_count.get()), dragon_count=int(self.dragon_count.get()),
                 delay_between_dragons_ms=int(self.delay_between_dragons.get()),
                 use_and_rule=self.and_rule.get(), dry_run=self.dry_run.get(), deploy_heroes=self.deploy_heroes.get(),
-                upgrade_wall_between_attacks=self.upgrade_wall.get(), upgrade_recommended=self.upgrade_recommended.get(), chain_attacks=self.chain_attacks.get())
+                upgrade_wall_between_attacks=self.upgrade_wall.get(), upgrade_recommended=self.upgrade_recommended.get(),
+                upgrade_heroes=self.upgrade_heroes.get(), chain_attacks=self.chain_attacks.get())
             if not 0 <= candidate.min_gold <= 2_500_000 or not 0 <= candidate.min_elixir <= 2_500_000 or not 0 <= candidate.loot_margin_percent <= 25 or not 0 <= candidate.electrodragon_count <= 50 or not 0 <= candidate.dragon_count <= 50 or not 80 <= candidate.delay_between_dragons_ms <= 2000: raise ValueError
             save_settings(candidate)
             self.settings = candidate
@@ -3007,7 +3195,8 @@ class BotApp:
         previous = None
         for attempt in range(5):
             image = self._capture(window)
-            values = (read_safe_reserve(image, "gold"), read_safe_reserve(image, "elixir"))
+            values = ((None, None) if builders_menu_open(image) else
+                      (read_safe_reserve(image, "gold"), read_safe_reserve(image, "elixir")))
             self._trace("RÉSERVES", f"Lecture {attempt+1}/5 : or={values[0]}, élixir={values[1]}, précédente={previous}")
             if None not in values and previous is not None and all(abs(a - b) <= 20_000 for a, b in zip(values, previous)):
                 confirmed = tuple(min(a, b) for a, b in zip(values, previous))
@@ -3282,6 +3471,9 @@ class BotApp:
                 self.events.put("Contrôles de rempart instables : remparts reportés au prochain cycle.")
                 return upgraded
             payments = controls['payments']
+            if any(price < 100_000 or price % 1000 for _, price in payments.values()):
+                self.events.put("Prix de rempart illisible : remparts reportés, attaque conservée.")
+                return upgraded
             gold_cost = payments.get('or', (None,None))[1]
             elixir_cost = payments.get('élixir', (None,None))[1]
             options = [(wall_batch_size(gold if resource=='or' else elixir,price,available),resource,price)
@@ -3376,8 +3568,12 @@ class BotApp:
                 if attempt < 2:
                     self._wait(.2)
             self._trace("REMPARTS", f"Confirmation affichée : groupe={not single}, coût={total} {resource}, bouton={confirm_button}")
-            if self.stop_event.is_set() or confirm_button is None:
-                raise RuntimeError("Montant, rempart ou ressource de la confirmation non vérifié : cycle arrêté avant l’attaque.")
+            if self.stop_event.is_set():
+                return upgraded
+            if confirm_button is None:
+                self._wall_click(window, (40.5, 62), "annuler la confirmation de rempart incohérente")
+                self.events.put("Montant ou ressource de rempart non confirmés : paiement annulé, attaque conservée.")
+                return upgraded
             self._wall_click(window, layout_values(confirm_button), "confirmation remparts")
             self._wait(.8)
             after = self.stable_reserves(window)
@@ -3497,6 +3693,9 @@ class BotApp:
                     candidates = [p for p in candidate_points if p not in rejected]
                     self.events.put(f"{label} : ligne de pose extérieure essayée après refus des points initiaux.")
                 if not candidates:
+                    if live_sized_client and placed > 0:
+                        self.events.put(f"{label} : {placed} pose(s) suivie(s), {remaining} encore affichée(s) ; poursuite avec les autres troupes, sorts et héros.")
+                        return placed
                     raise RuntimeError(f"Aucun point accepté pour {label} ; {remaining} unité(s) restante(s).")
                 drops = []
                 for index in range(min(3, remaining)):
@@ -3927,7 +4126,10 @@ class BotApp:
         if self.settings.deploy_heroes:
             self._check_stopped()
             shift = hero_layout_shift(self._battle_capture(window))
+            hero_points = [(max(5.0, x - 5.0), y) for x, y in perimeter] + perimeter
             for index, slot in enumerate(layout_points("HERO_SLOTS")):
+                if heroes >= (getattr(self, "_army_preview_heroes", None) or len(layout_points("HERO_SLOTS"))):
+                    break
                 self._check_stopped()
                 before = self._battle_capture(window)
                 if (isinstance(before, Image.Image) and not hero_card_present(before, index, shift)
@@ -3948,7 +4150,7 @@ class BotApp:
                     self.events.put(f"Héros {index + 1} indisponible ; non compté comme posé.")
                     continue
                 slot_shift = 0 if f"HERO_SLOTS.{index}" in self.settings.layout_overrides else shift
-                for offset in range(len(perimeter)):
+                for offset in range(len(hero_points)):
                     self._check_stopped()
                     # A reward overlay or rejected drop can lose the selection.
                     # Recheck before selecting so an already deployed hero's
@@ -3964,7 +4166,7 @@ class BotApp:
                     if not self._click(window, slot[0] + slot_shift, slot[1]): raise RuntimeError(f"Sélection héros {index + 1} refusée.")
                     self._wait(.08)
                     self._check_stopped()
-                    x, y = perimeter[(index * 3 + offset) % len(perimeter)]
+                    x, y = hero_points[offset]
                     if not self._click(window, x, y): raise RuntimeError(f"Clic héros {index + 1} refusé.")
                     self._wait(.12)
                     after = self._battle_capture(window)
@@ -4059,6 +4261,8 @@ class BotApp:
             ready, detail, counts = army_readiness(image, self.settings)
             if ready:
                 self._army_preview_counts = counts
+                hero_fraction = army_fraction(image, Roi(8, 23, 13, 28))
+                self._army_preview_heroes = hero_fraction[0] if hero_fraction else None
                 self.events.put(f"Armée prête avant recherche : {detail}.")
                 return True
             now = time.monotonic()
@@ -4351,11 +4555,45 @@ def self_test_report(path):
             report["build"] = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
         self_test()
         validate_layout(Settings())
+        import webview
+        if not callable(getattr(webview, "create_window", None)):
+            raise RuntimeError("pywebview ne peut pas ouvrir le lanceur")
         report["ok"] = True
     except Exception as exc:
         report["error"] = f"{type(exc).__name__}: {exc}"
     Path(path).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return 0 if report["ok"] else 1
+
+
+def show_startup_failure():
+    """Keep diagnostic export available when the normal launcher cannot open."""
+    failure = traceback.format_exc()
+    APP_DIR.mkdir(parents=True, exist_ok=True)
+    with (APP_DIR / "startup-error.txt").open("a", encoding="utf-8") as output:
+        output.write(f"\n{datetime.now().astimezone().isoformat()} version={APP_VERSION}\n{failure}\n")
+    journal = DiagnosticJournal(LOG_PATH)
+    journal.record("ERREUR DÉMARRAGE", failure)
+    root = Tk()
+    root.title(f"{APP_NAME} — diagnostic")
+    root.geometry("510x165")
+    ttk.Label(root, text="Le lanceur n'a pas pu démarrer.", font=("Segoe UI", 12, "bold")).pack(pady=(18, 8))
+    ttk.Label(root, text="Enregistrez le diagnostic ZIP pour faire analyser la panne.").pack()
+
+    def save():
+        destination = filedialog.asksaveasfilename(
+            parent=root, title="Enregistrer le diagnostic",
+            initialfile=f"CoCFarmBot-diagnostic-{datetime.now():%Y%m%d-%H%M%S}.zip",
+            defaultextension=".zip", filetypes=[("Archive ZIP", "*.zip")])
+        if destination:
+            try:
+                journal.export_bundle(Path(destination), context={"startup_failed": True})
+                messagebox.showinfo("Diagnostic enregistré", destination, parent=root)
+            except (OSError, ValueError) as error:
+                messagebox.showerror("Export impossible", str(error), parent=root)
+
+    ttk.Button(root, text="Enregistrer le diagnostic ZIP", command=save).pack(pady=14)
+    root.mainloop()
+    journal.close()
 
 
 if __name__ == "__main__":
@@ -4371,5 +4609,9 @@ if __name__ == "__main__":
     elif args.self_test:
         self_test()
     else:
-        from modern_dashboard import run
-        run()
+        try:
+            from modern_dashboard import run
+            run()
+        except Exception:
+            show_startup_failure()
+            sys.exit(1)

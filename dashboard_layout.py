@@ -106,6 +106,7 @@ def _settings(app, workspace):
     cycle = _page(tabs, "Cycle")
     check(cycle, "Enchaîner les attaques", app.chain_attacks)
     check(cycle, "Améliorer les bâtiments", app.upgrade_recommended)
+    check(cycle, "Améliorer les héros", app.upgrade_heroes)
     check(cycle, "Améliorer les remparts", app.upgrade_wall)
     check(cycle, "Simulation sans déploiement", app.dry_run)
     label(cycle, "Bâtiments : garder 1 ouvrier libre. Remparts : garder 1 M de chaque ressource.",
