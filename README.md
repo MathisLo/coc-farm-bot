@@ -1,12 +1,18 @@
-# CoC Farm Bot v2.0.11
+# CoC Farm Bot v2.0.12
 
-## Diagnostic complet (v2.0.11)
+## Diagnostic complet (v2.0.12)
 
 Dans le lanceur, ouvrir **Outils** ou **Journal**, puis cliquer sur **Exporter le diagnostic**. Enregistrer le ZIP et le joindre seul au signalement du problème. Il contient les journaux récents et complets, les captures disponibles, les réglages enregistrés et affichés, l'état de la fenêtre du jeu, les contrôles OCR, la version et l'empreinte de l'EXE. Une panne au démarrage affiche un écran de secours avec le même export.
 
 Le ZIP peut contenir le nom du compte, des captures du jeu et des chemins locaux : le transmettre uniquement à la personne chargée du dépannage. L'export n'envoie rien automatiquement.
 
 Validation du 26 septembre 2026 sur PC-FIXE : 284 tests passent et un ZIP créé à partir des données du bot a été ouvert et contrôlé. Cette vérification du diagnostic est distincte des essais en jeu sur TCD_VeNom.
+
+## Remparts sur PC-FIXE (v2.0.12)
+
+Le diagnostic du 26 septembre montrait que la ligne « Rempart x193 » changeait de position dans la liste et que l'OCR lisait parfois « Rémparb » ou « Re•mpahb ». Après correction de ces lectures, le panneau « Améliorer plus » est distingué du panneau de groupe, et la lecture des réserves en 1920 x 1080 conserve le premier chiffre. Un essai direct sur PC-FIXE a confirmé l'amélioration d'un rempart à 4 000 000 d'or : 6 886 995 avant, 2 886 995 après. La fenêtre de jeu portait le titre « Clash of Clans - TCDVeNom » ; cet essai a eu lieu sur PC-FIXE, et ne doit pas être confondu avec les anciens essais sur la VM TCD_VeNom.
+
+Les 287 tests automatisés passent après ce correctif.
 
 ## Validation du 24 septembre 2026 (v2.0.8)
 

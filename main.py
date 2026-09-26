@@ -476,6 +476,20 @@ def read_safe_reserve(image: Image.Image, resource: str) -> int | None:
         agreed = [value for value in set(full) if full.count(value) >= 2]
         if len(agreed) == 1:
             return agreed[0]
+        # On PC-FIXE a selected wall can make the tight strip lose the
+        # leading digit at some scales. A wider strip reads all groups at
+        # scales 4 and 6; require both readings to agree.
+        wide = crop_percent(image, Roi(86, 2.5, 95, 6.5))
+        readings = [parse_reserve_number(read_text(wide, scale=scale)) for scale in (4, 6)]
+        if readings[0] is not None and readings[0] == readings[1] and 1_000_000 <= readings[0] <= 20_000_000:
+            return readings[0]
+    if resource == 'elixir' and image.size == (1920, 1080) and not calibrated:
+        # The purple bar obscures the first digit in the ordinary crop.
+        # Grayscale with a shorter vertical strip yields two full readings.
+        strip = ImageOps.grayscale(crop_percent(image, Roi(88, 10.8, 95, 13.6)))
+        readings = [parse_reserve_number(read_text(strip, scale=scale)) for scale in (3, 5)]
+        if readings[0] is not None and readings[0] == readings[1] and 1_000_000 <= readings[0] <= 20_000_000:
+            return readings[0]
     if resource == "gold" and image.width < 1500 and not calibrated:
         strip = ImageOps.grayscale(crop_percent(image, Roi(87.1, 3.0, 95.1, 6.4)))
         threshold_readings = [parse_reserve_number(read_text(
@@ -1596,6 +1610,13 @@ def collectible_icon_still_visible(image, resource, x, y):
     return False
 
 
+def wall_caption_matches(text):
+    # Windows OCR can read the same moving row as Rémparb or Re•mpahb.
+    plain = unicodedata.normalize("NFKD", text.casefold()).encode("ascii", "ignore").decode("ascii")
+    plain = re.sub(r"[^a-z0-9]", "", plain)
+    return re.fullmatch(r"(?:rempart|remparb|rempamt|rempahb)(?:x\d{1,3})?", plain) is not None
+
+
 def wall_menu_row_matches(image,y):
     # The builder menu is translucent: a village label visible through it
     # is not a menu row. Require its green upgrade tag and the row caption.
@@ -1606,16 +1627,15 @@ def wall_menu_row_matches(image,y):
             continue
         crop=crop_percent(image,label_roi)
         for scale in (2,1):
-            text=read_text(crop,scale=scale).casefold().strip(" .,:;!'\"")
-            if text.startswith(("rempar","rempamt")):
+            text=read_text(crop,scale=scale)
+            if wall_caption_matches(text):
                 return True
     # Newer builder menus omit the green "new" diamond on wall rows. In that
     # case require both the wall caption and a numeric payment in the same
     # horizontal band, which rejects translucent village labels behind the
     # menu.
     caption = read_text(crop_percent(image, Roi(38.0,y-1.6,49.5,y+1.6)), scale=2)
-    normalized = caption.casefold().strip(" .,:;!'\"")
-    if normalized.startswith(("rempar", "rempamt")):
+    if wall_caption_matches(caption):
         payment = read_text(crop_percent(image, Roi(48.0,y-1.8,64.5,y+1.8)), scale=2)
         if re.search(r"\d\s*\d{2,}", payment.replace(".", " ")):
             return True
@@ -1634,7 +1654,7 @@ def find_wall_menu_items(image: Image.Image) -> list[tuple[float, float]]:
     candidates = []
     for scale in (1,2):
         for word, x, y in read_word_centers(menu.resize((menu.width*scale,menu.height*scale))):
-            if word.casefold().startswith(("rempar", "rempamt")) and x < 65:
+            if wall_caption_matches(word) and x < 65:
                 point=(menu_roi.x1 + x * (menu_roi.x2 - menu_roi.x1) / 100,
                        menu_roi.y1 + y * (menu_roi.y2 - menu_roi.y1) / 100)
                 if wall_menu_row_matches(image,point[1]):
@@ -1740,13 +1760,14 @@ def wall_multi_mode(image: Image.Image) -> bool:
         return True
     # On the VM the stylised button labels are often returned as separate
     # words (AMéli0ReR / 1ReMpaRt) and the full-line OCR above misses them.
-    # A wall row plus one add/remove label is enough to identify the batch
-    # panel; prices are still independently verified before any click.
+    # An add/remove label identifies the batch panel.  The selected-wall
+    # panel also has a Rempart heading and Améliorer cards, so its heading
+    # alone must not be mistaken for a batch control.
     crop = crop_percent(image, layout_roi("SCREEN_ROIS", "wall_actions"))
     labels = [word for word, _x, _y in read_word_centers(crop)]
     words = [re.sub(r"[^a-z]", "", unicodedata.normalize("NFKD", word).encode("ascii", "ignore").decode().casefold().replace("0", "o").replace("1", "l")) for word in labels]
     return any(word.startswith(("amelio", "ameiio")) for word in words) and any(
-        word.startswith(("remp", "ajout", "aiout", "sup")) for word in words)
+        word.startswith(("ajout", "aiout", "sup")) for word in words)
 
 
 def wall_price_readings(image, expected=None):

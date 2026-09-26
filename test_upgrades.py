@@ -232,6 +232,13 @@ class UpgradeTests(unittest.TestCase):
             self.assertFalse(main.wall_menu_row_matches(im,61))
             self.assertIsNone(main.find_wall_menu_item(im))
 
+    def test_scrolled_wall_caption_ocr_variants_are_recognized(self):
+        for caption in ('Rempart x193', 'Rémparb x193', 'Re•mpahb x183', 'Rempamt x193'):
+            with self.subTest(caption=caption):
+                self.assertTrue(main.wall_caption_matches(caption))
+        for caption in ('Éradicateur de héros', 'Autres améliorations', 'Remparts décoratifs'):
+            self.assertFalse(main.wall_caption_matches(caption))
+
     def test_wall_rows_at_different_positions_keep_separate_quantities(self):
         with Image.open(Path(__file__).parent/'testdata/builders_selected_menu.png') as base, \
                 Image.open(Path(__file__).parent/'testdata/wall_last_menu.png') as last:
@@ -501,6 +508,18 @@ class UpgradeTests(unittest.TestCase):
                     self.assertEqual(controls['payments']['élixir'][1],4_000_000)
                     if 'or' in controls['payments']:
                         self.assertEqual(controls['payments']['or'][1],4_000_000)
+
+    def test_selected_wall_heading_is_not_batch_mode(self):
+        with Image.open(Path(__file__).parent/'testdata/wall_last_selected.png') as image:
+            self.assertIsNotNone(main.find_wall_more_button(image))
+            self.assertFalse(main.wall_multi_mode(image))
+
+    def test_pc_fixe_reserves_keep_leading_digit_with_wall_selected(self):
+        with Image.open(Path(__file__).parent/'testdata/reserves_pc_fixe_1920.png') as strip:
+            image = Image.new('RGB', (1920, 1080))
+            image.paste(strip, (1600, 0))
+            self.assertEqual(main.read_safe_reserve(image, 'gold'), 6_886_995)
+            self.assertEqual(main.read_safe_reserve(image, 'elixir'), 7_455_436)
 
     def test_army_camp_is_never_a_wall_group(self):
         with Image.open(Path(__file__).parent/'testdata/wall_wrong_army_camp.png') as image:
