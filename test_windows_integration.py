@@ -52,7 +52,14 @@ class WindowsIntegrationTests(unittest.TestCase):
             self.assertEqual(counts["rage"], 5)
         incomplete = image.copy()
         ImageDraw.Draw(incomplete).rectangle((135, 225, 225, 280), fill="black")
-        ready, reason, _ = main.army_readiness(incomplete, settings)
+        ready, _, counts = main.army_readiness(incomplete, settings)
+        self.assertTrue(ready)
+        self.assertEqual(counts["heroes"], 4)
+        unavailable = incomplete.copy()
+        card_region = main.crop_percent(unavailable, main.Roi(16, 33, 42, 70))
+        unavailable.paste(card_region.convert("L").convert("RGB"),
+                          (round(unavailable.width * .16), round(unavailable.height * .33)))
+        ready, reason, _ = main.army_readiness(unavailable, settings)
         self.assertFalse(ready)
         self.assertIn("héros", reason)
 
@@ -135,8 +142,10 @@ class WindowsIntegrationTests(unittest.TestCase):
             self.assertEqual([main.hero_card_present(image, i, -6.25) for i in range(4)], expected)
 
     def test_rage_card_location_is_independent_of_order_and_hero_row_shift(self):
-        for shift, center in ((-6.25, 53.6), (0, 59.85), (0, 30.45),
-                             (None, 53.6), (None, 30.45)):
+        for shift, center, hero_count in ((-6.25, 53.6, 4), (0, 59.85, 4),
+                                          (0, 30.45, None), (-6.25, 44.5, 2),
+                                          (-6.25, 44.5, None), (None, 53.6, None),
+                                          (None, 30.45, None)):
             image = Image.new("RGB", (1920, 1080))
             card = Image.new("RGB", (110, 150), (42, 60, 120))
             draw = ImageDraw.Draw(card)
@@ -144,7 +153,11 @@ class WindowsIntegrationTests(unittest.TestCase):
             draw.rounded_rectangle((35, 20, 75, 47), radius=7, fill=(192, 139, 83))
             left = round(image.width * center / 100 - card.width / 2)
             image.paste(card, (left, 900))
-            self.assertEqual(main.rage_card_center(image, shift), center)
+            detected = main.rage_card_center(image, shift, hero_count)
+            if center == 44.5:
+                self.assertAlmostEqual(detected, center, delta=1.5)
+            else:
+                self.assertAlmostEqual(detected, center, places=2)
 
     def test_live_compact_rage_counter_uses_actual_card_center(self):
         for filename, expected in (("live_compact_battle_bar.png", 5),

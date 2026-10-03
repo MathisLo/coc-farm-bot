@@ -1,4 +1,12 @@
-# CoC Farm Bot v2.0.14
+# CoC Farm Bot v2.0.15
+
+## Validation de l'attaque (v2.0.15)
+
+Le nombre d'électro-dragons, de dragons, de héros (0 à 4) et de sorts Rage (0 à 5) se règle dans l'onglet **Armée**. Le bot repère les cartes des troupes et le sort Rage dans la barre de combat même lorsque leur ordre change. Si le badge des héros ou celui des sorts est illisible sur l'écran de préparation, il recoupe la lecture avec les cartes visibles avant de lancer la recherche.
+
+Le 3 octobre 2026, l'EXE v2.0.15 a effectué une attaque unique sur la fenêtre `Clash of Clans - TCDVeNom` en 1920 x 1080 : 8 électro-dragons, 1 dragon, 3 héros et 5 Rage confirmés, puis retour au village et comptabilisation du butin. Les 291 tests automatisés et l'autotest de l'EXE ont aussi réussi. La capture du diagnostic `BodaciousHermit19914` confirme en rejeu headless 2 cartes de héros et 5 Rage ; ce compte distinct n'a pas été testé en direct.
+
+Pour reproduire une seule attaque avec l'EXE et produire un rapport JSON, utiliser `CoCFarmBot.exe --live-attack-report rapport.json`. Cette commande agit dans la fenêtre Clash sélectionnée et utilise la composition déjà enregistrée ; elle désactive les améliorations et l'enchaînement des attaques pour cette validation.
 
 ## Composition d'attaque (v2.0.14)
 

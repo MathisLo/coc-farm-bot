@@ -688,13 +688,24 @@ def army_card_count(image: Image.Image, roi: Roi) -> int | None:
         scores.sort()
         if len(scores) == 2 and scores[0][0] <= 8 and scores[1][0] - scores[0][0] >= 20:
             return scores[0][1]
-    for scale in (2, 3, 5):
+    for scale in (2, 3, 4, 5, 6):
         raw = read_text(crop_percent(image, roi), scale=scale).casefold()
         raw = raw.translate(str.maketrans({"o": "0", "i": "1", "l": "1", "×": "x"}))
         match = re.search(r"\bx\s*(\d{1,2})\b", raw)
-        if match:
+        if match and int(match.group(1)) > 0:
             return int(match.group(1))
     return None
+
+
+def army_available_heroes(image: Image.Image) -> int | None:
+    available = 0
+    for index in range(4):
+        card = crop_percent(image, Roi(7 + 9 * index, 33, 15 + 9 * index, 70)).convert("HSV")
+        pixels = card.get_flattened_data()
+        violet = sum(170 <= hue <= 240 and saturation >= 35
+                     for hue, saturation, _ in pixels)
+        available += violet / len(pixels) >= .09
+    return available or None
 
 
 def compact_electro_counter(image: Image.Image, roi: Roi) -> int | None:
@@ -718,6 +729,10 @@ def army_readiness(image: Image.Image, settings: Settings) -> tuple[bool, str, d
     heroes = army_fraction(image, Roi(8, 23, 13, 28))
     if heroes is None and image.width < 1500:
         heroes = army_fraction(image, Roi(7, 23, 14, 28))
+    if heroes is None:
+        visible_heroes = army_available_heroes(image)
+        if visible_heroes is not None:
+            heroes = (visible_heroes, visible_heroes)
     if heroes is None and image.size == (1920, 1080):
         badge = image.crop((172, 263, 222, 292)).convert('RGB')
         mask = Image.frombytes('L', badge.size, bytes(
@@ -746,6 +761,8 @@ def army_readiness(image: Image.Image, settings: Settings) -> tuple[bool, str, d
             rage_count = army_card_count(image, Roi(left - .3, 51, left + 7.7, 65))
             if rage_count is None:
                 rage_count = army_card_count(image, Roi(left - .2, 51, left + 2.3, 55))
+            if rage_count is None:
+                rage_count = army_card_count(image, Roi(left - .3, 50, left + 6.7, 57))
             break
     observed: dict[str, int | None] = {"electrodragon": troop_cards.get("electrodragon"),
                 "dragon": troop_cards.get("dragon"), "rage": rage_count,
@@ -853,24 +870,28 @@ def rage_region(name: str, slot_center: float) -> Roi:
     return roi if name in overrides else shifted_roi(roi, slot_center - RAGE_SLOT[0])
 
 
-def rage_card_center(image: Image.Image, hero_shift: float | None = 0) -> float | None:
+def rage_card_center(image: Image.Image, hero_shift: float | None = 0,
+                     hero_count: int | None = None) -> float | None:
     """Locate the violet Rage icon before or after the hero group, regardless of lineup order."""
     overrides = getattr(getattr(_operation, "settings", None), "layout_overrides", {})
     if "RAGE_SLOT" in overrides:
-        candidate_groups = [(0.0, [layout_values("RAGE_SLOT")[0]])]
+        candidate_groups = [(0.0, [layout_values("RAGE_SLOT")[0]], 0)]
     else:
         shifts = (-6.25, 0.0) if hero_shift is None else (hero_shift,)
         hero_slots = layout_points("HERO_SLOTS")
+        hero_counts = ((hero_count,) if hero_count is not None and 0 <= hero_count <= len(hero_slots)
+                       else range(len(hero_slots), -1, -1))
         candidate_groups = []
         for shift in shifts:
-            # The pre-hero spell position exists only in the expanded row;
-            # in compact mode it overlaps the first hero card.
-            candidates = [30.45] if shift == 0 else []
-            first_post_hero = hero_slots[-1][0] + shift + 6.25
-            candidates += [first_post_hero + 6.25 * index for index in range(6)]
-            candidate_groups.append((shift, candidates))
-    for shift, candidates in candidate_groups:
-        hero_centers = [slot[0] + shift for slot in layout_points("HERO_SLOTS")]
+            if shift == 0:
+                candidate_groups.append((shift, [30.45], 0))
+            for count in hero_counts:
+                first_post_hero = (hero_slots[count - 1][0] + shift + 6.25 if count
+                                   else hero_slots[0][0] + shift)
+                candidates = [first_post_hero + 6.25 * index for index in range(6)]
+                candidate_groups.append((shift, candidates, count))
+    for shift, candidates, count in candidate_groups:
+        hero_centers = [slot[0] + shift for slot in layout_points("HERO_SLOTS")[:count]]
         for candidate in candidates:
             # The compact hero row can leave a half-slot gap before spells.
             scores = []
@@ -3939,7 +3960,10 @@ class BotApp:
             image = self._battle_capture(window)
             if not isinstance(image, Image.Image):
                 break
-            slot_center = rage_card_center(image, hero_shift)
+            available_heroes = getattr(self, "_army_preview_heroes", None)
+            if available_heroes is None:
+                available_heroes = self.settings.hero_count
+            slot_center = rage_card_center(image, hero_shift, available_heroes)
             if slot_center is None and hero_shift is not None:
                 slot_center = rage_card_center(image, None)
             if slot_center is not None:
@@ -4639,6 +4663,36 @@ def self_test_report(path):
     return 0 if report["ok"] else 1
 
 
+def live_attack_report(path):
+    report = {"ok": False, "version": APP_VERSION,
+              "frozen": bool(getattr(sys, "frozen", False))}
+    app = None
+    try:
+        app = BotApp(hidden=True)
+        report["window_title"] = app.settings.window_title
+        report["composition"] = {name: getattr(app.settings, name) for name in (
+            "electrodragon_count", "dragon_count", "rage_count", "hero_count")}
+        app.stop_event.clear()
+        app._begin_run("validation attaque unique")
+        app._run_operation(lambda: app.independent_loop("attack"))
+        report["journal"] = str(app.journal.last_run_path)
+        events = []
+        while not app.events.empty():
+            events.append(app.events.get_nowait())
+        report["deployment"] = next((event for event in reversed(events)
+                                     if isinstance(event, str) and event.startswith("Déploiement vérifié")), None)
+        report["status"] = next((event.status for event in reversed(events)
+                                 if isinstance(event, RunStateEvent)), None)
+        report["ok"] = report["status"] == "terminée" and report["deployment"] is not None
+    except Exception as exc:
+        report["error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        if app is not None:
+            app.close()
+        Path(path).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return 0 if report["ok"] else 1
+
+
 def show_startup_failure():
     """Keep diagnostic export available when the normal launcher cannot open."""
     failure = traceback.format_exc()
@@ -4675,9 +4729,12 @@ if __name__ == "__main__":
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--profile-test", action="store_true")
     parser.add_argument("--self-test-report", metavar="JSON")
+    parser.add_argument("--live-attack-report", metavar="JSON")
     args = parser.parse_args()
     if args.self_test_report:
         sys.exit(self_test_report(args.self_test_report))
+    elif args.live_attack_report:
+        sys.exit(live_attack_report(args.live_attack_report))
     elif args.profile_test:
         profile_test()
     elif args.self_test:
