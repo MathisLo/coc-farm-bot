@@ -67,7 +67,10 @@
               <label class="check-row"><input data-field="and_rule" id="and_rule" type="checkbox"><span class="check-box"><span data-icon="check"></span></span><span>Exiger les deux ressources</span><span class="help-icon" title="Une base doit atteindre les deux seuils après application de la marge." data-icon="info"></span></label>
             </div>
             <div class="tab-page" data-panel="army" role="tabpanel" hidden>
-              <div class="two-fields"><label class="field-label">Électrodragons prévus<span class="input-shell"><input data-field="electrodragon_count" id="electrodragon_count" type="number" min="0" max="50" step="1"></span></label><label class="field-label">Dragons prévus<span class="input-shell"><input data-field="dragon_count" id="dragon_count" type="number" min="0" max="50" step="1"></span></label></div>
+              <h3>Composition d’attaque</h3>
+              <div class="two-fields"><label class="field-label">Électro-dragons<span class="input-shell"><input data-field="electrodragon_count" id="electrodragon_count" type="number" min="0" max="50" step="1"></span></label><label class="field-label">Dragons<span class="input-shell"><input data-field="dragon_count" id="dragon_count" type="number" min="0" max="50" step="1"></span></label></div>
+              <label class="field-label">Sorts Rage<span class="input-shell"><input data-field="rage_count" id="rage_count" type="number" min="0" max="5" step="1"></span></label>
+              <p class="field-help">Configurez les quantités à entraîner et à déployer. Chaque Rage utilise 2 places de sort ; la composition doit tenir dans vos camps.</p>
               <label class="field-label">Délai entre poses (ms)<span class="input-shell"><input data-field="delay_between_dragons" id="delay_between_dragons" type="number" min="80" max="2000" step="10"></span></label>
               <label class="check-row"><input data-field="deploy_heroes" id="deploy_heroes" type="checkbox"><span class="check-box"><span data-icon="check"></span></span><span>Déployer les héros</span></label>
               <p class="field-help">Le bot vérifie les unités visibles dans la barre de combat avant chaque pose.</p>

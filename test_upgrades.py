@@ -1067,6 +1067,12 @@ class UpgradeTests(unittest.TestCase):
         with Image.open(Path(__file__).parent/'testdata/reserve_gold_background.png') as im:
             self.assertEqual(main.read_safe_reserve(im,'gold'),3496839)
 
+    def test_low_gold_wide_consensus_overrules_spurious_million_reading(self):
+        image = Image.new('RGB', (1920, 1080))
+        with patch.object(main, 'read_text', side_effect=[
+                '2 441 423', '2 441 423', '244 423', '244 423', '244 423']):
+            self.assertEqual(main.read_safe_reserve(image, 'gold'), 244_423)
+
     def test_elixir_digits_survive_background_interference(self):
         with Image.open(Path(__file__).parent/'testdata/reserve_elixir_background.png') as im:
             self.assertEqual(main.read_safe_reserve(im,'elixir'),2685294)

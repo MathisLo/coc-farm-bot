@@ -4,7 +4,7 @@
   const all = (selector, root=document) => [...root.querySelectorAll(selector)];
   const format = value => Number.isFinite(Number(value)) ? new Intl.NumberFormat('fr-FR').format(Number(value)) : '—';
   const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
-  const fields = ['window_title','min_gold','min_elixir','loot_margin','electrodragon_count','dragon_count','delay_between_dragons','and_rule','dry_run','deploy_heroes','upgrade_wall','upgrade_recommended','upgrade_heroes','chain_attacks'];
+  const fields = ['window_title','min_gold','min_elixir','loot_margin','electrodragon_count','dragon_count','rage_count','delay_between_dragons','and_rule','dry_run','deploy_heroes','upgrade_wall','upgrade_recommended','upgrade_heroes','chain_attacks'];
   const pageTitles = {
     console:['CONSOLE','Pilote de raid','Automatisez vos raids, maximisez vos ressources'],
     statistics:['STATISTIQUES','Statistiques','Suivez les résultats de vos raids'],
@@ -188,7 +188,7 @@
 
   function updateSummaries(v) {
     $('summary-loot').textContent=`Or ${format(v.min_gold)} · Élixir ${format(v.min_elixir)} · marge ${v.loot_margin} % · ${v.and_rule?'deux ressources':'une ressource'}`;
-    $('summary-army').textContent=`${v.electrodragon_count} électrodragons · ${v.dragon_count} dragons · héros ${v.deploy_heroes?'activés':'désactivés'} · ${v.delay_between_dragons} ms`;
+    $('summary-army').textContent=`${v.electrodragon_count} électrodragons · ${v.dragon_count} dragons · ${v.rage_count} Rage · héros ${v.deploy_heroes?'activés':'désactivés'} · ${v.delay_between_dragons} ms`;
     const flags=[];
     if (v.chain_attacks) flags.push('attaques enchaînées');
     if (v.upgrade_recommended) flags.push('bâtiments');

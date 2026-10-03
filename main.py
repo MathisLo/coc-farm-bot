@@ -153,7 +153,7 @@ class Roi:
 
 @dataclass
 class Settings:
-    version: int = 8
+    version: int = 9
     window_title: str = ""
     min_gold: int = 500000
     min_elixir: int = 500000
@@ -161,6 +161,7 @@ class Settings:
     use_and_rule: bool = True
     electrodragon_count: int = 8
     dragon_count: int = 1
+    rage_count: int = 5
     deploy_heroes: bool = True
     upgrade_wall_between_attacks: bool = True
     upgrade_recommended: bool = True
@@ -233,7 +234,7 @@ HERO_DROP_POINTS = ((15.0, 40.0), (85.0, 40.0), (15.0, 49.0))
 ELECTRODRAGON_LABEL = "\u00c9lectro-dragon"
 RAGE_SLOT = (59.85, 92.5)
 RAGE_DROP_POINTS = ((24.0, 33.0), (31.0, 25.0), (37.0, 17.0), (20.0, 38.0), (34.0, 21.0))
-ARMY_REQUIRED_RAGE = 5
+MAX_RAGE_COUNT = 5
 ELECTRODRAGON_HOUSING = 30
 DRAGON_HOUSING = 20
 EVENT_EXTRA_TROOP_CENTERS = (17.0, 23.2, 29.4)
@@ -434,7 +435,8 @@ def load_settings() -> Settings:
                 data.setdefault(key, value)
         if data.get("version", 0) < 6:
             data["version"] = 6
-        data["version"] = 8
+        data.setdefault("rage_count", 5)
+        data["version"] = 9
         kept = {item.name for item in fields(Settings)}
         return Settings(**{key: value for key, value in data.items() if key in kept})
     except (OSError, TypeError, ValueError): return Settings()
@@ -473,6 +475,10 @@ def read_safe_reserve(image: Image.Image, resource: str) -> int | None:
         tight = crop_percent(image, Roi(87, 3.1, 95.3, 6.1))
         readings = [parse_reserve_number(read_text(tight, scale=scale)) for scale in (2, 3, 5)]
         full = [value for value in readings if value is not None and 1_000_000 <= value <= 20_000_000]
+        low = [value for value in readings if value is not None and 0 <= value < 1_000_000]
+        if full and low:
+            full = [value for value in full
+                    if any(abs(value - candidate - 1_000_000) <= 20_000 for candidate in low)]
         agreed = [value for value in set(full) if full.count(value) >= 2]
         if len(agreed) == 1:
             return agreed[0]
@@ -481,7 +487,7 @@ def read_safe_reserve(image: Image.Image, resource: str) -> int | None:
         # scales 4 and 6; require both readings to agree.
         wide = crop_percent(image, Roi(86, 2.5, 95, 6.5))
         readings = [parse_reserve_number(read_text(wide, scale=scale)) for scale in (4, 6)]
-        if readings[0] is not None and readings[0] == readings[1] and 1_000_000 <= readings[0] <= 20_000_000:
+        if readings[0] is not None and readings[0] == readings[1] and 0 <= readings[0] <= 20_000_000:
             return readings[0]
     if resource == 'elixir' and image.size == (1920, 1080) and not calibrated:
         # The purple bar obscures the first digit in the ordinary crop.
@@ -529,8 +535,23 @@ def read_safe_reserve(image: Image.Image, resource: str) -> int | None:
                 if value is not None and 0 <= value <= 20_000_000:
                     values.append(value)
         if values:
-            if any(value >= 1_000_000 for value in values):
-                values = [value for value in values if value >= 1_000_000]
+            high = [value for value in values if value >= 1_000_000]
+            low = [value for value in values if value < 1_000_000]
+            if high and low:
+                leading_one = [value for value in high
+                               if any(abs(value - candidate - 1_000_000) <= 20_000
+                                      for candidate in low)]
+                if leading_one:
+                    values = leading_one
+                else:
+                    low_agreed = [value for value in set(low) if low.count(value) >= 2]
+                    high_agreed = [value for value in set(high) if high.count(value) >= 2]
+                    if len(low_agreed) == 1 and not high_agreed:
+                        values = low
+                    elif len(high_agreed) == 1 and not low_agreed:
+                        values = high
+                    else:
+                        values = []
             agreed = [value for value in set(values) if values.count(value) >= 2]
             if len(agreed) == 1:
                 return agreed[0]
@@ -756,11 +777,14 @@ def army_readiness(image: Image.Image, settings: Settings) -> tuple[bool, str, d
     if settings.deploy_heroes and (heroes is None or heroes[1] < 1 or
                                    heroes[0] < min(3, heroes[1])):
         return False, f"héros {heroes or 'illisibles'}", observed
-    if spells is None or spells[0] < ARMY_REQUIRED_RAGE * 2 or rage_count is None or rage_count < 1:
-        return False, f"Rage {rage_count} / 1 minimum, places de sort {spells or 'illisibles'}", observed
+    if settings.rage_count and (spells is None or spells[0] < settings.rage_count * 2 or
+                                rage_count is None or rage_count < settings.rage_count):
+        return False, (f"Rage {rage_count} / {settings.rage_count} demandé(s), "
+                       f"places de sort {spells or 'illisibles'} / {settings.rage_count * 2} requises"), observed
     capacity_note = (f", électro-dragons attendus x{required_electrodragons} au lieu du réglage x{settings.electrodragon_count}"
                      if required_electrodragons < settings.electrodragon_count else "")
-    return True, f"troupes {troops[0]}/{troops[1]}, héros {heroes}, Rage x{rage_count}{capacity_note}", observed
+    rage_note = f"Rage x{rage_count}" if settings.rage_count else "sans Rage"
+    return True, f"troupes {troops[0]}/{troops[1]}, héros {heroes}, {rage_note}{capacity_note}", observed
 
 
 def troop_card_frame_visible(image: Image.Image, center: float) -> bool:
@@ -2720,6 +2744,7 @@ class BotApp:
         self.loot_margin = StringVar(value=str(self.settings.loot_margin_percent))
         self.electrodragon_count = StringVar(value=str(self.settings.electrodragon_count))
         self.dragon_count = StringVar(value=str(self.settings.dragon_count))
+        self.rage_count = StringVar(value=str(self.settings.rage_count))
         self.delay_between_dragons = StringVar(value=str(self.settings.delay_between_dragons_ms))
         self.and_rule = BooleanVar(value=self.settings.use_and_rule)
         self.dry_run = BooleanVar(value=self.settings.dry_run)
@@ -2994,7 +3019,7 @@ class BotApp:
             "settings": asdict(self.settings), "checks": checks,
             "launcher_values": {name: getattr(self, name).get() for name in (
                 "min_gold", "min_elixir", "loot_margin", "electrodragon_count",
-                "dragon_count", "delay_between_dragons", "and_rule", "dry_run",
+                "dragon_count", "rage_count", "delay_between_dragons", "and_rule", "dry_run",
                 "deploy_heroes", "upgrade_wall", "upgrade_recommended",
                 "upgrade_heroes", "chain_attacks")},
             "capture_source": capture_source, "capture_error": capture_error,
@@ -3124,11 +3149,12 @@ class BotApp:
                 min_gold=int(self.min_gold.get().replace(" ", "")), min_elixir=int(self.min_elixir.get().replace(" ", "")),
                 loot_margin_percent=float(self.loot_margin.get().replace(",", ".")),
                 electrodragon_count=int(self.electrodragon_count.get()), dragon_count=int(self.dragon_count.get()),
+                rage_count=int(self.rage_count.get()),
                 delay_between_dragons_ms=int(self.delay_between_dragons.get()),
                 use_and_rule=self.and_rule.get(), dry_run=self.dry_run.get(), deploy_heroes=self.deploy_heroes.get(),
                 upgrade_wall_between_attacks=self.upgrade_wall.get(), upgrade_recommended=self.upgrade_recommended.get(),
                 upgrade_heroes=self.upgrade_heroes.get(), chain_attacks=self.chain_attacks.get())
-            if not 0 <= candidate.min_gold <= 2_500_000 or not 0 <= candidate.min_elixir <= 2_500_000 or not 0 <= candidate.loot_margin_percent <= 25 or not 0 <= candidate.electrodragon_count <= 50 or not 0 <= candidate.dragon_count <= 50 or not 80 <= candidate.delay_between_dragons_ms <= 2000: raise ValueError
+            if not 0 <= candidate.min_gold <= 2_500_000 or not 0 <= candidate.min_elixir <= 2_500_000 or not 0 <= candidate.loot_margin_percent <= 25 or not 0 <= candidate.electrodragon_count <= 50 or not 0 <= candidate.dragon_count <= 50 or candidate.electrodragon_count + candidate.dragon_count < 1 or not 0 <= candidate.rage_count <= MAX_RAGE_COUNT or not 80 <= candidate.delay_between_dragons_ms <= 2000: raise ValueError
             save_settings(candidate)
             self.settings = candidate
             self._trace("CONFIG", json.dumps(asdict(candidate), ensure_ascii=False))
@@ -3623,6 +3649,9 @@ class BotApp:
 
     def deploy_unit(self, window, label, slot, points, burst=False):
         self._check_stopped()
+        expected = self.settings.electrodragon_count if label == ELECTRODRAGON_LABEL else self.settings.dragon_count
+        if expected <= 0:
+            return 0
         if not points: raise RuntimeError("Aucun point de déploiement configuré.")
         position_image = self._battle_capture(window)
         slot_offset = troop_slot_offset(position_image, label) if isinstance(position_image, Image.Image) else None
@@ -3637,7 +3666,7 @@ class BotApp:
         expected = self.settings.electrodragon_count if label == "Électro-dragon" else self.settings.dragon_count
         preview = getattr(self, "_army_preview_counts", {}).get(
             "electrodragon" if label == ELECTRODRAGON_LABEL else "dragon")
-        if preview is not None and (remaining is None or (remaining == 1 and preview >= 10)):
+        if preview is not None and (remaining is None or (remaining == 1 and preview > 1)):
             self.events.put(f"{label} : compteur de combat {remaining}, lecture avant attaque x{preview} retenue.")
             remaining = preview
         if remaining is not None and preview is not None and remaining > preview:
@@ -3665,20 +3694,25 @@ class BotApp:
         self._check_stopped()
         if slot_offset:
             self.events.put(f"{label} détecté à {selected_slot[0]:.1f} % dans la barre d'armée.")
+        target_count = min(expected, preview if preview is not None else expected)
+        if target_count <= 0:
+            return 0
         initial = remaining
         verify_final_card = isinstance(position_image, Image.Image) and hasattr(window, "width")
         residual_retries = 0
-        if remaining != expected: self.events.put(f"{label} : {remaining} disponible(s), {expected} prévu(s) ; toutes les unités visibles seront envoyées.")
+        if remaining != target_count: self.events.put(f"{label} : {target_count} pose(s) demandée(s), {remaining} disponible(s) ; le surplus restera dans la barre.")
         if not self._click(window, *selected_slot): raise RuntimeError(f"Sélection {label} refusée.")
         self._wait(.08)
         if burst and live_scaled_client and label == ELECTRODRAGON_LABEL and isinstance(position_image, Image.Image):
-            return self._deploy_compact_electro(window, selected_slot, points, remaining, slot_offset)
+            return self._deploy_compact_electro(window, selected_slot, points, remaining, slot_offset, target_count)
         placed = 0
         rejected = set()
         candidate_points = list(points)
         outside_points = [(max(5.0, x - 5.0), y) for x, y in points]
         outside_added = False
         while not self.stop_event.is_set():
+            if placed >= target_count and remaining > 0:
+                return placed
             if remaining == 0:
                 if not verify_final_card:
                     return placed
@@ -3719,7 +3753,7 @@ class BotApp:
                         return placed
                     raise RuntimeError(f"Aucun point accepté pour {label} ; {remaining} unité(s) restante(s).")
                 drops = []
-                for index in range(min(3, remaining)):
+                for index in range(min(3, remaining, target_count - placed)):
                     self._check_stopped()
                     point = candidates[min(len(candidates)-1, int((placed+index)*len(candidates)/initial))]
                     self._battle_capture(window)
@@ -3893,6 +3927,9 @@ class BotApp:
 
     def deploy_rage_spells(self, window, hero_shift):
         self._check_stopped()
+        target_count = self.settings.rage_count
+        if target_count <= 0:
+            return 0
         slot_center = None
         for attempt in range(4):
             image = self._battle_capture(window)
@@ -3916,7 +3953,9 @@ class BotApp:
         if remaining == 0:
             self.events.put("Sort Rage détecté mais aucun exemplaire restant.")
             return 0
-        points = rage_targets(getattr(self, "_troop_drop_points", []), remaining)
+        target_count = min(target_count, remaining)
+        target_remaining = remaining - target_count
+        points = rage_targets(getattr(self, "_troop_drop_points", []), target_count)
         if not points:
             points = layout_points("RAGE_DROP_POINTS")
         if not points:
@@ -3925,7 +3964,7 @@ class BotApp:
         placed = 0
         rejected = set()
         used = set()
-        while remaining and not self.stop_event.is_set():
+        while remaining > target_remaining and not self.stop_event.is_set():
             candidates = [point for point in points if point not in rejected]
             if not candidates:
                 raise RuntimeError(f"Aucun point accepté pour Rage ; {remaining} sort(s) restant(s).")
@@ -3956,9 +3995,10 @@ class BotApp:
             self.events.put(f"Rage confirmé à {point[0]:.1f} %, {point[1]:.1f} % ; {remaining} restant(s).")
         return placed
 
-    def _deploy_compact_electro(self, window, slot, points, remaining, slot_offset):
+    def _deploy_compact_electro(self, window, slot, points, remaining, slot_offset, target_count=None):
         """Find one legal edge point, using the actual card count as feedback."""
         initial = remaining
+        target_count = min(remaining, target_count if target_count is not None else remaining)
         indices = (len(points)//2, len(points)//4, 3*len(points)//4)
         anchor = None
         tried = set()
@@ -3997,7 +4037,7 @@ class BotApp:
             raise RuntimeError('Aucun point de pose confirmé par le compteur électro-dragon.')
         self._confirmed_drop_point = anchor
         stalled = 0
-        while remaining:
+        while initial - remaining < target_count:
             self._check_stopped()
             self._battle_capture(window)
             if not self._click(window, *slot) or not self._click(window, *anchor):
@@ -4018,6 +4058,9 @@ class BotApp:
             stalled = 0
             self._troop_drop_points.append(anchor)
             self.events.put(f'Électro-dragon posé au point confirmé ; {remaining} restant(s).')
+        if target_count < initial:
+            self.events.put(f"Électro-dragon : composition respectée, {target_count} pose(s) confirmée(s).")
+            return target_count
         for _ in range(2):
             image = self._battle_capture(window)
             if not battle_hud_visible(image):

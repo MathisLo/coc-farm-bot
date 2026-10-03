@@ -1,4 +1,8 @@
-# CoC Farm Bot v2.0.12
+# CoC Farm Bot v2.0.13
+
+## Composition d’attaque configurable (v2.0.13)
+
+L’onglet **Armée** permet de choisir les nombres d’électro-dragons, de dragons et de sorts Rage. Les valeurs sont sauvegardées et limitées lors du déploiement. Le contrôle avant recherche vérifie aussi le nombre de Rage demandé et les places de sort nécessaires.
 
 ## Diagnostic complet (v2.0.12)
 
@@ -56,6 +60,8 @@ La **simulation** clique rÃ©ellement pour rechercher et passer les bases, mais
 **ArrÃªter** bloque les nouveaux clics de toutes les actions, y compris les hÃ©ros et les confirmations de remparts. Un clic dÃ©jÃ  envoyÃ© est relÃ¢chÃ©. Les lectures OCR sont annulables et limitÃ©es Ã  huit secondes par appel ; une base dont lâ€™Ã©cran ou le butin reste illisible dispose dâ€™un budget de 35 secondes. Ensuite, sa capture est conservÃ©e dans `%USERPROFILE%\CoCFarmBot\unread-enemies` et le bot passe Ã  la suivante uniquement si le bouton Suivant est reconnu sur une nouvelle capture. Sinon, il sâ€™arrÃªte sans clic. Avec le rÃ©glage Â« or ou Ã©lixir Â», une seule ressource lisible atteignant son seuil suffit ; le rÃ©glage exigeant les deux ressources conserve ses deux vÃ©rifications. **Lire lâ€™Ã©cran** et **Relever le profil** travaillent en arriÃ¨re-plan : lâ€™interface et le bouton ArrÃªter restent disponibles. Une seule opÃ©ration est autorisÃ©e Ã  la fois, et les rÃ©glages utilisÃ©s ne changent pas en cours de cycle.
 
 ## Adapter les positions
+
+Dans l’onglet **Armée**, configurez séparément les quantités d’électro-dragons, de dragons et de sorts Rage. Les valeurs sont enregistrées avec les réglages et le bot limite le déploiement à ces quantités. Les sorts Rage peuvent être réglés de 0 à 5 ; chacun occupe deux places. La composition doit être présente dans les camps avant la recherche, sinon le journal indique les quantités attendues.
 
 Les lectures critiques sont testées sur des captures redimensionnées en 1920 x 1080, 2560 x 1440 et 1387 x 780. Pour une autre largeur, y compris un 780p non 16:9, régler d'abord la fenêtre du jeu à la taille voulue, puis ouvrir **Calibrer les positions...** : la taille intérieure affichée est celle de la capture et son format est enregistré avec les positions. Le bot refuse les clics si le format de la fenêtre ne correspond plus au calibrage. Ces tests sur images ne remplacent pas un essai réel sur le PC concerné.
 

@@ -120,7 +120,7 @@ class CancellationRegressions(unittest.TestCase):
 
     def test_three_available_heroes_and_one_rage_are_ready(self):
         image = Image.new('RGB', (1920, 1080))
-        settings = main.replace(main.Settings(), electrodragon_count=10, dragon_count=1)
+        settings = main.replace(main.Settings(), electrodragon_count=10, dragon_count=1, rage_count=1)
         with patch.object(main, 'army_fraction', side_effect=[(320, 320), (3, 4), (11, 11)]), \
              patch.object(main, 'troop_card_kind', side_effect=['electrodragon', 'dragon'] + [None] * 5), \
              patch.object(main, 'army_card_count', side_effect=[10, 1, None, 1]), \
@@ -279,7 +279,7 @@ class CancellationRegressions(unittest.TestCase):
                 patch.object(main, 'rage_card_score', return_value=0):
             self.assertEqual(main.hero_layout_shift(image), 0.0)
 
-    def test_impossible_battle_count_uses_army_preview_not_old_setting(self):
+    def test_configured_count_caps_larger_prebattle_army(self):
         app = app_without_gui()
         app._army_preview_counts = {"electrodragon": 10}
         app._wait = Mock()
@@ -288,7 +288,7 @@ class CancellationRegressions(unittest.TestCase):
         app.stable_troop_count = Mock(side_effect=[80, 7, 4, 1, 0])
         points = main.layout_points("ELECTRODRAGON_PERIMETER_POINTS")
         self.assertEqual(app.deploy_unit(object(), main.ELECTRODRAGON_LABEL,
-                                         main.ELECTRODRAGON_SLOT, points, burst=True), 10)
+                                         main.ELECTRODRAGON_SLOT, points, burst=True), 8)
 
     def test_dragon_neighbor_badge_cannot_exceed_prepared_army(self):
         app = app_without_gui()
@@ -597,7 +597,7 @@ class CancellationRegressions(unittest.TestCase):
         app.stable_troop_count = Mock(side_effect=[8, 0, 5, 2, 0])
         window = type("ScaledWindow", (), {"width": 1412})()
         points = main.layout_points("ELECTRODRAGON_PERIMETER_POINTS")
-        self.assertEqual(app.deploy_unit(window, "Ã‰lectro-dragon", (23, 92), points, burst=True), 8)
+        self.assertEqual(app.deploy_unit(window, main.ELECTRODRAGON_LABEL, (23, 92), points, burst=True), 8)
         self.assertTrue(any("OCR incohérent" in str(event) for event in app.events.queue))
 
     def test_wide_client_normalizes_impossible_neighbor_troop_count(self):
@@ -1376,7 +1376,7 @@ class DiagnosticLogRegressions(unittest.TestCase):
             app.journal = main.DiagnosticJournal(root / 'bot.log')
             for name in ('status', 'run_state', 'window_title', 'min_gold', 'min_elixir',
                          'loot_margin', 'electrodragon_count', 'dragon_count',
-                         'delay_between_dragons', 'and_rule', 'dry_run', 'deploy_heroes',
+                         'rage_count', 'delay_between_dragons', 'and_rule', 'dry_run', 'deploy_heroes',
                          'upgrade_wall', 'upgrade_recommended', 'upgrade_heroes', 'chain_attacks'):
                 setattr(app, name, Mock())
                 getattr(app, name).get.return_value = False if name == 'upgrade_heroes' else 'ready'
