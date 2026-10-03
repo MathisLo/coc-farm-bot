@@ -140,6 +140,26 @@ class UpgradeTests(unittest.TestCase):
             self.assertTrue(upgrades.selected_panel_title_matches(image, 'Caserne'))
             self.assertFalse(upgrades.selected_panel_title_matches(image, 'Caserne noire'))
 
+    def test_giant_bomb_panel_accepts_distorted_builder_title(self):
+        image = Image.new('RGB', (1920, 1080))
+        with patch.object(main, 'read_text', return_value='all B0Mbe.geaNt\u00e0 (iiyeau 8)'):
+            for title in ('30mbe g\u00e9ante', 'hrnbe g\u00e9ante', '}ombe g\u00e9ante', '\u00c8ombe g\u00e9ante'):
+                self.assertTrue(upgrades.selected_panel_title_matches(image, title))
+                self.assertTrue(upgrades.title_matches_heading(title, 'Bombe g\u00e9ante (niveau 8)'))
+                self.assertTrue(upgrades.same_building_title(title, 'Bombe g\u00e9ante'))
+            self.assertFalse(upgrades.selected_panel_title_matches(image, "Tour d'arch\u00e8res"))
+
+    def test_building_row_accepts_matching_reads_across_blank_frames(self):
+        app = app_without_gui()
+        app._capture = Mock(return_value=Image.new('RGB', (1920, 1080)))
+        app._wait = Mock()
+        app._trace = Mock()
+        row = ('Bombe geante', 45.18, 3_200_000, 'or')
+        with patch.object(main, 'builders_menu_open', return_value=True), \
+                patch.object(upgrades, 'suggested_items', side_effect=[[], [row], [], [row]]):
+            self.assertEqual(upgrades.stable_upgrade_row(
+                app, object(), '30mbe geante', 3_200_000, 'or'), 45.18)
+
     def test_moving_building_row_is_relocated_before_click(self):
         app = app_without_gui()
         app._wait = Mock()
@@ -926,6 +946,28 @@ class UpgradeTests(unittest.TestCase):
         self.assertFalse(any(cost == 4_400_000 for _, _, cost, _ in items))
         self.assertFalse(any('mpart' in title.lower() for title, _, _, _ in items))
 
+    def test_builder_price_prefers_repeated_full_amount_over_clipped_suffix(self):
+        image = Image.new('RGB', (1920, 1080))
+        with patch.object(main, 'read_result_amount', side_effect=[
+                3_200_000, 200_000, 200_000, 3_200_000, 3_200_000, 3_200_000]), \
+                patch.object(main, 'read_text', return_value=''), \
+                patch.object(upgrades, 'resource_icon', return_value='or'):
+            self.assertEqual(upgrades.builder_price_resource(image, 29.4), (3_200_000, 'or'))
+
+    def test_wide_catapult_direct_price_uses_two_complete_crops(self):
+        image = Image.new('RGB', (1920, 1080))
+        image.paste((20, 200, 20), (1497, 594, 1690, 681))
+        with patch.object(upgrades, 'confirmation_headings', return_value=[
+                'ameliorer votre catapulte explosive au niveau 6']), \
+                patch.object(upgrades, 'confirmation_cost', return_value=None), \
+                patch.object(main, 'read_result_amount', return_value=None), \
+                patch.object(main, 'read_text', return_value='6 000 000'), \
+                patch.object(upgrades, 'resource_icon', return_value='\u00e9lixir'):
+            self.assertEqual(upgrades.direct_upgrade_button(image, 'Catapulte explosive',
+                                                            6_000_000, '\u00e9lixir'), (83.0, 58.0))
+            self.assertIsNone(upgrades.direct_upgrade_button(image, 'Catapulte explosive',
+                                                             5_000_000, '\u00e9lixir'))
+
     def test_compact_catapult_direct_upgrade_requires_matching_price_resource_and_green_button(self):
         with Image.open(Path(__file__).parent / 'testdata' / 'catapult_selected_1323.png') as image:
             self.assertEqual(upgrades.direct_upgrade_button(image, 'Catapulte explosive', 4_000_000, 'élixir'),
@@ -965,6 +1007,27 @@ class UpgradeTests(unittest.TestCase):
         app._wait.assert_called_once_with(.4)
         self.assertIn((83,43), [call.args[1] for call in app._wall_click.call_args_list])
         self.assertEqual(app._wall_click.call_args_list[-1].args[1], main.BUILDERS_BUTTON)
+
+    def test_direct_upgrade_refinds_row_after_menu_returns_to_top(self):
+        app = app_without_gui()
+        app._capture = Mock(return_value=object())
+        app._wall_click = Mock()
+        app._wait = Mock()
+        app.stable_reserves = Mock(return_value=(3_466_604, 7_320_672))
+        row = ('Eradicateur de heros', 54, 6_000_000, 'elixir')
+        with patch.object(upgrades, 'stable_builders', return_value=2), \
+                patch.object(upgrades, 'suggested_items', side_effect=[[], [], [row]]), \
+                patch.object(upgrades, 'scroll_builders_to_top') as scroll_top, \
+                patch.object(upgrades, 'stable_upgrade_row', return_value=54), \
+                patch.object(upgrades, 'direct_upgrade_button', return_value=(83, 43)), \
+                patch.object(upgrades, 'confirmation_headings', return_value=[]), \
+                patch.object(main, 'builders_menu_open', return_value=True), \
+                patch.object(main.WindowDriver, 'scroll_menu', return_value=True) as scroll:
+            result = upgrades.perform_direct_upgrade(app, 'window', row[0], row[2], row[3])
+        self.assertEqual(result, (2, (3_466_604, 7_320_672)))
+        scroll_top.assert_called_once()
+        scroll.assert_called_once_with('window', delta=-1200)
+        self.assertIn((44, 54), [call.args[1] for call in app._wall_click.call_args_list])
 
     def test_compact_canon_panel_and_confirmation_require_exact_price(self):
         with Image.open(Path(__file__).parent/'testdata/canon_selected_1323.png') as image:

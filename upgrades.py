@@ -21,7 +21,10 @@ def normal(text):
 
 
 def canonical_title(text):
-    return ''.join(re.findall(r'[a-z0-9]+', normal(text)))
+    canonical = ''.join(re.findall(r'[a-z0-9]+', normal(text)))
+    if canonical in ('30mbegeante', 'hrnbegeante', 'ombegeante', 'iombegeante', 'eombegeante'):
+        return 'bombegeante'
+    return canonical
 
 
 def same_building_title(a, b):
@@ -37,7 +40,7 @@ def title_matches_heading(title, heading):
     text = normal(heading)
     if 'niveau' not in text:
         return False
-    before = canonical_title(text.split('niveau', 1)[0])
+    before = canonical_title(text.split('niveau', 1)[0]).replace('0', 'o')
     if before.endswith('au'):
         before = before[:-2]
     expected = canonical_title(title)
@@ -117,8 +120,18 @@ def direct_upgrade_button(image, title, cost, resource):
         button = m.crop_percent(image, button_roi).convert('RGB')
         pixels = list(button.get_flattened_data())
         green = sum(g > r * 1.3 and g > b * 1.2 and g > 100 for r, g, b in pixels)
+        observed = m.read_result_amount(m.crop_percent(image, price_roi))
+        if observed != cost and image.size == (1920, 1080) and py == 58.0:
+            readings = []
+            for alternate in (m.Roi(78, 59.5, 86, 63), m.Roi(78, 59, 86, 62.5)):
+                raw = m.read_text(m.crop_percent(image, alternate), scale=4).strip(" +.,'\"*")
+                raw = raw.translate(str.maketrans({'O': '0', 'o': '0'}))
+                if re.fullmatch(r'\d[\d\s]*', raw):
+                    readings.append(int(re.sub(r'\s', '', raw)))
+            if readings == [cost, cost]:
+                observed = cost
         if (green > len(pixels) * .2
-                and m.read_result_amount(m.crop_percent(image, price_roi)) == cost
+                and observed == cost
                 and resource_icon(image, icon_roi) == resource):
             return (px, py)
     return None
@@ -159,6 +172,7 @@ def selected_panel_title_matches(image, title):
     """Permit opening a dialog when a shifted button price cannot be read."""
     m = engine()
     expected = canonical_title(title)
+    distorted_bomb = expected == 'bombegeante'
     if len(expected) < 6:
         return False
     # The wide crop includes action buttons whose lettering can overwhelm the
@@ -167,10 +181,12 @@ def selected_panel_title_matches(image, title):
                        (m.Roi(20,65,80,82), 1),
                        (m.Roi(20,65,80,82), 2)):
         raw = normal(m.read_text(m.crop_percent(image, roi), scale=scale))
-        if 'niveau' not in raw:
+        if (not any(token in raw for token in ('iveau', 'iyeau')) if distorted_bomb
+                else 'niveau' not in raw):
             continue
-        observed = canonical_title(raw.split('niveau', 1)[0])
-        if abs(len(observed) - len(expected)) <= 3 and any(
+        observed = (canonical_title(raw.split('veau', 1)[0]).replace('0', 'o') if distorted_bomb
+                    else canonical_title(raw.split('niveau', 1)[0]))
+        if (distorted_bomb or abs(len(observed) - len(expected)) <= 3) and any(
                SequenceMatcher(None, expected, observed[start:start+length]).ratio() >= .78
                for length in range(max(4, len(expected)-1), len(expected)+3)
                for start in range(max(0, len(observed)-length+1))):
@@ -296,11 +312,29 @@ def builder_price_resource(image, y):
     """Read a price across small OCR row offsets without borrowing a neighbor."""
     m = engine()
     price_x1, price_x2 = (56.6, 64.2) if image.width < 1500 else (57, 65)
-    costs = [m.read_result_amount(m.crop_percent(image,m.Roi(price_x1,y+offset-2,price_x2,y+offset+2)))
-             for offset in (-.4,0,.4)]
-    if not any(costs):
-        costs = [m.read_result_amount(m.crop_percent(image,m.Roi(55.7,y+offset-2,62.7,y+offset+2)))
+    if image.width < 1500:
+        costs = [m.read_result_amount(m.crop_percent(image,m.Roi(price_x1,y+offset-2,price_x2,y+offset+2)))
                  for offset in (-.4,0,.4)]
+        if not any(costs):
+            costs = [m.read_result_amount(m.crop_percent(image,m.Roi(55.7,y+offset-2,62.7,y+offset+2)))
+                     for offset in (-.4,0,.4)]
+    else:
+        costs = []
+        for left, right in ((price_x1, price_x2), (56, 64)):
+            for offset in (-.4, 0, .4):
+                crop = m.crop_percent(image, m.Roi(left, y + offset - 2, right, y + offset + 2))
+                amount = m.read_result_amount(crop)
+                if amount is not None:
+                    costs.append(amount)
+                for scale in (2, 3):
+                    raw = m.read_text(crop, scale=scale).strip(" +.,'\"*")
+                    raw = raw.translate(str.maketrans({'O': '0', 'o': '0', 'S': '5', 's': '5'}))
+                    if re.fullmatch(r'\d[\d\s]*', raw):
+                        digits = re.sub(r'\s', '', raw)
+                        if len(digits) == 1 or not digits.startswith('0'):
+                            value = int(digits)
+                            if 0 < value <= 20_000_000:
+                                costs.append(value)
     resources = {resource_icon(image, roi) for roi in
                  (m.Roi(54.5,y-1.8,57.1,y+1.8), m.Roi(55,y-1.8,57,y+1.8),
                   m.Roi(56.5,y-1.8,58.5,y+1.8))}
@@ -308,7 +342,15 @@ def builder_price_resource(image, y):
     votes = Counter(cost for cost in costs if cost)
     if len(resources) != 1 or not votes:
         return None
-    return (min(votes, key=lambda cost: (-votes[cost], cost)), resources.pop())
+    if image.width < 1500:
+        return (min(votes, key=lambda cost: (-votes[cost], cost)), resources.pop())
+    repeated = [cost for cost, count in votes.items() if count >= 2]
+    if len(repeated) > 1:
+        complete = max(repeated)
+        if any(not str(complete).endswith(str(cost)) for cost in repeated if cost != complete):
+            return None
+        return (complete, resources.pop())
+    return (repeated[0] if repeated else max(votes, key=votes.get), resources.pop())
 
 
 def suggested_items(image, include_others=False, include_town_hall=False):
@@ -606,6 +648,23 @@ def perform_direct_upgrade(app, window, title, cost, resource):
         visible = suggested_items(menu,include_others=True)
     matches = [item for item in visible if same_building_title(item[0],title) and
                item[2:] == (cost,resource)]
+    if not matches and m.builders_menu_open(menu):
+        scroll_builders_to_top(app, window)
+        for page in range(20):
+            menu = app._capture(window)
+            if not m.builders_menu_open(menu):
+                break
+            matches = [item for item in suggested_items(menu, include_others=True)
+                       if same_building_title(item[0], title) and item[2:] == (cost, resource)]
+            if len(matches) == 1:
+                settled_y = stable_upgrade_row(app, window, title, cost, resource)
+                matches = [(matches[0][0], settled_y, cost, resource)] if settled_y is not None else []
+                break
+            with app.action_lock:
+                app._check_stopped()
+                if not m.WindowDriver.scroll_menu(window, delta=-1200):
+                    raise RuntimeError('Défilement de la ligne directe refusé.')
+            app._wait(.35)
     app._trace('BÂTIMENTS',f'Ligne directe retrouvée : {matches!r}')
     if len(matches) != 1:
         app.events.put('Ligne de l’amélioration directe introuvable après contrôle : aucune dépense envoyée.')
@@ -660,7 +719,8 @@ def stable_upgrade_row(app, window, title, cost, resource, include_town_hall=Fal
                    if same_building_title(item[0], title) and item[2:] == (cost, resource)]
         app._trace('BÂTIMENTS', f'Ligne avant clic {attempt + 1}/6 : {matches!r}')
         if len(matches) != 1:
-            previous_y = None
+            if len(matches) > 1:
+                previous_y = None
             continue
         current_y = matches[0][1]
         if previous_y is not None and abs(current_y - previous_y) <= .8:

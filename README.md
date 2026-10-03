@@ -1,4 +1,10 @@
-# CoC Farm Bot v2.0.16
+# CoC Farm Bot v2.0.17
+
+## Améliorations de bâtiments du 4 octobre 2026 (v2.0.17)
+
+Les variantes OCR de « Bombe géante » et les lignes brièvement illisibles ne bloquent plus la sélection. Les prix de la liste sont recoupés sur plusieurs zones pour éviter de lire 200 000 à la place de 3 200 000. Après contrôle des ouvriers et des réserves, une amélioration directe est retrouvée dans la liste même si celle-ci revient en haut. Le prix du bouton vert est vérifié sur deux zones distinctes avant tout paiement.
+
+Un essai direct sur la fenêtre Clash 1920 x 1080 a confirmé l'amélioration de la Catapulte explosive pour 6 000 000 d'élixir : 6 130 441 avant, 130 441 après, et 4 puis 3 ouvriers libres. Les lectures non confirmées continuent de bloquer la dépense.
 
 ## Corrections du 4 octobre 2026 (v2.0.16)
 

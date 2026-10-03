@@ -28,6 +28,16 @@ def app_without_gui():
 
 
 class CancellationRegressions(unittest.TestCase):
+    def test_reserves_accept_matching_readings_across_unreadable_frame(self):
+        app = app_without_gui()
+        app._capture = Mock(return_value=Image.new('RGB', (1920, 1080)))
+        app._wait = Mock(return_value=False)
+        app._trace = Mock()
+        with patch.object(main, 'builders_menu_open', return_value=False), \
+                patch.object(main, 'read_safe_reserve', side_effect=[
+                    11_268_336, 6_130_441, None, None, 11_268_336, 6_130_441]):
+            self.assertEqual(app.stable_reserves(object()), (11_268_336, 6_130_441))
+
     def test_conflicting_reserve_ocr_refuses_spending_without_crashing(self):
         image = Image.new('RGB', (1600, 900))
         readings = iter(('7 901 721', '901 721') * 20)

@@ -3295,7 +3295,8 @@ class BotApp:
                 confirmed = tuple(min(a, b) for a, b in zip(values, previous))
                 self._trace("RÉSERVES", f"Réserves confirmées : or={confirmed[0]}, élixir={confirmed[1]}")
                 return confirmed
-            previous = values if None not in values else None
+            if None not in values:
+                previous = values
             if self._wait(.4): break
         self._trace("REFUS", "Réserves non confirmées après cinq lectures ; dépense interdite.")
         return None
