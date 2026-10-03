@@ -106,11 +106,11 @@ class CancellationRegressions(unittest.TestCase):
 
     def test_mini_venom_army_with_unfillable_spare_places_is_ready(self):
         fixture = Path(__file__).parent / 'testdata/mini_venom_army_ready_1920.png'
-        settings = main.replace(main.Settings(), electrodragon_count=10, dragon_count=1)
+        settings = main.replace(main.Settings(), electrodragon_count=10, dragon_count=1, hero_count=3)
         with Image.open(fixture) as image:
             ready, detail, counts = main.army_readiness(image, settings)
             self.assertTrue(ready, detail)
-            self.assertEqual(counts, {'electrodragon': 8, 'dragon': 1, 'rage': 5})
+            self.assertEqual(counts, {'electrodragon': 8, 'dragon': 1, 'rage': 5, 'heroes': 3})
             missing_hero = image.copy()
             missing_hero.paste((80, 60, 50), (172, 263, 222, 292))
             self.assertFalse(main.army_readiness(missing_hero, settings)[0])
@@ -120,7 +120,7 @@ class CancellationRegressions(unittest.TestCase):
 
     def test_three_available_heroes_and_one_rage_are_ready(self):
         image = Image.new('RGB', (1920, 1080))
-        settings = main.replace(main.Settings(), electrodragon_count=10, dragon_count=1, rage_count=1)
+        settings = main.replace(main.Settings(), electrodragon_count=10, dragon_count=1, rage_count=1, hero_count=3)
         with patch.object(main, 'army_fraction', side_effect=[(320, 320), (3, 4), (11, 11)]), \
              patch.object(main, 'troop_card_kind', side_effect=['electrodragon', 'dragon'] + [None] * 5), \
              patch.object(main, 'army_card_count', side_effect=[10, 1, None, 1]), \
@@ -128,6 +128,18 @@ class CancellationRegressions(unittest.TestCase):
             ready, detail, observed = main.army_readiness(image, settings)
         self.assertTrue(ready, detail)
         self.assertEqual(observed['rage'], 1)
+        self.assertEqual(observed['heroes'], 3)
+
+    def test_army_waits_for_configured_hero_count(self):
+        image = Image.new('RGB', (1920, 1080))
+        settings = main.replace(main.Settings(), electrodragon_count=10, dragon_count=1, hero_count=4)
+        with patch.object(main, 'army_fraction', side_effect=[(320, 320), (3, 4), (10, 11)]), \
+             patch.object(main, 'troop_card_kind', side_effect=['electrodragon', 'dragon'] + [None] * 5), \
+             patch.object(main, 'army_card_count', side_effect=[10, 1, None, 5]), \
+             patch.object(main, 'rage_card_score', side_effect=[0, .5, 0, 0, 0]):
+            ready, detail, _ = main.army_readiness(image, settings)
+        self.assertFalse(ready)
+        self.assertIn('/ 4', detail)
 
     def test_army_fraction_recovers_zero_rendered_as_t_or_c(self):
         image = Image.new('RGB', (1920, 1080))
@@ -505,6 +517,17 @@ class CancellationRegressions(unittest.TestCase):
             app.deploy_attack_composition(object())
         self.assertEqual(order[:4], ['troop', 'troop', 'rage', 'hero'])
 
+    def test_rage_is_attempted_even_when_hero_layout_is_unreadable(self):
+        app = app_without_gui()
+        order = []
+        app.deploy_unit = Mock(return_value=1)
+        app.deploy_rage_spells = Mock(side_effect=lambda *args: order.append('rage') or 1)
+        app._battle_capture = Mock(return_value=object())
+        with patch.object(main, 'hero_layout_shift', side_effect=[RuntimeError('uncertain'), 0]), \
+             patch.object(main, 'hero_health_visible', return_value=True):
+            app.deploy_attack_composition(object())
+        self.assertEqual(order, ['rage'])
+
     def test_only_available_heroes_are_deployed(self):
         app = app_without_gui()
         app._army_preview_heroes = 3
@@ -515,6 +538,18 @@ class CancellationRegressions(unittest.TestCase):
              patch.object(main, 'hero_health_visible', return_value=True) as health:
             app.deploy_attack_composition(object())
         self.assertEqual(health.call_count, 3)
+
+    def test_hero_deployment_respects_configured_count(self):
+        app = app_without_gui()
+        app.settings = main.replace(app.settings, hero_count=2)
+        app._army_preview_heroes = 4
+        app.deploy_unit = Mock(return_value=1)
+        app.deploy_rage_spells = Mock(return_value=0)
+        app._battle_capture = Mock(return_value=object())
+        with patch.object(main, 'hero_layout_shift', return_value=0), \
+             patch.object(main, 'hero_health_visible', return_value=True) as health:
+            app.deploy_attack_composition(object())
+        self.assertEqual(health.call_count, 2)
 
     def test_temporary_troops_follow_regular_army_and_heroes(self):
         app = app_without_gui()
@@ -552,7 +587,8 @@ class CancellationRegressions(unittest.TestCase):
         app._click = Mock()
         app.stable_rage_count = Mock()
         with patch.object(main, "rage_card_center", return_value=None):
-            self.assertEqual(app.deploy_rage_spells(object(), 0), 0)
+            with self.assertRaisesRegex(RuntimeError, 'Rage demand'):
+                app.deploy_rage_spells(object(), 0)
         app._click.assert_not_called()
         app.stable_rage_count.assert_not_called()
 
@@ -575,7 +611,7 @@ class CancellationRegressions(unittest.TestCase):
         app._battle_capture = Mock(return_value=Image.new('RGB', (1323, 744)))
         app._click = Mock()
         with patch.object(main, 'rage_card_center', return_value=None):
-            with self.assertRaisesRegex(RuntimeError, 'Rage présent avant combat'):
+            with self.assertRaises(RuntimeError):
                 app.deploy_rage_spells(object(), 0)
         app._click.assert_not_called()
 
@@ -622,6 +658,7 @@ class CancellationRegressions(unittest.TestCase):
 
     def test_dimmed_hero_is_not_confirmed_and_retry_reselects(self):
         app = app_without_gui()
+        app.settings = main.replace(app.settings, rage_count=0)
         app._wait = Mock()
         app._battle_capture = Mock(return_value=object())
         app._click = Mock(return_value=True)
@@ -644,6 +681,7 @@ class CancellationRegressions(unittest.TestCase):
 
     def test_empty_hero_slot_is_skipped_after_available_heroes(self):
         app = app_without_gui()
+        app.settings = main.replace(app.settings, rage_count=0)
         image = Image.new("RGB", (1920, 1080))
         with Image.open(Path(__file__).parent / "testdata" / "hero_empty_slot.png") as strip:
             image.paste(strip, (0, 880))
@@ -658,6 +696,7 @@ class CancellationRegressions(unittest.TestCase):
 
     def test_fourth_available_hero_is_selected_and_verified(self):
         app = app_without_gui()
+        app.settings = main.replace(app.settings, rage_count=0)
         app._wait = Mock()
         app._battle_capture = Mock(return_value=Image.new("RGB", (1920, 1080)))
         app._click = Mock(return_value=True)
@@ -676,7 +715,7 @@ class CancellationRegressions(unittest.TestCase):
 
     def test_rage_locator_resolves_compact_bar_without_hero_deployment(self):
         app = app_without_gui()
-        app.settings = main.replace(app.settings, deploy_heroes=False)
+        app.settings = main.replace(app.settings, hero_count=0, deploy_heroes=False)
         app.deploy_unit = Mock(return_value=0)
         app.deploy_rage_spells = Mock(return_value=0)
         window = object()
@@ -757,6 +796,7 @@ class CancellationRegressions(unittest.TestCase):
 
     def test_stop_after_hero_selection_prevents_drop_and_success(self):
         app = app_without_gui()
+        app.settings = main.replace(app.settings, rage_count=0)
         clicks = []
         def send(*args):
             clicks.append(args)
@@ -1376,7 +1416,7 @@ class DiagnosticLogRegressions(unittest.TestCase):
             app.journal = main.DiagnosticJournal(root / 'bot.log')
             for name in ('status', 'run_state', 'window_title', 'min_gold', 'min_elixir',
                          'loot_margin', 'electrodragon_count', 'dragon_count',
-                         'rage_count', 'delay_between_dragons', 'and_rule', 'dry_run', 'deploy_heroes',
+                         'rage_count', 'hero_count', 'delay_between_dragons', 'and_rule', 'dry_run', 'deploy_heroes',
                          'upgrade_wall', 'upgrade_recommended', 'upgrade_heroes', 'chain_attacks'):
                 setattr(app, name, Mock())
                 getattr(app, name).get.return_value = False if name == 'upgrade_heroes' else 'ready'

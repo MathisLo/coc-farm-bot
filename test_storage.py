@@ -17,6 +17,9 @@ class StorageTests(unittest.TestCase):
             with patch.object(main, 'APP_DIR', directory), patch.object(main, 'CONFIG_PATH', config):
                 config.write_text('{"version":8,"upgrade_recommended":true}', encoding='utf-8')
                 self.assertTrue(main.load_settings().upgrade_heroes)
+                self.assertEqual(main.load_settings().hero_count, 4)
+                config.write_text('{"version":9,"deploy_heroes":false}', encoding='utf-8')
+                self.assertEqual(main.load_settings().hero_count, 0)
                 main.save_settings(main.replace(main.load_settings(), upgrade_heroes=False))
                 self.assertFalse(main.load_settings().upgrade_heroes)
 

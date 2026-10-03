@@ -22,9 +22,10 @@ FIELDS = {
     "min_elixir": "min_elixir", "loot_margin": "loot_margin",
     "electrodragon_count": "electrodragon_count", "dragon_count": "dragon_count",
     "rage_count": "rage_count",
+    "hero_count": "hero_count",
     "delay_between_dragons": "delay_between_dragons",
     "and_rule": "and_rule", "dry_run": "dry_run",
-    "deploy_heroes": "deploy_heroes", "upgrade_wall": "upgrade_wall",
+    "upgrade_wall": "upgrade_wall",
     "upgrade_recommended": "upgrade_recommended", "upgrade_heroes": "upgrade_heroes",
     "chain_attacks": "chain_attacks",
 }

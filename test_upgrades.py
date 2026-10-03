@@ -691,6 +691,7 @@ class UpgradeTests(unittest.TestCase):
 
     def test_army_and_heroes_share_one_straight_attack_edge(self):
         app = app_without_gui()
+        app.settings = main.replace(app.settings, rage_count=0)
         app._wait = Mock()
         app._battle_capture = Mock(return_value=object())
         app._click = Mock(return_value=True)

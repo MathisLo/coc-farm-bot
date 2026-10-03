@@ -1,4 +1,8 @@
-# CoC Farm Bot v2.0.13
+# CoC Farm Bot v2.0.14
+
+## Composition d'attaque (v2.0.14)
+
+L'onglet **Armée** règle désormais le nombre de héros à déployer (0 à 4) en plus des troupes et des sorts Rage. Le bot attend les héros demandés avant de chercher une attaque. La pose de Rage reste tentée même si la disposition des héros est momentanément illisible ; si la carte Rage demandée ne peut pas être reconnue, le diagnostic signale une erreur explicite plutôt que de déclarer la pose réussie.
 
 ## Composition d’attaque configurable (v2.0.13)
 

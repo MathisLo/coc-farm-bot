@@ -153,7 +153,7 @@ class Roi:
 
 @dataclass
 class Settings:
-    version: int = 9
+    version: int = 10
     window_title: str = ""
     min_gold: int = 500000
     min_elixir: int = 500000
@@ -162,6 +162,7 @@ class Settings:
     electrodragon_count: int = 8
     dragon_count: int = 1
     rage_count: int = 5
+    hero_count: int = 4
     deploy_heroes: bool = True
     upgrade_wall_between_attacks: bool = True
     upgrade_recommended: bool = True
@@ -436,7 +437,8 @@ def load_settings() -> Settings:
         if data.get("version", 0) < 6:
             data["version"] = 6
         data.setdefault("rage_count", 5)
-        data["version"] = 9
+        data.setdefault("hero_count", 4 if data.get("deploy_heroes", True) else 0)
+        data["version"] = 10
         kept = {item.name for item in fields(Settings)}
         return Settings(**{key: value for key, value in data.items() if key in kept})
     except (OSError, TypeError, ValueError): return Settings()
@@ -746,7 +748,8 @@ def army_readiness(image: Image.Image, settings: Settings) -> tuple[bool, str, d
                 rage_count = army_card_count(image, Roi(left - .2, 51, left + 2.3, 55))
             break
     observed: dict[str, int | None] = {"electrodragon": troop_cards.get("electrodragon"),
-                "dragon": troop_cards.get("dragon"), "rage": rage_count}
+                "dragon": troop_cards.get("dragon"), "rage": rage_count,
+                "heroes": heroes[0] if heroes is not None else None}
     if troops is None or troops[0] > troops[1]:
         return False, f"places de troupe {troops or 'illisibles'}", observed
     if (observed["dragon"] is None and "dragon" in troop_cards and
@@ -774,9 +777,8 @@ def army_readiness(image: Image.Image, settings: Settings) -> tuple[bool, str, d
     if troops[0] < required_housing:
         return False, f"places de troupe {troops}, composition attendue {required_housing}", observed
     # One hero can be under upgrade while the other three are battle-ready.
-    if settings.deploy_heroes and (heroes is None or heroes[1] < 1 or
-                                   heroes[0] < min(3, heroes[1])):
-        return False, f"héros {heroes or 'illisibles'}", observed
+    if settings.hero_count and (heroes is None or heroes[0] < settings.hero_count):
+        return False, f"héros disponibles {heroes[0] if heroes else 'illisibles'} / {settings.hero_count}", observed
     if settings.rage_count and (spells is None or spells[0] < settings.rage_count * 2 or
                                 rage_count is None or rage_count < settings.rage_count):
         return False, (f"Rage {rage_count} / {settings.rage_count} demandé(s), "
@@ -2745,6 +2747,7 @@ class BotApp:
         self.electrodragon_count = StringVar(value=str(self.settings.electrodragon_count))
         self.dragon_count = StringVar(value=str(self.settings.dragon_count))
         self.rage_count = StringVar(value=str(self.settings.rage_count))
+        self.hero_count = StringVar(value=str(self.settings.hero_count))
         self.delay_between_dragons = StringVar(value=str(self.settings.delay_between_dragons_ms))
         self.and_rule = BooleanVar(value=self.settings.use_and_rule)
         self.dry_run = BooleanVar(value=self.settings.dry_run)
@@ -3019,7 +3022,7 @@ class BotApp:
             "settings": asdict(self.settings), "checks": checks,
             "launcher_values": {name: getattr(self, name).get() for name in (
                 "min_gold", "min_elixir", "loot_margin", "electrodragon_count",
-                "dragon_count", "rage_count", "delay_between_dragons", "and_rule", "dry_run",
+                "dragon_count", "rage_count", "hero_count", "delay_between_dragons", "and_rule", "dry_run",
                 "deploy_heroes", "upgrade_wall", "upgrade_recommended",
                 "upgrade_heroes", "chain_attacks")},
             "capture_source": capture_source, "capture_error": capture_error,
@@ -3150,11 +3153,12 @@ class BotApp:
                 loot_margin_percent=float(self.loot_margin.get().replace(",", ".")),
                 electrodragon_count=int(self.electrodragon_count.get()), dragon_count=int(self.dragon_count.get()),
                 rage_count=int(self.rage_count.get()),
+                hero_count=int(self.hero_count.get()),
                 delay_between_dragons_ms=int(self.delay_between_dragons.get()),
-                use_and_rule=self.and_rule.get(), dry_run=self.dry_run.get(), deploy_heroes=self.deploy_heroes.get(),
+                use_and_rule=self.and_rule.get(), dry_run=self.dry_run.get(), deploy_heroes=int(self.hero_count.get()) > 0,
                 upgrade_wall_between_attacks=self.upgrade_wall.get(), upgrade_recommended=self.upgrade_recommended.get(),
                 upgrade_heroes=self.upgrade_heroes.get(), chain_attacks=self.chain_attacks.get())
-            if not 0 <= candidate.min_gold <= 2_500_000 or not 0 <= candidate.min_elixir <= 2_500_000 or not 0 <= candidate.loot_margin_percent <= 25 or not 0 <= candidate.electrodragon_count <= 50 or not 0 <= candidate.dragon_count <= 50 or candidate.electrodragon_count + candidate.dragon_count < 1 or not 0 <= candidate.rage_count <= MAX_RAGE_COUNT or not 80 <= candidate.delay_between_dragons_ms <= 2000: raise ValueError
+            if not 0 <= candidate.min_gold <= 2_500_000 or not 0 <= candidate.min_elixir <= 2_500_000 or not 0 <= candidate.loot_margin_percent <= 25 or not 0 <= candidate.electrodragon_count <= 50 or not 0 <= candidate.dragon_count <= 50 or candidate.electrodragon_count + candidate.dragon_count < 1 or not 0 <= candidate.rage_count <= MAX_RAGE_COUNT or not 0 <= candidate.hero_count <= len(layout_points("HERO_SLOTS")) or not 80 <= candidate.delay_between_dragons_ms <= 2000: raise ValueError
             save_settings(candidate)
             self.settings = candidate
             self._trace("CONFIG", json.dumps(asdict(candidate), ensure_ascii=False))
@@ -3943,8 +3947,8 @@ class BotApp:
             if attempt < 3:
                 self._wait(.25)
         if slot_center is None:
-            if getattr(self, '_army_preview_counts', {}).get('rage', 0) > 0:
-                raise RuntimeError('Rage présent avant combat mais carte introuvable pendant le déploiement.')
+            if target_count > 0:
+                raise RuntimeError('Rage demandee mais carte introuvable pendant le deploiement.')
             self.events.put("Aucun sort Rage reconnu dans la barre ; aucun clic de sort envoyé.")
             return 0
         remaining = self.stable_rage_count(window, slot_center)
@@ -4185,14 +4189,21 @@ class BotApp:
             perimeter = [self._confirmed_drop_point] + [point for point in perimeter if point != self._confirmed_drop_point]
         dragons = self.deploy_unit(window, "Dragon", layout_values("DRAGON_SLOT"), perimeter, burst=True)
         heroes = 0
-        shift = hero_layout_shift(self._battle_capture(window)) if self.settings.deploy_heroes else None
+        shift = None
+        if self.settings.hero_count:
+            try:
+                shift = hero_layout_shift(self._battle_capture(window))
+            except RuntimeError as exc:
+                self.events.put(f"Hero layout not recognized before Rage: {exc}")
         rage = self.deploy_rage_spells(window, shift)
-        if self.settings.deploy_heroes:
+        if self.settings.hero_count:
             self._check_stopped()
-            shift = hero_layout_shift(self._battle_capture(window))
+            if shift is None:
+                shift = hero_layout_shift(self._battle_capture(window))
             hero_points = [(max(5.0, x - 5.0), y) for x, y in perimeter] + perimeter
             for index, slot in enumerate(layout_points("HERO_SLOTS")):
-                if heroes >= (getattr(self, "_army_preview_heroes", None) or len(layout_points("HERO_SLOTS"))):
+                if heroes >= min(self.settings.hero_count,
+                                 getattr(self, "_army_preview_heroes", None) or self.settings.hero_count):
                     break
                 self._check_stopped()
                 before = self._battle_capture(window)
@@ -4316,7 +4327,7 @@ class BotApp:
     def wait_for_army_ready(self, window):
         last_note = None
         last_report = 0.0
-        if not self.settings.deploy_heroes:
+        if not self.settings.hero_count:
             self.events.put("Héros désactivés dans les réglages : ils ne seront pas posés.")
         while not self.stop_event.is_set():
             if time.monotonic() >= getattr(self, "_soak_deadline", float("inf")):
@@ -4325,8 +4336,7 @@ class BotApp:
             ready, detail, counts = army_readiness(image, self.settings)
             if ready:
                 self._army_preview_counts = counts
-                hero_fraction = army_fraction(image, Roi(8, 23, 13, 28))
-                self._army_preview_heroes = hero_fraction[0] if hero_fraction else None
+                self._army_preview_heroes = counts.get("heroes")
                 self.events.put(f"Armée prête avant recherche : {detail}.")
                 return True
             now = time.monotonic()

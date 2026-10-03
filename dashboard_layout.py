@@ -99,7 +99,7 @@ def _settings(app, workspace):
     _paired_fields(army, ("Électrodragons prévus", app.electrodragon_count),
                    ("Dragons prévus", app.dragon_count))
     field(army, "Sorts Rage (0 à 5)", app.rage_count)
-    check(army, "Déployer les héros", app.deploy_heroes)
+    field(army, "Héros à déployer (0 à 4)", app.hero_count)
     label(army, "Le bot déploie les quantités configurées. Chaque Rage utilise 2 places de sort.",
           size=9, color=COLORS["muted"], wraplength=280,
           justify="left").pack(anchor="w", pady=(10, 0))
