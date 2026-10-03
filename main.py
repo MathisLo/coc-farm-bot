@@ -498,6 +498,16 @@ def read_safe_reserve(image: Image.Image, resource: str) -> int | None:
         readings = [parse_reserve_number(read_text(strip, scale=scale)) for scale in (3, 5)]
         if readings[0] is not None and readings[0] == readings[1] and 1_000_000 <= readings[0] <= 20_000_000:
             return readings[0]
+        strip = white_text_mask(crop_percent(image, Roi(87, 10.8, 95.5, 13.6)))
+        readings = [parse_reserve_number(read_text(strip, scale=scale)) for scale in (3, 4)]
+        if readings[0] is not None and readings[0] == readings[1] and 1_000_000 <= readings[0] <= 20_000_000:
+            return readings[0]
+        strip = ImageOps.grayscale(crop_percent(image, layout_roi("PROFILE_ROIS", "elixir")))
+        readings = [parse_reserve_number(read_text(strip, scale=scale)) for scale in (2, 4, 6)]
+        agreed = [value for value in set(readings) if value is not None and readings.count(value) >= 2
+                  and 1_000_000 <= value <= 20_000_000]
+        if len(agreed) == 1:
+            return agreed[0]
     if resource == "gold" and image.width < 1500 and not calibrated:
         strip = ImageOps.grayscale(crop_percent(image, Roi(87.1, 3.0, 95.1, 6.4)))
         threshold_readings = [parse_reserve_number(read_text(
@@ -548,9 +558,7 @@ def read_safe_reserve(image: Image.Image, resource: str) -> int | None:
                 else:
                     low_agreed = [value for value in set(low) if low.count(value) >= 2]
                     high_agreed = [value for value in set(high) if high.count(value) >= 2]
-                    if len(low_agreed) == 1 and not high_agreed:
-                        values = low
-                    elif len(high_agreed) == 1 and not low_agreed:
+                    if len(high_agreed) == 1 and not low_agreed:
                         values = high
                     else:
                         values = []
@@ -559,7 +567,7 @@ def read_safe_reserve(image: Image.Image, resource: str) -> int | None:
                 return agreed[0]
             # Prefer the full reserve strip. Narrower crops can duplicate the
             # leading digit (1 832 344 -> 11 832 344) beside the icon.
-            if max(values) - min(values) <= 20_000:
+            if values and max(values) - min(values) <= 20_000:
                 return min(values)
             # Conflicting wide-crop OCR must still try the tighter numeric
             # strip. Previously a partial reading prevented that fallback.
@@ -1905,7 +1913,7 @@ def wall_group_controls(image, single=False, expected_price=None, expected_resou
                 # constrained to the payment-card labels and the price/icon
                 # checks below remain authoritative.
                 target = upgrades
-            if target is not None and not any(abs(px-x)<.5 for px,py in target):
+            if target is not None and not any(abs(px-x)<1.2 for px,py in target):
                 target.append((x,y))
     payments = {}
     for x,y in upgrades:
@@ -2405,6 +2413,11 @@ def read_battle_earnings(image):
             if recovered_gold is not None and (amounts[0] is None or
                                                str(recovered_gold).endswith(str(amounts[0]))):
                 amounts[0] = recovered_gold
+        if amounts[1] is None or amounts[1] < 1_000:
+            recovered_elixir = paired_digits((Roi(42, 50, 52.5, 56), Roi(44.5, 50, 52, 56)), 3)
+            if recovered_elixir is not None and (amounts[1] is None or
+                                                 str(recovered_elixir).startswith(str(amounts[1]))):
+                amounts[1] = recovered_elixir
         if amounts[2] is None:
             amounts[2] = paired_digits((Roi(46, 57, 53, 63), Roi(47, 57, 53, 63)), 5)
     # A defeat with no dark-elixir reward omits the third row entirely on the
@@ -2447,6 +2460,14 @@ def read_battle_earnings(image):
                 inner_value = wide_value
             if inner_value is None:
                 inner_value = read_result_amount(wide, main_result=True)
+        if image.size == (1920, 1080) and index < 2:
+            bonus_row = ((49.5, 52.5), (54, 58))[index]
+            recovered = [read_bonus_amount(crop_percent(image, Roi(x, bonus_row[0], 79, bonus_row[1])))
+                         for x in (72.4, 72.5)]
+            if (recovered[0] is not None and recovered[0] == recovered[1]
+                    and (inner_value is None or
+                         (recovered[0] > inner_value and str(recovered[0]).endswith(str(inner_value))))):
+                inner_value = recovered[0]
         bonus.append(inner_value)
     if all(value is None for value in bonus) and not has_screen_text(crop_percent(image, Roi(67,42,83,64)), "bonus"):
         bonus = [0, 0, 0]

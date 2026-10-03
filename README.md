@@ -1,4 +1,10 @@
-# CoC Farm Bot v2.0.15
+# CoC Farm Bot v2.0.16
+
+## Corrections du 4 octobre 2026 (v2.0.16)
+
+Le bot ne plante plus si plusieurs lectures OCR des réserves se contredisent. Sur la fenêtre `Clash of Clans - TCDVeNom` en 1920 x 1080, il relit l'élixir sans perdre les premiers chiffres et reconnaît les cartes de paiement même si l'OCR dédouble un libellé. Un essai en jeu a confirmé deux remparts à 4 000 000 d'élixir chacun : 10 799 873 avant, 2 799 873 après. Le paiement reste interdit si les réserves ou le coût ne sont pas confirmés.
+
+La lecture du résultat a été ajustée pour les montants coupés et les bonus de victoire. La capture du combat signalé donne 630 243 or, 853 111 élixir et 10 207 élixir noir, bonus inclus. Une nouvelle attaque en jeu a confirmé la pose de 10 électro-dragons, 1 dragon, 4 héros et 5 Rage, puis la comptabilisation du butin et le retour au village.
 
 ## Validation de l'attaque (v2.0.15)
 

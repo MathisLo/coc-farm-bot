@@ -28,6 +28,12 @@ def app_without_gui():
 
 
 class CancellationRegressions(unittest.TestCase):
+    def test_conflicting_reserve_ocr_refuses_spending_without_crashing(self):
+        image = Image.new('RGB', (1600, 900))
+        readings = iter(('7 901 721', '901 721') * 20)
+        with patch.object(main, 'read_text', side_effect=lambda *args, **kwargs: next(readings)):
+            self.assertIsNone(main.read_safe_reserve(image, 'gold'))
+
     def test_builder_menu_must_not_supply_partial_gold_balance(self):
         app = app_without_gui()
         app._capture = Mock(return_value=Image.new('RGB', (1920, 1080)))
