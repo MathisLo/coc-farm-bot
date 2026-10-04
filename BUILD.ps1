@@ -17,13 +17,13 @@ if ($LASTEXITCODE -ne 0) { throw 'pywebview absent : installer les dépendances 
 
 Push-Location $PSScriptRoot
 try {
-    & $projectPython -B -m unittest -v test_main test_regressions test_storage test_windows_integration test_stats test_upgrades test_runtime
+    & $projectPython -B -m unittest -v test_main test_regressions test_storage test_windows_integration test_stats test_upgrades test_runtime test_auto_update
     if ($LASTEXITCODE -ne 0) { throw 'Tests échoués : aucun exécutable remplacé.' }
 
     $buildDirectory = Join-Path $PSScriptRoot 'build'
     $stagingDirectory = Join-Path $buildDirectory 'release'
     New-Item -ItemType Directory -Path $buildDirectory -Force | Out-Null
-    $sourceNames = @('main.py', 'app_meta.py', 'calibration.py', 'farm_stats.py', 'dashboard.py', 'dashboard_layout.py', 'ui_theme.py', 'ui_widgets.py', 'modern_dashboard.py', 'web_dashboard.html', 'upgrades.py', 'requirements.txt')
+    $sourceNames = @('main.py', 'app_meta.py', 'auto_update.py', 'calibration.py', 'farm_stats.py', 'dashboard.py', 'dashboard_layout.py', 'ui_theme.py', 'ui_widgets.py', 'modern_dashboard.py', 'web_dashboard.html', 'upgrades.py', 'requirements.txt')
     $sourceNames += Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'assets') -File -Recurse | ForEach-Object { $_.FullName.Substring($PSScriptRoot.Length + 1).Replace('\','/') }
     $sourceNames += Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'ui') -File -Recurse | ForEach-Object { $_.FullName.Substring($PSScriptRoot.Length + 1).Replace('\','/') }
     $sourceNames = @($sourceNames | Sort-Object -Unique)

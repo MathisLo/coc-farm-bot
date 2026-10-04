@@ -1,4 +1,15 @@
-# CoC Farm Bot v2.0.19
+# CoC Farm Bot v2.0.20
+
+## Mise à jour automatique au lancement (v2.0.20)
+
+Chaque lancement de l'EXE vérifie la dernière version stable publiée sur GitHub, sans compte ni connexion personnelle. Si une version plus récente existe, le bot la télécharge, vérifie sa taille et son empreinte SHA-256, puis exécute son autotest avant de remplacer le fichier et de relancer l'interface. La précédente version est conservée jusqu'à ce que la nouvelle interface ait affiché les réglages.
+
+Les réglages, profils, statistiques et diagnostics restent dans `%USERPROFILE%\CoCFarmBot`. Si la connexion est indisponible, le fichier invalide ou le dossier de l'EXE non modifiable, la version installée démarre normalement. Le bouton **Ouvrir sans attendre** permet également de passer cette vérification. Les incidents sont consignés dans `%USERPROFILE%\CoCFarmBot\update.log`.
+
+Il faut télécharger la v2.0.20 une première fois : les anciennes versions ne contiennent pas encore cette fonction. Les mises à jour suivantes seront récupérées automatiquement au lancement. Aucune VM ou installation supplémentaire n'est nécessaire pour les utilisateurs. Le lancement depuis Python et les commandes de diagnostic ne déclenchent pas de mise à jour.
+
+Validation : 331 tests automatisés et autotest du fichier final. Un essai avec le vrai EXE, dans un profil isolé et un chemin contenant espaces et apostrophe, confirme le téléchargement, le remplacement, la relance de l'interface et le lancement normal suivant. Les fichiers de réglages, statistiques et profil sont conservés à l'identique. La restauration après échec de démarrage est également testée avec de vrais processus Windows ; aucun clic n'est envoyé au jeu.
+
 
 ## Reprise après une amélioration refusée (v2.0.19)
 

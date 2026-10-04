@@ -221,7 +221,7 @@ class Bridge:
         return result
 
 
-def run():
+def run(update_ready_file=None):
     import webview
     import ctypes
     import time
@@ -283,10 +283,23 @@ def run():
     height = min(1000, max(710, work_height - 30), work_height)
     x = work.left + (work_width - width) // 2
     y = work.top + (work_height - height) // 2
-    webview.create_window(APP_NAME, page.as_uri(), js_api=bridge,
+    window = webview.create_window(APP_NAME, page.as_uri(), js_api=bridge,
                           width=width, height=height, x=x, y=y,
                           min_size=(min(1080, width), min(710, height)),
                           background_color="#0b1526")
+    if update_ready_file:
+        def confirm_startup():
+            # Acknowledge only after JS rendered a snapshot from the backend.
+            ready = Path(update_ready_file)
+            for _ in range(600):
+                try:
+                    if window.evaluate_js("window.cocReady === true"):
+                        ready.write_text(APP_VERSION, encoding="utf-8")
+                        return
+                except Exception:
+                    return
+                time.sleep(.1)
+        window.events.loaded += confirm_startup
     threading.Thread(target=apply_windows_icon, args=(icon,), daemon=True,
                      name="ApplyWindowIcon").start()
     try:

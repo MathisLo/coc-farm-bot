@@ -259,6 +259,7 @@
     $('calibration-count').textContent=format(snapshot.calibration_count);
     updateRunningUi(snapshot);
     finishPending(snapshot);
+    window.cocReady=true;
     state.connected=true;
   }
 

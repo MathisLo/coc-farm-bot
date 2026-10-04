@@ -4758,7 +4758,7 @@ def profile_test():
 
 def self_test_report(path):
     """Exercise packaged imports/OCR and identify the exact embedded sources."""
-    report = {"ok": False, "frozen": bool(getattr(sys, "frozen", False))}
+    report = {"ok": False, "version": APP_VERSION, "frozen": bool(getattr(sys, "frozen", False))}
     try:
         metadata_path = Path(__file__).with_name("build_info.json")
         if metadata_path.exists():
@@ -4842,6 +4842,7 @@ if __name__ == "__main__":
     parser.add_argument("--profile-test", action="store_true")
     parser.add_argument("--self-test-report", metavar="JSON")
     parser.add_argument("--live-attack-report", metavar="JSON")
+    parser.add_argument("--update-ready-file", metavar="PATH", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.self_test_report:
         sys.exit(self_test_report(args.self_test_report))
@@ -4853,8 +4854,12 @@ if __name__ == "__main__":
         self_test()
     else:
         try:
+            if not args.update_ready_file:
+                from auto_update import startup_update
+                if startup_update(APP_DIR):
+                    sys.exit(0)
             from modern_dashboard import run
-            run()
+            run(update_ready_file=args.update_ready_file)
         except Exception:
             show_startup_failure()
             sys.exit(1)
