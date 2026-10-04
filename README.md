@@ -1,4 +1,14 @@
-# CoC Farm Bot v2.0.18
+# CoC Farm Bot v2.0.19
+
+## Reprise après une amélioration refusée (v2.0.19)
+
+Avant de lancer une attaque, le bot ferme la liste des ouvriers si elle est encore ouverte et confirme le retour au village sur deux nouvelles captures. Une sélection de rempart refusée ne laisse ainsi plus le clic « Attaquer » bloqué derrière la liste.
+
+La lecture de l’or conserve les premiers chiffres lorsque l’OCR découpe un groupe, comme `2 719 974` lu `2 7,19 974`. La bande de lecture couvre tout le montant. La variante `hmbe géante` est reconnue comme « Bombe géante » pour vérifier le bâtiment sélectionné. Le titre, la ressource et le prix restent contrôlés avant toute dépense.
+
+Les bonus de victoire en 1920 × 1080 sont relus sur deux zones plus larges avec un masque du texte blanc. Cela évite de comptabiliser 35 000 ou 90 000 à la place d’un bonus affiché de 350 000.
+
+Validation du fichier final : 314 tests automatisés, autotest de l’EXE et attaque en jeu sur PC-FIXE en 1920 × 1080. La liste des ouvriers ouverte au départ est fermée avant la recherche. Les 10 électro-dragons, 1 dragon, 4 héros et 5 Rage sont confirmés, puis le bot revient au village. Les compteurs enregistrent les gains affichés, bonus inclus : 2 229 474 or, 2 988 573 élixir et 15 573 élixir noir. La Bombe géante est vérifiée sur sa capture ; aucun bâtiment n’a été acheté pendant cet essai.
 
 ## Clics, bâtiments facultatifs et vitesse (v2.0.18)
 

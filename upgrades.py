@@ -22,7 +22,7 @@ def normal(text):
 
 def canonical_title(text):
     canonical = ''.join(re.findall(r'[a-z0-9]+', normal(text)))
-    if canonical in ('30mbegeante', 'hrnbegeante', 'ombegeante', 'iombegeante', 'eombegeante'):
+    if canonical in ('30mbegeante', 'hrnbegeante', 'hmbegeante', 'ombegeante', 'iombegeante', 'eombegeante'):
         return 'bombegeante'
     return canonical
 

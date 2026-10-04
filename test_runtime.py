@@ -4,6 +4,7 @@ import ctypes
 from ctypes import wintypes
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from PIL import Image
@@ -12,6 +13,57 @@ from test_regressions import app_without_gui
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_diagnostic_gold_keeps_its_leading_millions(self):
+        with Image.open(Path(__file__).parent / 'testdata/builder_overlay_after_wall_refusal.png') as image:
+            self.assertEqual(main.read_safe_reserve(image, 'gold'), 2_719_974)
+
+    def test_diagnostic_giant_bomb_title_allows_only_the_matching_panel(self):
+        import upgrades
+        with Image.open(Path(__file__).parent / 'testdata/giant_bomb_panel_clipped_title.png') as image:
+            self.assertTrue(upgrades.selected_panel_title_matches(image, 'hmbe géante'))
+            self.assertFalse(upgrades.selected_panel_title_matches(image, 'Mine chercheuse'))
+
+    def test_search_closes_builder_overlay_before_attack_and_refreshes_state(self):
+        app = app_without_gui()
+        state = {'screen': 'builders'}
+        def click(window, x, y):
+            if state['screen'] == 'builders':
+                self.assertEqual((x, y), main.BUILDERS_BUTTON)
+                state['screen'] = 'village'
+            elif state['screen'] == 'village':
+                self.assertEqual((x, y), main.ATTACK_HOME_BUTTON)
+                state['screen'] = 'multiplayer'
+            elif state['screen'] == 'multiplayer':
+                state['screen'] = 'army'
+            else:
+                state['screen'] = 'enemy'
+            return True
+        app._capture = Mock(side_effect=lambda _: state['screen'])
+        app._click = Mock(side_effect=click)
+        app._wait = Mock()
+        app.wait_for_army_ready = Mock(return_value=True)
+        with patch.object(main, 'battle_hud_visible', return_value=False), \
+             patch.object(main, 'daily_reward_open', return_value=False), \
+             patch.object(main, 'builders_menu_open', side_effect=lambda im: im == 'builders'), \
+             patch.object(main, 'village_home_ready', side_effect=lambda im: im == 'village'), \
+             patch.object(main, 'army_selection_ready', side_effect=lambda im: im == 'army'), \
+             patch.object(main, 'multiplayer_menu_ready', side_effect=lambda im: im == 'multiplayer'), \
+             patch.object(main, 'enemy_loot_screen_ready', side_effect=lambda im: im == 'enemy'):
+            self.assertTrue(app.open_search('window'))
+        self.assertEqual(app._click.call_count, 4)
+
+    def test_search_never_attacks_through_a_builder_overlay_that_stays_open(self):
+        app = app_without_gui()
+        app._capture = Mock(return_value='builders')
+        app._click = Mock(return_value=True)
+        app._wait_for_screen = Mock(return_value=False)
+        with patch.object(main, 'battle_hud_visible', return_value=False), \
+             patch.object(main, 'daily_reward_open', return_value=False), \
+             patch.object(main, 'builders_menu_open', return_value=True):
+            with self.assertRaisesRegex(RuntimeError, 'ouvriers'):
+                app.open_search('window')
+        app._click.assert_called_once_with('window', *main.BUILDERS_BUTTON)
+
     def test_real_windows_input_is_seen_by_a_game_polling_at_30_fps(self):
         """Use an owned hidden Win32 target, never a game/account window."""
         user = ctypes.WinDLL('user32', use_last_error=True)
@@ -179,6 +231,7 @@ class RuntimeTests(unittest.TestCase):
         app.wait_for_army_ready = Mock(return_value=True)
         with patch.object(main, 'battle_hud_visible', return_value=False), \
              patch.object(main, 'daily_reward_open', return_value=False), \
+             patch.object(main, 'builders_menu_open', return_value=False), \
              patch.object(main, 'army_selection_ready', side_effect=lambda image: ready(image, 'army')), \
              patch.object(main, 'multiplayer_menu_ready', side_effect=lambda image: ready(image, 'multiplayer')), \
              patch.object(main, 'enemy_loot_screen_ready', side_effect=lambda image: image == 'enemy'):

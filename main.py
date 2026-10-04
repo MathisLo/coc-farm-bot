@@ -491,10 +491,11 @@ def read_safe_reserve(image: Image.Image, resource: str) -> int | None:
         # On PC-FIXE a selected wall can make the tight strip lose the
         # leading digit at some scales. A wider strip reads all groups at
         # scales 4 and 6; require both readings to agree.
-        wide = crop_percent(image, Roi(86, 2.5, 95, 6.5))
-        readings = [parse_reserve_number(read_text(wide, scale=scale)) for scale in (4, 6)]
-        if readings[0] is not None and readings[0] == readings[1] and 0 <= readings[0] <= 20_000_000:
-            return readings[0]
+        for roi in (Roi(86, 2.5, 95, 6.5), Roi(82, 2.5, 95.5, 6.5)):
+            wide = crop_percent(image, roi)
+            readings = [parse_reserve_number(read_text(wide, scale=scale)) for scale in (4, 6)]
+            if readings[0] is not None and readings[0] == readings[1] and 0 <= readings[0] <= 20_000_000:
+                return readings[0]
     if resource == 'elixir' and image.size == (1920, 1080) and not calibrated:
         # The purple bar obscures the first digit in the ordinary crop.
         # Grayscale with a shorter vertical strip yields two full readings.
@@ -592,6 +593,10 @@ def read_safe_reserve(image: Image.Image, resource: str) -> int | None:
 
 
 def parse_reserve_number(text: str) -> int | None:
+    # A spurious comma can split one three-digit group (719 -> 7,19).
+    # Join that group only; oversized or incomplete groups stay invalid.
+    text = re.sub(r"(?<!\d)(\d{1,2}),(\d{1,2})(?!\d)",
+                  lambda match: ''.join(match.groups()) if len(''.join(match.groups())) == 3 else match.group(0), text)
     corrected = text.translate(str.maketrans({"O": "0", "o": "0", "I": "1", "l": "1", "i": "1", "S": "5", "s": "5", "B": "8", "g": "9", "G": "9", "-": " ", "*": " ", ",": " ", ".": " ", "x": " ", "L": " "}))
     match = re.search(r"(?<!\d)(\d{1,2})\s+(\d{3})\s+(\d{3})(?!\d)", corrected)
     if match: return int("".join(match.groups()))
@@ -2501,6 +2506,14 @@ def read_battle_earnings(image):
                 inner_value = read_result_amount(wide, main_result=True)
         if image.size == (1920, 1080) and index < 2:
             bonus_row = ((49.5, 52.5), (54, 58))[index]
+            # The inner crop can clip the first bonus digit, and outlined
+            # zeroes can disappear on the dark card. Two wider, masked crops
+            # must agree before replacing a smaller reading.
+            full_readings = [read_bonus_amount(white_text_mask(crop_percent(
+                image, Roi(x, bonus_row[0], 79, bonus_row[1])))) for x in (71, 72)]
+            if (full_readings[0] is not None and full_readings[0] == full_readings[1]
+                    and (inner_value is None or full_readings[0] > inner_value)):
+                inner_value = full_readings[0]
             recovered = [read_bonus_amount(crop_percent(image, Roi(x, bonus_row[0], 79, bonus_row[1])))
                          for x in (72.4, 72.5)]
             if (recovered[0] is not None and recovered[0] == recovered[1]
@@ -4472,6 +4485,15 @@ class BotApp:
                 self.events.put("Fenêtre de récompense quotidienne fermée.")
 
         dismiss_daily_reward()
+        initial = self._capture(window)
+        if builders_menu_open(initial):
+            if not self._click(window, *layout_values("BUILDERS_BUTTON")):
+                raise RuntimeError("Fermeture de la liste des ouvriers refusée.")
+            if not self._wait_for_screen(
+                    window, lambda image: not builders_menu_open(image) and village_home_ready(image)):
+                raise RuntimeError("Liste des ouvriers encore ouverte avant la recherche : aucun clic Attaquer envoyé.")
+            self.events.put("Liste des ouvriers fermée et village confirmé avant l’attaque.")
+            initial = self._capture(window)
         stages = (
             (layout_values("ATTACK_HOME_BUTTON"), "Ouverture du menu Attaquer", "multijoueur"),
             (layout_values("FIND_MATCH_BUTTON"), "Ouverture de la sélection d’armée", "mon armée"),

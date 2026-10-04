@@ -32,6 +32,10 @@ class StatisticsTests(unittest.TestCase):
         with Image.open(Path(__file__).parent / 'testdata' / 'result_bonus_stylized_1765.png') as image:
             self.assertEqual(main.read_battle_earnings(image), (461_924, 657_042, 5_256))
 
+    def test_pc_fixe_full_bonus_survives_a_clipped_leading_digit(self):
+        with Image.open(Path(__file__).parent / 'testdata/result_pc_fixe_bonus_350000.png') as image:
+            self.assertEqual(main.read_battle_earnings(image), (1_502_785, 1_431_261, 14_038))
+
     def test_mini_venom_small_result_with_outlined_digits_is_counted(self):
         with Image.open(Path(__file__).parent / 'testdata' / 'mini_venom_result_1920.png') as image:
             self.assertEqual(main.read_battle_earnings(image), (36_482, 34_902, 512))
