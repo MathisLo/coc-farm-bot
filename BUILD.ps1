@@ -17,7 +17,7 @@ if ($LASTEXITCODE -ne 0) { throw 'pywebview absent : installer les dépendances 
 
 Push-Location $PSScriptRoot
 try {
-    & $projectPython -B -m unittest -v test_main test_regressions test_storage test_windows_integration test_stats test_upgrades
+    & $projectPython -B -m unittest -v test_main test_regressions test_storage test_windows_integration test_stats test_upgrades test_runtime
     if ($LASTEXITCODE -ne 0) { throw 'Tests échoués : aucun exécutable remplacé.' }
 
     $buildDirectory = Join-Path $PSScriptRoot 'build'

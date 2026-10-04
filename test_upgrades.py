@@ -8,6 +8,39 @@ import upgrades
 
 
 class UpgradeTests(unittest.TestCase):
+    def test_each_special_building_can_be_ignored_without_excluding_other_buildings(self):
+        app = app_without_gui()
+        for field, title, _token in upgrades.OPTIONAL_BUILDINGS:
+            with self.subTest(building=title):
+                app.settings = main.replace(main.Settings(), **{field: False})
+                self.assertFalse(upgrades.building_upgrade_enabled(app, title))
+                self.assertFalse(upgrades.building_upgrade_enabled(app, title[1:]))
+                self.assertTrue(upgrades.building_upgrade_enabled(app, 'Tesla camouflée'))
+                self.assertTrue(upgrades.building_upgrade_enabled(app, 'Grand gardien'))
+                for other_field, other_title, _ in upgrades.OPTIONAL_BUILDINGS:
+                    if other_field != field:
+                        self.assertTrue(upgrades.building_upgrade_enabled(app, other_title))
+
+    def test_disabled_special_buildings_are_skipped_in_search_and_direct_payment(self):
+        app = app_without_gui()
+        app.settings = main.replace(app.settings, **{field: False for field, _, _ in upgrades.OPTIONAL_BUILDINGS})
+        app._capture = Mock(return_value=Image.new('RGB', (1920, 1080)))
+        app._wait = Mock()
+        app._wall_click = Mock()
+        rows = [(title, 30 + i * 5, 9_000_000, 'élixir')
+                for i, (_, title, _) in enumerate(upgrades.OPTIONAL_BUILDINGS)]
+        rows.append(('Tesla camouflée', 50, 6_500_000, 'or'))
+        with patch.object(upgrades, 'scroll_builders_to_top'), \
+             patch.object(upgrades, 'suggested_items', return_value=rows), \
+             patch.object(upgrades, 'menu_anchor_rows', return_value=[]), \
+             patch.object(main, 'builders_menu_open', return_value=True), \
+             patch.object(main, 'read_text', return_value='same'), \
+             patch.object(main.WindowDriver, 'scroll_menu', return_value=True):
+            self.assertEqual(upgrades.find_payable_upgrade(app, 'window', 3, (10_000_000, 19_000_000)), rows[-1])
+        for _, title, _ in upgrades.OPTIONAL_BUILDINGS:
+            self.assertIsNone(upgrades.perform_direct_upgrade(app, 'window', title, 9_000_000, 'élixir'))
+        app._wall_click.assert_not_called()
+
     def test_hero_upgrade_labels_exclude_hero_hall_and_hero_eradicator(self):
         for title in ('Roi des barbares', 'oi des barbare', 'Reine des archères',
                       ';rand gardien', 'Championne royale', 'Prince gargouille'):

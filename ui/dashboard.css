@@ -148,6 +148,7 @@ h1,h2,h3,p {margin-top:0}
 .input-resource {width:33px;height:33px;margin-left:5px}
 .input-prefix {display:grid;place-items:center;flex:none;width:34px;height:100%;background:#1d344a;color:#c8d8ec;font-size:18px}
 .check-row {display:flex;align-items:center;gap:13px;min-height:43px;margin:9px 0;color:#f2f6fb;cursor:pointer}
+.check-row.optional-building {min-height:30px;margin:3px 0;font-size:13px}
 .check-row>input {position:absolute;opacity:0;width:1px;height:1px}
 .check-box {display:grid;place-items:center;flex:none;width:28px;height:28px;border:1px solid #5d7890;border-radius:var(--radius-sm);background:#132639;transition:background var(--transition-fast),border-color var(--transition-fast),transform var(--transition-fast)}
 .check-box :is(svg,.icon) {width:19px;height:19px;opacity:0;transform:scale(.65);transition:opacity var(--transition-fast),transform var(--transition-fast);color:#2e291b;stroke-width:2.5}

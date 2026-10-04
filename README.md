@@ -1,4 +1,16 @@
-# CoC Farm Bot v2.0.17
+# CoC Farm Bot v2.0.18
+
+## Clics, bâtiments facultatifs et vitesse (v2.0.18)
+
+Dans **Cycle**, décochez **Éradicateur de héros**, **Catapulte explosive** ou **Bougie incandescente** pour exclure individuellement leur amélioration. Les choix sont sauvegardés, relus au lancement et appliqués pendant le cycle comme dans l’action ponctuelle **Améliorer les bâtiments**. Ils restent activés par défaut pour les configurations existantes.
+
+Un clic maintient désormais l’appui pendant 80 ms : l’ancienne paire appui/relâchement instantanée pouvait être manquée par un jeu lisant les entrées entre deux images. Les menus de recherche et le retour au village sont confirmés sur deux captures successives. Le retour continue dès que le village est prêt, avec une limite d’attente, plutôt qu’après quatre secondes fixes.
+
+Les lectures OCR identiques d’une même capture sont réutilisées. Chaque nouvelle capture efface ces résultats, afin que les contrôles des ressources et des paiements restent indépendants. La première page des ouvriers est lue deux fois avant le parcours complet, puis le bâtiment et son prix sont revérifiés avant tout paiement.
+
+Comparaison du 4 octobre sur une capture réelle des ouvriers de PC-FIXE : trois mesures par version, ordre alterné, OCR Windows réel et aucun clic. La médiane de recherche dans la liste passe de **47,2 s à 22,4 s** avec le même bâtiment retenu ; les contrôles d’écran passent de **0,60 s à 0,56 s**. Ces mesures portent sur ces opérations, sans promettre le même gain sur la durée totale d’un combat. Reproduire avec `python tools/benchmark_runtime.py` ; le rapport est enregistré dans `build/runtime-benchmark.json`.
+
+La vérification WebView utilise un dossier temporaire et confirme la désactivation, la sauvegarde, le rechargement et la réactivation des trois choix. Six transitions du menu des ouvriers ont également été confirmées dans la fenêtre `Clash of Clans - TCDVeNom` en 1920 × 1080 sur PC-FIXE, avec retour au village. Aucune amélioration n’a été achetée pendant cet essai des clics.
 
 ## Améliorations de bâtiments du 4 octobre 2026 (v2.0.17)
 

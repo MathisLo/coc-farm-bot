@@ -107,10 +107,13 @@ def _settings(app, workspace):
     cycle = _page(tabs, "Cycle")
     check(cycle, "Enchaîner les attaques", app.chain_attacks)
     check(cycle, "Améliorer les bâtiments", app.upgrade_recommended)
+    check(cycle, "Éradicateur de héros", app.upgrade_hero_eradicator)
+    check(cycle, "Catapulte explosive", app.upgrade_explosive_catapult)
+    check(cycle, "Bougie incandescente", app.upgrade_firespitter)
     check(cycle, "Améliorer les héros", app.upgrade_heroes)
     check(cycle, "Améliorer les remparts", app.upgrade_wall)
     check(cycle, "Simulation sans déploiement", app.dry_run)
-    label(cycle, "Bâtiments : garder 1 ouvrier libre. Remparts : garder 1 M de chaque ressource.",
+    label(cycle, "Décochez un bâtiment pour l’ignorer. Bâtiments : garder 1 ouvrier libre. Remparts : garder 1 M de chaque ressource.",
           size=9, color=COLORS["muted"], wraplength=280,
           justify="left").pack(anchor="w", pady=(10, 0))
 

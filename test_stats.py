@@ -52,8 +52,9 @@ class StatisticsTests(unittest.TestCase):
                     drawing.rectangle((0, top, choice.width, top + 6), fill=(25, 25, 25))
                 self.assertTrue(main.battle_reward_open(choice))
                 self.assertEqual(main.battle_reward_choice(choice)[0], (30., 60.))
-                app._capture = Mock(side_effect=[choice, result, result, result, Image.new('RGB', (1920, 1080))])
-                with patch.object(main, 'village_home_ready', side_effect=[False, True]):
+                home = Image.new('RGB', (1920, 1080))
+                app._capture = Mock(side_effect=[choice, result, result, result, home, home])
+                with patch.object(main, 'village_home_ready', side_effect=[False, True, True]):
                     self.assertTrue(app.wait_for_battle_return('window'))
             self.assertEqual([call.args[1:] for call in app._click.call_args_list],
                              [(30., 60.), main.layout_values('RETURN_HOME_BUTTON')])
@@ -103,7 +104,7 @@ class StatisticsTests(unittest.TestCase):
             app._battle_capture=Mock(return_value=frame)
             app._wait=Mock()
             app._click=Mock(return_value=True)
-            with patch.object(main,'read_battle_earnings',return_value=None),patch.object(main,'village_home_ready',side_effect=[False,True]),patch.object(main,'has_screen_text',return_value=True):
+            with patch.object(main,'read_battle_earnings',return_value=None),patch.object(main,'village_home_ready',side_effect=[False,True,True]),patch.object(main,'has_screen_text',return_value=True):
                 self.assertTrue(app.wait_for_battle_return(object()))
             app._click.assert_called_once()
             self.assertIsNone(app.farm_stats.data['pending'])

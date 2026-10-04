@@ -74,6 +74,7 @@ def operation_context(stop_event, settings, journal=None):
     _operation.stop_event = stop_event
     _operation.settings = settings
     _operation.journal = journal
+    _operation.ocr_cache = {}
     try:
         check_cancelled()
         yield
@@ -167,6 +168,9 @@ class Settings:
     upgrade_wall_between_attacks: bool = True
     upgrade_recommended: bool = True
     upgrade_heroes: bool = True
+    upgrade_hero_eradicator: bool = True
+    upgrade_explosive_catapult: bool = True
+    upgrade_firespitter: bool = True
     chain_attacks: bool = True
     delay_between_dragons_ms: int = 180
     dry_run: bool = False
@@ -1460,6 +1464,7 @@ class WindowDriver:
     @staticmethod
     def capture(window: GameWindow) -> Image.Image:
         check_cancelled()
+        _operation.ocr_cache = {}
         hwnd = wintypes.HWND(window.hwnd)
         geometry = WindowDriver.client_geometry(window)
         width, height = geometry.outer_width, geometry.outer_height
@@ -1522,8 +1527,18 @@ class WindowDriver:
         lp = (py << 16) | (px & 0xFFFF)
         check_cancelled()
         pressed = USER32.PostMessageW(window.hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lp)
-        # Always release a pressed button, including a stop requested mid-click.
-        released = USER32.PostMessageW(window.hwnd, WM_LBUTTONUP, 0, lp)
+        # A down/up pair in one game frame can disappear before input is polled.
+        # Hold for several frames, but release even if Stop interrupts the hold.
+        try:
+            if pressed:
+                event = getattr(_operation, "stop_event", None)
+                if event is None:
+                    time.sleep(.08)
+                else:
+                    event.wait(.08)
+        finally:
+            released = USER32.PostMessageW(window.hwnd, WM_LBUTTONUP, 0, lp)
+        check_cancelled()
         return bool(pressed and released)
 
 
@@ -1578,6 +1593,9 @@ async def _ocr_words_file(path: str) -> list[tuple[str, float, float]]:
 
 def read_word_centers(image: Image.Image) -> list[tuple[str, float, float]]:
     check_cancelled()
+    cache, key = ocr_cache_entry(image, "words", 1)
+    if cache is not None and key in cache:
+        return list(cache[key])
     trace_ocr("mots demandés", image, 1)
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as file: path = Path(file.name)
     try:
@@ -1585,6 +1603,8 @@ def read_word_centers(image: Image.Image) -> list[tuple[str, float, float]]:
         words = [(word, x * 100 / image.width, y * 100 / image.height)
                  for word, x, y in asyncio.run(bounded_ocr(_ocr_words_file(str(path))))]
         trace_ocr("mots lus", image, 1, words)
+        if cache is not None:
+            cache[key] = tuple(words)
         return words
     finally: path.unlink(missing_ok=True)
 
@@ -2128,15 +2148,34 @@ def read_number(image: Image.Image) -> int | None:
     finally: path.unlink(missing_ok=True)
 
 
+def ocr_cache_entry(image, kind, scale):
+    """Reuse identical crops only within the current captured frame."""
+    cache = getattr(_operation, "ocr_cache", None)
+    if cache is None:
+        return None, None
+    if time.monotonic() >= (getattr(_operation, "deadline", None) or float("inf")):
+        raise TimeoutError("Délai de lecture OCR dépassé.")
+    if len(cache) >= 128:
+        cache.clear()
+    return cache, (kind, image.mode, image.size, scale,
+                   hashlib.sha256(image.tobytes()).digest())
+
+
 def read_text(image: Image.Image, scale: int = 5) -> str:
     """OCR a local UI crop while keeping the raw reading for diagnostics."""
     check_cancelled()
+    cache, key = ocr_cache_entry(image, "text", scale)
+    if cache is not None and key in cache:
+        trace_ocr("texte réutilisé", image, scale, cache[key])
+        return cache[key]
     trace_ocr("texte demandé", image, scale)
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as file: path = Path(file.name)
     try:
         image.resize((image.width * scale, image.height * scale)).save(path)
         result = asyncio.run(bounded_ocr(_ocr_file(str(path)))).strip()
         trace_ocr("texte lu", image, scale, result)
+        if cache is not None:
+            cache[key] = result
         return result
     finally: path.unlink(missing_ok=True)
 
@@ -2797,6 +2836,9 @@ class BotApp:
         self.upgrade_wall = BooleanVar(value=self.settings.upgrade_wall_between_attacks)
         self.upgrade_recommended = BooleanVar(value=self.settings.upgrade_recommended)
         self.upgrade_heroes = BooleanVar(value=self.settings.upgrade_heroes)
+        self.upgrade_hero_eradicator = BooleanVar(value=self.settings.upgrade_hero_eradicator)
+        self.upgrade_explosive_catapult = BooleanVar(value=self.settings.upgrade_explosive_catapult)
+        self.upgrade_firespitter = BooleanVar(value=self.settings.upgrade_firespitter)
         self.chain_attacks = BooleanVar(value=self.settings.chain_attacks)
         self.status = StringVar(value="Prêt à lire la fenêtre du jeu.")
         self.run_state = StringVar(value="PRÊT")
@@ -2819,6 +2861,8 @@ class BotApp:
 
     def _capture(self, window):
         self._check_stopped()
+        # Fresh frames must perform fresh OCR, including repeated reserve checks.
+        _operation.ocr_cache = {}
         self._trace("CAPTURE", f"Lecture demandée : {getattr(window, 'title', '?')}")
         try:
             image = WindowDriver.capture(window)
@@ -2868,6 +2912,18 @@ class BotApp:
         self._trace("ATTENTE", f"{seconds:.2f} s")
         if self.stop_event.wait(seconds):
             raise OperationCancelled("Arrêt demandé.")
+        return False
+
+    def _wait_for_screen(self, window, predicate, timeout=8, interval=.2, capture=None):
+        """Advance as soon as the destination is confirmed on two fresh frames."""
+        deadline = time.monotonic() + timeout
+        consecutive = 0
+        while time.monotonic() < deadline:
+            self._wait(interval)
+            image = (capture or self._capture)(window)
+            consecutive = consecutive + 1 if predicate(image) else 0
+            if consecutive >= 2:
+                return True
         return False
 
     def _run_operation(self, target):
@@ -3066,7 +3122,8 @@ class BotApp:
                 "min_gold", "min_elixir", "loot_margin", "electrodragon_count",
                 "dragon_count", "rage_count", "hero_count", "delay_between_dragons", "and_rule", "dry_run",
                 "deploy_heroes", "upgrade_wall", "upgrade_recommended",
-                "upgrade_heroes", "chain_attacks")},
+                "upgrade_heroes", "upgrade_hero_eradicator", "upgrade_explosive_catapult",
+                "upgrade_firespitter", "chain_attacks")},
             "capture_source": capture_source, "capture_error": capture_error,
             "capture_at": capture_at,
             "last_capture_size": list(image.size) if image is not None else None,
@@ -3199,7 +3256,10 @@ class BotApp:
                 delay_between_dragons_ms=int(self.delay_between_dragons.get()),
                 use_and_rule=self.and_rule.get(), dry_run=self.dry_run.get(), deploy_heroes=int(self.hero_count.get()) > 0,
                 upgrade_wall_between_attacks=self.upgrade_wall.get(), upgrade_recommended=self.upgrade_recommended.get(),
-                upgrade_heroes=self.upgrade_heroes.get(), chain_attacks=self.chain_attacks.get())
+                upgrade_heroes=self.upgrade_heroes.get(),
+                upgrade_hero_eradicator=self.upgrade_hero_eradicator.get(),
+                upgrade_explosive_catapult=self.upgrade_explosive_catapult.get(),
+                upgrade_firespitter=self.upgrade_firespitter.get(), chain_attacks=self.chain_attacks.get())
             if not 0 <= candidate.min_gold <= 2_500_000 or not 0 <= candidate.min_elixir <= 2_500_000 or not 0 <= candidate.loot_margin_percent <= 25 or not 0 <= candidate.electrodragon_count <= 50 or not 0 <= candidate.dragon_count <= 50 or candidate.electrodragon_count + candidate.dragon_count < 1 or not 0 <= candidate.rage_count <= MAX_RAGE_COUNT or not 0 <= candidate.hero_count <= len(layout_points("HERO_SLOTS")) or not 80 <= candidate.delay_between_dragons_ms <= 2000: raise ValueError
             save_settings(candidate)
             self.settings = candidate
@@ -4338,7 +4398,11 @@ class BotApp:
             if battle_result_return_ready(image) or has_screen_text(image,"retour au village","victoire","défaite"):
                 self._trace("COMBAT", "Résultat reconnu ; lecture des gains puis retour au village")
                 self.record_battle_earnings(window)
-                self._click(window, *layout_values("RETURN_HOME_BUTTON")); self._wait(4)
+                self._click(window, *layout_values("RETURN_HOME_BUTTON"))
+                if self._wait_for_screen(window,
+                        lambda image: not battle_reward_open(image) and village_home_ready(image),
+                        capture=lambda target: self._battle_capture(target, allow_unselected_reward=True)):
+                    return True
             else:
                 if time.monotonic() >= next_progress:
                     self._trace("COMBAT", f"Toujours en cours ; reste au plus {deadline-time.monotonic():.0f} s")
@@ -4410,36 +4474,40 @@ class BotApp:
         dismiss_daily_reward()
         stages = (
             (layout_values("ATTACK_HOME_BUTTON"), "Ouverture du menu Attaquer", "multijoueur"),
-            (layout_values("FIND_MATCH_BUTTON"), "Ouverture de la s?lection d'arm?e", "mon arm?e"),
+            (layout_values("FIND_MATCH_BUTTON"), "Ouverture de la sélection d’armée", "mon armée"),
         )
         first_stage = 2 if army_selection_ready(initial) else 1 if multiplayer_menu_ready(initial) else 0
         for point, label, expected in stages[first_stage:]:
             header = Roi(2,2,50,12) if expected == "multijoueur" else Roi(20,0,80,20)
             confirmed = False
             for click_attempt in range(2):
-                if not self._click(window, *point): raise RuntimeError(f"Clic refus? : {label}.")
+                if not self._click(window, *point): raise RuntimeError(f"Clic refusé : {label}.")
                 if click_attempt == 0:
                     self.events.put(label)
-                for attempt in range(5):
-                    self._wait(1 if attempt == 0 else .6)
+                ready_frames = 0
+                for attempt in range(14):
+                    self._wait(.25)
                     if self.stop_event.is_set(): return False
                     dismiss_daily_reward()
                     screen = self._capture(window)
                     if battle_hud_visible(screen):
                         self.events.put("Combat déjà lancé : reprise du déploiement.")
                         return True
-                    screen_ready = has_screen_text(screen, expected) or has_screen_text(crop_percent(screen, header), expected)
+                    screen_ready = False
                     if expected == "multijoueur":
                         screen_ready = screen_ready or multiplayer_menu_ready(screen)
-                    elif expected == "mon arm?e":
+                    elif expected == "mon armée":
                         screen_ready = screen_ready or army_selection_ready(screen)
-                    if screen_ready:
+                    if not screen_ready:
+                        screen_ready = has_screen_text(crop_percent(screen, header), expected)
+                    ready_frames = ready_frames + 1 if screen_ready else 0
+                    if ready_frames >= 2:
                         confirmed = True
                         break
                 if confirmed:
                     break
             if not confirmed:
-                raise RuntimeError(f"?cran attendu absent apr?s : {label}.")
+                raise RuntimeError(f"Écran attendu absent après : {label}.")
         if not self.wait_for_army_ready(window):
             return False
         if not self._click(window, *layout_values("START_SEARCH_BUTTON")): raise RuntimeError("Clic de recherche refusé.")
@@ -4503,7 +4571,7 @@ class BotApp:
                     if battle_result_return_ready(current) or has_screen_text(current, "butin disponible", "fin de la bataille", "retour au village"):
                         self._trace("COMBAT", "Résultat encore affiché avant le cycle suivant ; retour au village demandé")
                         self._click(window, *layout_values("RETURN_HOME_BUTTON"))
-                        self._wait(4)
+                        self._wait_for_screen(window, village_home_ready)
                     current = capture(window)
                     if not village_home_ready(current):
                         self.events.put("Cycle reporté : le village n'est pas encore revenu après la bataille.")

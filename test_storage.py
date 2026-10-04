@@ -9,6 +9,21 @@ from modern_dashboard import FIELDS
 
 
 class StorageTests(unittest.TestCase):
+    def test_special_building_choices_round_trip_and_old_configs_keep_them_enabled(self):
+        choices = ('upgrade_hero_eradicator', 'upgrade_explosive_catapult', 'upgrade_firespitter')
+        with tempfile.TemporaryDirectory() as parent:
+            directory = Path(parent)
+            config = directory / 'config-v2.json'
+            with patch.object(main, 'APP_DIR', directory), patch.object(main, 'CONFIG_PATH', config):
+                config.write_text('{"version":10,"min_gold":750000}', encoding='utf-8')
+                for name in choices:
+                    self.assertEqual(FIELDS[name], name)
+                    self.assertTrue(getattr(main.load_settings(), name))
+                main.save_settings(main.replace(main.load_settings(), **{name: False for name in choices}))
+                settings = main.load_settings()
+                self.assertEqual(settings.min_gold, 750000)
+                self.assertTrue(all(getattr(settings, name) is False for name in choices))
+
     def test_hero_upgrade_choice_is_saved_and_old_configs_keep_previous_behavior(self):
         self.assertEqual(FIELDS['upgrade_heroes'], 'upgrade_heroes')
         with tempfile.TemporaryDirectory() as parent:

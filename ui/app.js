@@ -4,7 +4,7 @@
   const all = (selector, root=document) => [...root.querySelectorAll(selector)];
   const format = value => Number.isFinite(Number(value)) ? new Intl.NumberFormat('fr-FR').format(Number(value)) : '—';
   const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
-  const fields = ['window_title','min_gold','min_elixir','loot_margin','electrodragon_count','dragon_count','rage_count','hero_count','delay_between_dragons','and_rule','dry_run','upgrade_wall','upgrade_recommended','upgrade_heroes','chain_attacks'];
+  const fields = ['window_title','min_gold','min_elixir','loot_margin','electrodragon_count','dragon_count','rage_count','hero_count','delay_between_dragons','and_rule','dry_run','upgrade_wall','upgrade_recommended','upgrade_heroes','upgrade_hero_eradicator','upgrade_explosive_catapult','upgrade_firespitter','chain_attacks'];
   const pageTitles = {
     console:['CONSOLE','Pilote de raid','Automatisez vos raids, maximisez vos ressources'],
     statistics:['STATISTIQUES','Statistiques','Suivez les résultats de vos raids'],

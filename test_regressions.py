@@ -1140,16 +1140,16 @@ class DeploymentRegressions(unittest.TestCase):
 
     def test_result_wait_survives_unselectable_reward(self):
         app = app_without_gui()
-        app._battle_capture = Mock(side_effect=[object(), object(), object()])
+        app._battle_capture = Mock(side_effect=[object(), object(), object(), object()])
         app._click = Mock(return_value=True)
         app._wait = Mock()
         app.record_battle_earnings = Mock()
         with patch.object(main, "battle_reward_open", return_value=False), \
-             patch.object(main, "village_home_ready", side_effect=[False, False, True]), \
+             patch.object(main, "village_home_ready", side_effect=[False, False, True, True]), \
              patch.object(main, "battle_result_return_ready", side_effect=[False, True]), \
              patch.object(main, "has_screen_text", return_value=False):
             self.assertTrue(app.wait_for_battle_return(object()))
-        self.assertEqual(app._battle_capture.call_count, 3)
+        self.assertEqual(app._battle_capture.call_count, 4)
         self.assertTrue(all(call.kwargs == {"allow_unselected_reward": True}
                             for call in app._battle_capture.call_args_list))
         app.record_battle_earnings.assert_called_once()
@@ -1158,17 +1158,17 @@ class DeploymentRegressions(unittest.TestCase):
     def test_victory_behind_reward_does_not_trigger_result_or_return_click(self):
         app = app_without_gui()
         frame = Image.new('RGB', (1920, 1080))
-        app._battle_capture = Mock(side_effect=[frame, frame, frame])
+        app._battle_capture = Mock(side_effect=[frame, frame, frame, frame])
         app._click = Mock(return_value=True)
         app._wait = Mock()
         app.record_battle_earnings = Mock()
-        with patch.object(main, 'battle_reward_open', side_effect=[True, False, False]), \
-                patch.object(main, 'village_home_ready', side_effect=[False, True]), \
+        with patch.object(main, 'battle_reward_open', side_effect=[True, False, False, False]), \
+                patch.object(main, 'village_home_ready', side_effect=[False, True, True]), \
                 patch.object(main, 'battle_result_return_ready', return_value=True):
             self.assertTrue(app.wait_for_battle_return(object()))
         app.record_battle_earnings.assert_called_once()
         app._click.assert_called_once()
-        self.assertEqual(app._battle_capture.call_count, 3)
+        self.assertEqual(app._battle_capture.call_count, 4)
 
     def test_reward_checked_while_waiting_after_deployment(self):
         app = app_without_gui()
@@ -1433,7 +1433,8 @@ class DiagnosticLogRegressions(unittest.TestCase):
             for name in ('status', 'run_state', 'window_title', 'min_gold', 'min_elixir',
                          'loot_margin', 'electrodragon_count', 'dragon_count',
                          'rage_count', 'hero_count', 'delay_between_dragons', 'and_rule', 'dry_run', 'deploy_heroes',
-                         'upgrade_wall', 'upgrade_recommended', 'upgrade_heroes', 'chain_attacks'):
+                         'upgrade_wall', 'upgrade_recommended', 'upgrade_heroes', 'upgrade_hero_eradicator',
+                         'upgrade_explosive_catapult', 'upgrade_firespitter', 'chain_attacks'):
                 setattr(app, name, Mock())
                 getattr(app, name).get.return_value = False if name == 'upgrade_heroes' else 'ready'
             app.window_title.get.return_value = 'Clash of Clans'

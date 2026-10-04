@@ -71,6 +71,23 @@ def hero_upgrades_enabled(app):
     return getattr(app.settings, 'upgrade_heroes', True)
 
 
+OPTIONAL_BUILDINGS = (
+    ('upgrade_hero_eradicator', 'Éradicateur de héros', 'radicateur'),
+    ('upgrade_explosive_catapult', 'Catapulte explosive', 'catapulte'),
+    ('upgrade_firespitter', 'Bougie incandescente', 'incandesc'),
+)
+
+
+def building_upgrade_enabled(app, title):
+    if not hero_upgrades_enabled(app) and is_hero_upgrade(title):
+        return False
+    label = canonical_title(title).replace('0', 'o').replace('1', 'l')
+    for field, name, token in OPTIONAL_BUILDINGS:
+        if (token in label or same_building_title(label, name)) and not getattr(app.settings, field, True):
+            return False
+    return True
+
+
 def is_wall_row(title):
     label = canonical_title(title)
     return 'mpart' in label or bool(re.fullmatch(r'x\d+', label))
@@ -518,10 +535,12 @@ def find_payable_upgrade(app, window, free, balances, include_town_hall=False, e
     unchanged = 0
     observations = []
     ambiguous_prices = []
-    for _ in range(5):
+    # Two independent reads establish agreement; the full scan below reads the
+    # first page again and still verifies the selected row and payment price.
+    for _ in range(2):
         seen_top = set()
         for item in suggested_items(app._capture(window), include_town_hall=include_town_hall):
-            if ((not hero_upgrades_enabled(app) and is_hero_upgrade(item[0]))
+            if ((not building_upgrade_enabled(app, item[0]))
                     or any(same_building_title(item[0], title) for title in excluded_titles or ())
                     or not can_start_upgrade(free, balances[0 if item[3]=='or' else 1], item[2])):
                 continue
@@ -540,7 +559,7 @@ def find_payable_upgrade(app, window, free, balances, include_town_hall=False, e
         app._trace('BÂTIMENTS',f'Page {page+1}/20 : lignes={items!r}')
         seen = set()
         for item in items:
-            if not hero_upgrades_enabled(app) and is_hero_upgrade(item[0]):
+            if not building_upgrade_enabled(app, item[0]):
                 continue
             if excluded_titles and any(same_building_title(item[0], title) for title in excluded_titles):
                 continue
@@ -601,7 +620,7 @@ def find_payable_upgrade(app, window, free, balances, include_town_hall=False, e
         for _ in range(4 if page == 0 else 1):
             menu = app._capture(window)
             for item in suggested_items(menu,include_others=True,include_town_hall=include_town_hall):
-                if not hero_upgrades_enabled(app) and is_hero_upgrade(item[0]):
+                if not building_upgrade_enabled(app, item[0]):
                     continue
                 if excluded_titles and any(same_building_title(item[0], title) for title in excluded_titles):
                     continue
@@ -628,6 +647,9 @@ def find_payable_upgrade(app, window, free, balances, include_town_hall=False, e
 
 def perform_direct_upgrade(app, window, title, cost, resource):
     """Reopen and recheck a special panel before its direct payment click."""
+    if not building_upgrade_enabled(app, title):
+        app.events.put(f'{title} ignoré dans les réglages : aucune dépense envoyée.')
+        return None
     m = engine()
     app._wall_click(window,(88.4,7.5),'fermer la confirmation directe')
     if hero_roster_open(app._capture(window)):
@@ -775,10 +797,10 @@ def upgrade_suggested(app, window, max_upgrades=5):
             return completed
         title, y, cost, resource = choice
         app._trace('BÂTIMENTS',f'Sélection : {title!r} à y={y:.2f} %, coût={cost} {resource}')
-        if not hero_upgrades_enabled(app) and is_hero_upgrade(title):
-            app.events.put('Amélioration des héros désactivée : aucune dépense envoyée.')
-            app._wall_click(window, m.BUILDERS_BUTTON, 'fermer la liste des héros exclus')
-            return completed
+        if not building_upgrade_enabled(app, title):
+            app.events.put(f'{title} ignoré dans les réglages : aucune sélection envoyée.')
+            skipped_titles.add(title)
+            continue
         if is_town_hall(title) and not allow_town_hall:
             raise RuntimeError('Hôtel de ville exclu des améliorations automatiques.')
         # The list can move after the row is found; confirm its current

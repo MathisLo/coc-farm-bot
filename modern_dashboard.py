@@ -27,6 +27,9 @@ FIELDS = {
     "and_rule": "and_rule", "dry_run": "dry_run",
     "upgrade_wall": "upgrade_wall",
     "upgrade_recommended": "upgrade_recommended", "upgrade_heroes": "upgrade_heroes",
+    "upgrade_hero_eradicator": "upgrade_hero_eradicator",
+    "upgrade_explosive_catapult": "upgrade_explosive_catapult",
+    "upgrade_firespitter": "upgrade_firespitter",
     "chain_attacks": "chain_attacks",
 }
 
